@@ -19,7 +19,7 @@ Targets **Linux, macOS and Windows**, built in Rust on
 ```
 crates/
   ferret/      # native binary: bootstrap, window, menus, actions  (bin `ferret`)
-  ferret-ui/   # views, components, theme tokens                   (lib `ferret-ui`)
+  ferret-ui/   # views and Ferret-specific theme tokens            (lib `ferret-ui`)
 docs/
   plan.html    # product + architecture plan
 ```
@@ -45,14 +45,29 @@ Quit with **⌘Q** / **Ctrl+Q**.
 
 | Platform | Notes |
 | --- | --- |
-| macOS | Xcode Command Line Tools. |
+| macOS | Xcode Command Line Tools are enough — see below. |
 | Linux | Wayland and X11 backends are both enabled; needs the usual GPUI dev packages (Vulkan loader, `libxkbcommon`, `fontconfig`). |
 | Windows | MSVC toolchain. |
+
+Building GPUI on macOS normally needs the Metal shader compiler, which ships only
+inside **full Xcode** — with Command Line Tools alone, `gpui_macos`'s build script
+fails with `xcrun: error: unable to find utility "metal"`. Ferret enables
+`gpui_platform`'s `runtime_shaders` feature, which stitches the shaders and compiles
+them at runtime instead, so Command Line Tools suffice. If you remove that feature,
+you need full Xcode and `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer`.
 
 ## Stack
 
 - [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) + `gpui_platform`, tracked from Zed's Git repository and pinned by `Cargo.lock`.
 - [gpui-component](https://github.com/longbridge/gpui-component) for tables, docks, inputs, Markdown and syntax highlighting.
+
+The bootstrap in `crates/ferret/src/main.rs` follows `gpui-component`'s required
+setup, all four parts of which are load-bearing:
+
+1. `.with_assets(Assets)` — registers the SVGs behind `IconName`; without it every icon is blank.
+2. `gpui_component::init(cx)` — must run before any component type is constructed.
+3. The window opens from a spawned task.
+4. The window's first entity is a `Root`, which hosts the layers that dialogs, popovers, notifications and tooltips render into.
 
 ## Licence
 

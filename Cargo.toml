@@ -19,8 +19,18 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     "font-kit",
     "wayland",
     "x11",
+    # Stitch the Metal shaders and compile them at runtime instead of invoking
+    # `xcrun metal` from gpui_macos's build script. Without this, building on macOS
+    # requires the Metal compiler, which ships only inside full Xcode — Command Line
+    # Tools alone fail with `unable to find utility "metal"`. `gpui-base` already
+    # turns this on transitively; we declare it so the macOS build does not silently
+    # depend on a feature some other crate happens to enable.
+    "runtime_shaders",
 ] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+# Embedded SVGs backing `IconName`. Without registering these as the app's asset
+# source, every gpui-component icon renders empty.
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 ferret-ui = { path = "crates/ferret-ui" }
 

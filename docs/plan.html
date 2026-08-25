@@ -665,7 +665,7 @@ footer {
     <li>Sidebar, preview pane and terminal panel are each independently collapsible, and each remembers its width or height across sessions.</li>
     <li>Every divider is drag-resizable. Terminal is horizontal-split under the file pane; preview is vertical-split to the right of it.</li>
     <li>Dual pane (F-05) splits the file pane itself, leaving one shared preview and one terminal per pane.</li>
-    <li>The window uses a transparent, blurred background where the OS supports it, so chrome surfaces must stay translucent. This is already enforced by <code>Theme::window_fill()</code>.</li>
+    <li>The window draws its own title bar on an opaque themed background. Blur and vibrancy are deliberately unused (D-15), so no surface may depend on translucency.</li>
     <li>Minimum usable window is 760 × 480; below that, the preview pane collapses first, then the sidebar.</li>
   </ul>
 
@@ -1591,7 +1591,7 @@ footer {
         <tr>
           <td>Window blur / vibrancy (§3)</td>
           <td class="part">compositor-dependent</td><td class="yes">native</td><td class="part">Mica / Acrylic, version-gated</td>
-          <td>Degrade to an opaque themed background. The theme must be legible without blur.</td>
+          <td>Not used. The design is legible on an opaque themed background; blur stays an optional macOS enhancement nothing depends on.</td>
         </tr>
         <tr>
           <td>Shell integration (F-70)</td>
@@ -1615,8 +1615,8 @@ footer {
         </tr>
         <tr>
           <td>Metal shader build</td>
-          <td class="yes">n/a</td><td class="part">needs full Xcode</td><td class="yes">n/a</td>
-          <td>Building on macOS requires the Metal compiler from Xcode; Command Line Tools alone are not enough. Document in the README and pin in CI.</td>
+          <td class="yes">n/a</td><td class="yes">solved</td><td class="yes">n/a</td>
+          <td>GPUI normally compiles its Metal shaders with <code>xcrun metal</code>, which ships only inside full Xcode. <code>gpui_platform</code>'s <code>runtime_shaders</code> feature stitches and compiles them at runtime instead, so Command Line Tools are enough — see D-13.</td>
         </tr>
       </tbody>
     </table>
@@ -1703,6 +1703,21 @@ footer {
           <td>Settings are a human-editable JSON file; the settings UI is a view over it.</td>
           <td>Matches the audience. Anything the UI can set must be expressible in the file, and external edits reload live.</td>
         </tr>
+        <tr>
+          <td class="id">D-13</td>
+          <td>Enable <code>gpui_platform</code>'s <code>runtime_shaders</code> feature explicitly.</td>
+          <td>Without it, <code>gpui_macos</code>'s build script calls <code>xcrun metal</code>, which exists only inside full Xcode — Command Line Tools alone fail with <code>unable to find utility "metal"</code>. <code>runtime_shaders</code> stitches the shaders and compiles them at runtime, so contributors need only the Command Line Tools. <code>gpui-base</code> already enables it transitively; declaring it ourselves means the macOS build does not silently depend on a feature another crate happens to turn on. <strong>Cost:</strong> shader compilation moves to first launch.</td>
+        </tr>
+        <tr>
+          <td class="id">D-14</td>
+          <td>Interface colours come from <code>gpui-component</code>'s theme; <code>ferret-ui</code> defines only what it lacks.</td>
+          <td>Resolves Q-07. Adopting <code>cx.theme()</code> wholesale gives light and dark, semantic tokens and component consistency for free, and keeping a parallel palette would guarantee drift. <code>ferret-ui</code> keeps only the terminal's sixteen ANSI slots and the file- and git-state colours, which the component theme has no concept of.</td>
+        </tr>
+        <tr>
+          <td class="id">D-15</td>
+          <td>No window blur or vibrancy.</td>
+          <td>The starter scaffold forced <code>WindowBackgroundAppearance::Blurred</code> with a transparent root fill. That constrains every surface to translucency for an effect that is compositor-dependent on Linux and version-gated on Windows. Ferret draws on an opaque themed background; blur can return later as a macOS-only enhancement.</td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -1726,10 +1741,12 @@ footer {
       <p class="dep">depends on: —</p>
       <ul>
         <li>Workspace renamed to <code>ferret</code> / <code>ferret-ui</code>, edition 2024, GPL-3.0.</li>
-        <li><code>gpui-component</code> wired into the dependency graph and proven to resolve against the same <code>gpui</code> instance.</li>
+        <li><code>gpui-component</code> wired in and proven to resolve against the same <code>gpui</code> instance, with the four-part bootstrap contract in place: assets registered, <code>init(cx)</code> called, window opened from a task, root entity is a <code>Root</code>.</li>
+        <li>Hand-rolled <code>Button</code> and <code>Theme</code> dropped in favour of the component library (D-14); <code>ferret-ui</code> keeps only the terminal ANSI palette.</li>
+        <li><code>runtime_shaders</code> enabled so macOS builds without full Xcode (D-13).</li>
         <li><code>justfile</code>, <code>AGENTS.md</code> and this plan in place.</li>
       </ul>
-      <p class="accept"><b>Done when</b> <code>cargo check --workspace</code> passes and the app opens a window.</p>
+      <p class="accept"><b>Done when</b> <code>cargo check --workspace --all-targets</code> passes and the app opens a themed window rendering a <code>gpui-component</code> title bar and button.</p>
     </div>
   </div>
 
@@ -1908,9 +1925,9 @@ footer {
         </tr>
         <tr>
           <td class="id">R-07</td>
-          <td>Build friction discourages contributors: a Git GPUI dependency, a long first build, and full Xcode required on macOS.</td>
+          <td>Build friction discourages contributors: a Git GPUI dependency and a long first build.</td>
           <td><span class="pill p-warn">medium</span></td>
-          <td>Document prerequisites precisely in the README. Provide a devcontainer or Nix flake. Cache the Cargo registry and Git checkouts in CI.</td>
+          <td>The worst of it — full Xcode on macOS — is removed by D-13. Document the rest precisely in the README. Provide a devcontainer or Nix flake. Cache the Cargo registry and Git checkouts in CI.</td>
         </tr>
         <tr>
           <td class="id">R-08</td>
@@ -1940,7 +1957,7 @@ footer {
         <tr><td class="id">Q-04</td><td>Is undo (F-60) full or partial? Undoing a move is easy; undoing a delete-to-trash is possible; undoing an overwrite is not without a staging copy. Where is the line, and how is it communicated?</td><td>Phase 6</td></tr>
         <tr><td class="id">Q-05</td><td>Does the terminal support multiple sessions per tab, or exactly one? Multiple means tabs-within-tabs and a more complex sync model (F-11).</td><td>Phase 2</td></tr>
         <tr><td class="id">Q-06</td><td>What is the app actually called, and what is its icon? "Ferret" is the working name from the repository directory. Confirm the name is unencumbered before packaging (F-85).</td><td>Phase 9</td></tr>
-        <tr><td class="id">Q-07</td><td>Do we adopt <code>gpui-component</code>'s theme system wholesale, or layer Ferret tokens on top? The current <code>Theme</code> struct in <code>ferret-ui</code> predates the decision and will need reconciling.</td><td>Phase 1</td></tr>
+        <tr><td class="id">Q-07</td><td><s>Do we adopt <code>gpui-component</code>'s theme system wholesale, or layer Ferret tokens on top?</s> <strong>Answered:</strong> adopted wholesale — see D-14.</td><td><span class="pill p-done">closed</span></td></tr>
         <tr><td class="id">Q-08</td><td>Which Linux desktop file managers get "Open in Ferret" integration (F-70), and is a generic <code>.desktop</code> action enough for most of them?</td><td>Phase 9</td></tr>
       </tbody>
     </table>

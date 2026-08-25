@@ -14,4 +14,6 @@ path = "src/main.rs"
 [dependencies]
 ferret-ui.workspace = true
 gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
 gpui_platform.workspace = true

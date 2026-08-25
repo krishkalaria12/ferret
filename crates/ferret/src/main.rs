@@ -1,16 +1,22 @@
 use ferret_ui::RootView;
 use gpui::{
-    App, Bounds, KeyBinding, Menu, MenuItem, QuitMode, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, actions, prelude::*, px, size,
+    App, AppContext as _, KeyBinding, Menu, MenuItem, QuitMode, WindowBounds, WindowOptions,
+    actions, px, size,
 };
-use gpui_platform::application;
+use gpui_component::{Root, TitleBar};
+use gpui_component_assets::Assets;
 
 actions!(ferret, [Quit]);
 
 fn main() {
-    application()
+    // `Assets` supplies the SVGs behind `IconName`; without it every icon is blank.
+    gpui_platform::application()
+        .with_assets(Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
+            // Must run before any gpui-component type is constructed.
+            gpui_component::init(cx);
+
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
@@ -19,30 +25,33 @@ fn main() {
             cx.set_menus([Menu::new("Ferret").items([MenuItem::action("Quit Ferret", Quit)])]);
 
             open_main_window(cx);
-            cx.activate(true);
         });
 }
 
 fn open_main_window(cx: &mut App) {
-    let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+    // `TitleBar::window_options()` is the required base for a window that draws its own
+    // title bar: it makes the title bar own dragging and double-click instead of the OS.
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+        window_min_size: Some(size(px(760.), px(480.))),
+        app_id: Some("dev.ferret.Ferret".into()),
+        ..TitleBar::window_options()
+    };
 
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(760.), px(480.))),
-            window_background: WindowBackgroundAppearance::Blurred,
-            app_id: Some("dev.ferret.Ferret".into()),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Ferret".into()),
-                appears_transparent: true,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        |window, cx| {
-            window.set_background_appearance(WindowBackgroundAppearance::Blurred);
-            cx.new(|cx| RootView::new(window, cx))
-        },
-    )
-    .expect("failed to open the Ferret window");
+    // Opening from a spawned task lets gpui-component finish loading its theme and
+    // assets before the first frame is built.
+    cx.spawn(async move |cx| {
+        cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| RootView::new(window, cx));
+            // The first entity in the window must be a `Root`; it hosts the layers
+            // that dialogs, popovers, notifications and tooltips render into.
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("failed to open the Ferret window");
+
+        // Must follow `open_window`: activating before the window exists brings a
+        // windowless app to the front and leaves Ferret behind whatever was focused.
+        cx.update(|cx| cx.activate(true));
+    })
+    .detach();
 }

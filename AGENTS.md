@@ -21,10 +21,9 @@ product feature is implemented. The product and architecture design lives in
 │   ├── ferret/           # Native binary bootstrap  (bin `ferret`)
 │   │   ├── assets/       # Application icon files
 │   │   └── src/main.rs   # Application, menu, keybindings, window setup
-│   └── ferret-ui/        # Views, components, theme
+│   └── ferret-ui/        # Views and Ferret-specific theme tokens
 │       ├── src/lib.rs    # Public API and RootView
-│       ├── src/button.rs # Button component and variants
-│       ├── src/theme.rs  # Runtime theme tokens
+│       ├── src/theme.rs  # Terminal ANSI palette (interface colours come from gpui-component)
 │       └── themes/groknight.json
 ├── docs/plan.html        # Product + architecture plan
 └── README.md
@@ -129,17 +128,34 @@ the UI crate's internal file layout.
 
 - `RootView` owns application UI state.
 - `impl Render for RootView` derives the current element tree from that state.
-- Reusable, value-like components such as `Button` use `#[derive(IntoElement)]` and `RenderOnce`.
+- Reusable, value-like components use `#[derive(IntoElement)]` and `RenderOnce`.
 - Event handlers that mutate a view should be created with `cx.listener(...)`.
 - After mutating render-relevant state, call `cx.notify()` to request another render.
 - Stable element IDs are important for interactive elements.
-- The root fill remains transparent because the window uses `WindowBackgroundAppearance::Blurred`.
+- Interface colours come from `cx.theme()` (`gpui_component::ActiveTheme`), never from literals.
+
+### The bootstrap contract
+
+`crates/ferret/src/main.rs` follows `gpui-component`'s required setup. All four
+parts are load-bearing; removing any one fails at runtime, not at compile time:
+
+1. `.with_assets(Assets)` on the application — supplies the SVGs behind `IconName`. Without it every icon renders blank.
+2. `gpui_component::init(cx)` inside `run` — must precede construction of any component type.
+3. The window opens from a spawned task, so the theme and assets are loaded before the first frame.
+4. The window's first entity is `Root::new(view, window, cx)` — it hosts the layers dialogs, popovers, notifications and tooltips render into. A dialog mounted under a non-`Root` window silently does not appear.
+
+`cx.activate(true)` must run *after* `open_window`, inside the same task. Calling
+it earlier activates a windowless app and leaves Ferret behind whatever had focus.
+
+Windows that draw their own title bar must build their `WindowOptions` from
+`TitleBar::window_options()`, which sets `app_owns_titlebar_drag`.
 
 ### State update example
 
 ```rust
-Button::new("save-button", "Save")
-    .theme(theme)
+Button::new("save-button")
+    .primary()
+    .label("Save")
     .on_click(cx.listener(|this, _, _, cx| {
         this.clicks += 1;
         cx.notify();
@@ -171,21 +187,26 @@ and current compiler errors as authoritative.
 
 ## Theme and Visual Changes
 
-Runtime theme values live in `crates/ferret-ui/src/theme.rs`. The palette in
-`crates/ferret-ui/themes/groknight.json` is bundled/reference theme data and
-mirrors the same colors. If a shared palette color changes, check whether both
-files should stay aligned.
+**General interface colours come from `gpui-component`.** Use `cx.theme().background`,
+`.foreground`, `.muted_foreground`, `.border`, `.radius` and friends. Do not add a
+token to `ferret-ui` for something the component theme already names.
+
+`crates/ferret-ui/src/theme.rs` holds only what `gpui-component` has no concept of:
+the sixteen ANSI slots the terminal panel needs, and the colours that encode file
+and git state in the browser. The palette in
+`crates/ferret-ui/themes/groknight.json` mirrors `TerminalPalette::groknight()`; if
+one changes, change both.
 
 Preserve these visual constraints unless the task explicitly changes the design:
 
-- `Theme::window_fill()` must remain fully transparent for system blur to show through.
-- Chrome surfaces use translucent colors rather than opaque replacements.
-- Components should use `Theme` tokens instead of scattering unrelated color literals.
-- Interactive components should define normal, hover, active, and disabled states when applicable.
-- Text and controls should retain readable contrast on the blurred background.
+- Components use theme tokens instead of scattering colour literals.
+- Interactive components define normal, hover, active, and disabled states when applicable.
+- Ferret ships a light theme as well as a dark one. Any new token must be defined for both; never hard-code a colour that only reads correctly in one appearance.
 
-Ferret ships a light theme as well as a dark one. Any new token must be defined
-for both; never hard-code a color that only reads correctly in one appearance.
+Window vibrancy or blur is **not** currently used. It is unreliable outside macOS
+(compositor-dependent on Linux, version-gated on Windows), so the design must be
+legible on an opaque themed background. Treat blur as an optional macOS
+enhancement, never as something a layout depends on.
 
 ## Desktop and Window Changes
 
@@ -234,10 +255,12 @@ place to add tests in this project — write them against a temp directory.
 - Making a UI module public instead of re-exporting a small API from `lib.rs`.
 - Mutating view state without calling `cx.notify()`.
 - Using duplicate or unstable IDs for clickable elements.
-- Replacing transparent window fills with opaque backgrounds and disabling blur.
+- Adding a `ferret-ui` theme token that duplicates one `cx.theme()` already provides.
 - Updating `theme.rs` while forgetting the corresponding bundled palette, or vice versa.
 - Hand-rolling a widget `gpui-component` already provides.
+- Breaking the bootstrap contract above — every failure mode there is silent at compile time.
 - Adding a `rev` to `gpui` without pinning `gpui-component` to a matching commit.
+- Dropping `gpui_platform`'s `runtime_shaders` feature, which is what lets macOS build without full Xcode.
 - Assuming macOS path, permission or shell semantics.
 - Running only `cargo check` and skipping visual verification for a visible change.
 - Creating a new workspace crate before there is code to put in it.

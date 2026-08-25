@@ -1781,6 +1781,8 @@ version = "0.1.0"
 dependencies = [
  "ferret-ui",
  "gpui",
+ "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
 ]
 
