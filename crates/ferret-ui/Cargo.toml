@@ -1,0 +1,13 @@
+[package]
+name = "ferret-ui"
+description = "Ferret views, panels, components and theme tokens."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gpui.workspace = true
+
+gpui-component.workspace = true

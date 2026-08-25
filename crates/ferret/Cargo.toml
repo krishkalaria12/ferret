@@ -1,0 +1,17 @@
+[package]
+name = "ferret"
+description = "Ferret — an open-source, cross-platform file manager with a terminal that follows you."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ferret"
+path = "src/main.rs"
+
+[dependencies]
+ferret-ui.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true

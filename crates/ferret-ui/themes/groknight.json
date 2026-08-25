@@ -1,0 +1,37 @@
+{
+  "name": "Groknight",
+  "appearance": "dark",
+  "terminal": {
+    "foreground": "#e1e1e1",
+    "background": "#141414",
+    "cursor": "#c8c8c8",
+    "black": "#0a0a0a",
+    "red": "#f7768e",
+    "green": "#9ece6a",
+    "yellow": "#e0af68",
+    "blue": "#7aa2f7",
+    "magenta": "#bb9af7",
+    "cyan": "#7dcfff",
+    "white": "#c8c8c8",
+    "bright_black": "#787878",
+    "bright_red": "#ff8fa3",
+    "bright_green": "#b9f27c",
+    "bright_yellow": "#ffc777",
+    "bright_blue": "#89b4fa",
+    "bright_magenta": "#cba6f7",
+    "bright_cyan": "#89ddff",
+    "bright_white": "#f3f3f3"
+  },
+  "chrome": {
+    "sidebar_bg": "#10101066",
+    "main_bg": "#1414144d",
+    "surface": "#1a1a1ab3",
+    "surface_raised": "#222222cc",
+    "border": "#2a2a2a99",
+    "muted": "#787878",
+    "muted_strong": "#9a9a9a",
+    "hover": "#1e1e1e99",
+    "selected": "#252525a6",
+    "accent": "#7aa2f7"
+  }
+}

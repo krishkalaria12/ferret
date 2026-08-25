@@ -1,0 +1,2066 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferret — Product &amp; Architecture Plan</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens. Palette is the project's own Groknight theme
+   (crates/ferret-ui/themes/groknight.json) so the plan and the app agree.
+   Neutrals are tinted a few degrees toward the blue accent, never dead grey.
+   --------------------------------------------------------------------------- */
+:root {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+
+  --measure: 68ch;
+  --rail: 16.5rem;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --accent:      #7aa2f7;
+    --accent-soft: #18202f;
+    --accent-line: #2c405f;
+
+    --ok:   #9ece6a;
+    --warn: #e0af68;
+    --risk: #f7768e;
+    --violet: #bb9af7;
+
+    --ground:  #101116;
+    --panel:   #16181e;
+    --sunken:  #1b1e25;
+    --rule:    #2a2e38;
+    --rule-soft: #22252d;
+
+    --ink:     #e3e5ea;
+    --ink-mid: #a3a8b5;
+    --ink-dim: #767c8b;
+  }
+}
+
+:root[data-theme="dark"] {
+  --accent:      #7aa2f7;
+  --accent-soft: #18202f;
+  --accent-line: #2c405f;
+
+  --ok:   #9ece6a;
+  --warn: #e0af68;
+  --risk: #f7768e;
+  --violet: #bb9af7;
+
+  --ground:  #101116;
+  --panel:   #16181e;
+  --sunken:  #1b1e25;
+  --rule:    #2a2e38;
+  --rule-soft: #22252d;
+
+  --ink:     #e3e5ea;
+  --ink-mid: #a3a8b5;
+  --ink-dim: #767c8b;
+}
+
+:root[data-theme="light"] {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Type scale ---------------------------------------------------------- */
+h1, h2, h3, h4 {
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  margin: 0;
+}
+h1 { font-size: clamp(1.9rem, 4.4vw, 2.9rem); line-height: 1.1; letter-spacing: -0.035em; }
+h2 { font-size: clamp(1.3rem, 2.6vw, 1.6rem); line-height: 1.2; }
+h3 { font-size: 1.06rem; letter-spacing: -0.005em; }
+h4 { font-size: .94rem; letter-spacing: 0; }
+
+p, li { max-width: var(--measure); }
+p { margin: 0 0 .9rem; }
+ul, ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+li { margin-bottom: .35rem; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+code, kbd, .mono { font-family: var(--mono); }
+code {
+  font-size: .875em;
+  background: var(--sunken);
+  border: 1px solid var(--rule-soft);
+  padding: .05em .34em;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+kbd {
+  font-size: .8em;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  padding: .1em .4em;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* --- Shell --------------------------------------------------------------- */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: var(--gutter);
+  max-width: 78rem;
+  margin: 0 auto;
+  padding: 0 var(--gutter) 6rem;
+}
+
+/* Section nav, drawn as the directory tree the app itself browses. */
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 2.25rem 0 2rem;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.5;
+}
+.rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .5rem;
+  padding-bottom: .75rem;
+  margin-bottom: .75rem;
+  border-bottom: 1px solid var(--rule);
+}
+.rail-head b { font-size: .95rem; letter-spacing: -.02em; }
+.rail nav ol { list-style: none; margin: 0; padding: 0; }
+.rail nav li { margin: 0; max-width: none; }
+.rail nav a {
+  display: block;
+  padding: .28rem .5rem .28rem 1.35rem;
+  color: var(--ink-mid);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  position: relative;
+  overflow-wrap: anywhere;
+}
+.rail nav a::before {
+  content: "├─";
+  position: absolute;
+  left: .18rem;
+  color: var(--ink-dim);
+  opacity: .55;
+}
+.rail nav li:last-child a::before { content: "└─"; }
+.rail nav a:hover { color: var(--ink); background: var(--sunken); }
+.rail nav a.is-current {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.doc { padding-top: 2.25rem; min-width: 0; }
+
+/* --- Masthead ------------------------------------------------------------ */
+.masthead { padding: 1.5rem 0 2.25rem; border-bottom: 1px solid var(--rule); margin-bottom: 2.5rem; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin: 0 0 .85rem;
+}
+.masthead .lede {
+  font-size: 1.12rem;
+  color: var(--ink-mid);
+  margin: 1rem 0 0;
+  max-width: 58ch;
+}
+/* Explicit column counts, not auto-fit: 6 facts must always fill whole rows,
+   or the leftover tracks show the divider colour and read as an empty cell. */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 2rem;
+}
+@media (min-width: 46rem) {
+  .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.facts div { background: var(--panel); padding: .8rem .95rem; }
+.facts dt {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: .3rem;
+}
+.facts dd { margin: 0; font-size: .9rem; font-weight: 500; }
+
+/* --- Sections ------------------------------------------------------------ */
+section { padding-top: 3.25rem; }
+section > h2 { margin-bottom: .3rem; }
+.sec-tag {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .08em;
+  color: var(--ink-dim);
+  display: block;
+  margin-bottom: .45rem;
+}
+.sec-intro { color: var(--ink-mid); margin-top: .85rem; }
+h3 { margin-top: 2rem; margin-bottom: .5rem; }
+h4 { margin-top: 1.4rem; margin-bottom: .35rem; }
+
+/* --- Tables -------------------------------------------------------------- */
+.scroller { overflow-x: auto; margin: 1.1rem 0 1.4rem; border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: .875rem; min-width: 34rem; }
+/* Five-column tables need room; let them scroll inside .scroller rather than crush. */
+table.wide { min-width: 54rem; }
+caption {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  padding: .7rem .85rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunken);
+}
+th, td { text-align: left; padding: .55rem .85rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-weight: 600;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--sunken); }
+td.num, th.num { font-variant-numeric: tabular-nums; }
+td.id { font-family: var(--mono); font-size: .8rem; color: var(--ink-dim); white-space: nowrap; }
+td.crate, th.crate { font-family: var(--mono); font-size: .8rem; }
+
+/* --- Feature entries ----------------------------------------------------- */
+.feat {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  margin: .55rem 0;
+  background: var(--panel);
+}
+.feat > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: .7rem .9rem;
+  display: grid;
+  grid-template-columns: 4.3rem minmax(0, 1fr) auto;
+  gap: .8rem;
+  align-items: baseline;
+}
+.feat > summary::-webkit-details-marker { display: none; }
+.feat > summary::after {
+  content: "+";
+  font-family: var(--mono);
+  color: var(--ink-dim);
+  font-size: 1rem;
+  line-height: 1;
+}
+.feat[open] > summary::after { content: "\2212"; }
+.feat[open] > summary { border-bottom: 1px solid var(--rule-soft); }
+.feat > summary:hover { background: var(--sunken); }
+.feat .fid { font-family: var(--mono); font-size: .78rem; color: var(--accent); letter-spacing: .02em; }
+.feat .fname { font-weight: 600; font-size: .95rem; }
+.feat .fbody { padding: .95rem .9rem .3rem; }
+.feat .fbody p, .feat .fbody li { max-width: 62ch; }
+.feat dl.meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: .3rem .9rem;
+  margin: .9rem 0 .3rem;
+  padding-top: .8rem;
+  border-top: 1px dashed var(--rule);
+  font-size: .84rem;
+}
+.feat dl.meta dt {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  padding-top: .15rem;
+}
+.feat dl.meta dd { margin: 0; overflow-wrap: anywhere; }
+
+/* --- Pills --------------------------------------------------------------- */
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  padding: .12rem .45rem;
+  border-radius: 3px;
+  border: 1px solid;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.p-core   { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.p-done   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent);   background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.p-later  { color: var(--ink-dim); border-color: var(--rule); background: var(--sunken); }
+.p-risky  { color: var(--risk); border-color: color-mix(in srgb, var(--risk) 40%, transparent); background: color-mix(in srgb, var(--risk) 10%, transparent); }
+.p-warn   { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+.yes { color: var(--ok); font-weight: 600; }
+.no  { color: var(--ink-dim); }
+.part { color: var(--warn); }
+
+/* --- Callouts ------------------------------------------------------------ */
+.note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: .85rem 1rem;
+  border-radius: 0 5px 5px 0;
+  margin: 1.2rem 0;
+  font-size: .92rem;
+}
+.note.risk { border-left-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, transparent); }
+.note.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.note > :last-child { margin-bottom: 0; }
+.note strong { font-family: var(--mono); font-size: .82rem; letter-spacing: .05em; text-transform: uppercase; display: block; margin-bottom: .3rem; }
+
+/* --- Window anatomy diagram ---------------------------------------------- */
+.anatomy {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+  margin: 1.3rem 0 .5rem;
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.an-row { display: flex; }
+.an-cell {
+  padding: .55rem .7rem;
+  border-right: 1px solid var(--rule-soft);
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-mid);
+  min-width: 0;
+}
+.an-cell:last-child { border-right: 0; }
+.an-cell b { display: block; color: var(--ink); font-weight: 600; letter-spacing: -.01em; }
+.an-cell span { color: var(--ink-dim); }
+.an-title { background: var(--sunken); }
+
+/* --- Phases -------------------------------------------------------------- */
+.phase {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  margin: .8rem 0;
+  background: var(--panel);
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0 1rem;
+}
+.phase .pn {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--violet);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.phase h3 { margin: 0 0 .15rem; }
+.phase .dep {
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-dim);
+  margin-bottom: .6rem;
+}
+.phase ul { margin-bottom: .6rem; }
+.phase .accept {
+  font-size: .86rem;
+  border-top: 1px dashed var(--rule);
+  padding-top: .6rem;
+  color: var(--ink-mid);
+  max-width: 62ch;
+}
+.phase .accept b {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Theme toggle -------------------------------------------------------- */
+#theme {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  background: var(--panel);
+  color: var(--ink-mid);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: .2rem .45rem;
+  cursor: pointer;
+  flex: none;
+}
+#theme:hover { color: var(--ink); border-color: var(--accent-line); }
+
+footer {
+  margin-top: 4rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--ink-dim);
+}
+
+/* --- Narrow -------------------------------------------------------------- */
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .rail {
+    position: static;
+    max-height: none;
+    padding: 1.5rem 0 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .rail nav ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .2rem;
+    padding-bottom: 1rem;
+  }
+  .rail nav a { padding: .2rem .5rem; border-left: 0; border-radius: 4px; }
+  .rail nav a::before, .rail nav li:last-child a::before { content: none; }
+  .doc { padding-top: 1.5rem; }
+  .feat > summary { grid-template-columns: 4.3rem minmax(0, 1fr); }
+  .feat > summary::after { grid-column: 2; justify-self: end; margin-top: -1.4rem; }
+  .an-row { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-head">
+    <b>ferret/plan</b>
+    <button id="theme" type="button" aria-label="Switch colour theme">theme</button>
+  </div>
+  <nav aria-label="Sections">
+    <ol>
+      <li><a href="#summary">summary</a></li>
+      <li><a href="#scope">scope &amp; non-goals</a></li>
+      <li><a href="#surface">product surface</a></li>
+      <li><a href="#features">feature catalogue</a></li>
+      <li><a href="#architecture">crate architecture</a></li>
+      <li><a href="#platforms">platform matrix</a></li>
+      <li><a href="#decisions">decisions</a></li>
+      <li><a href="#phases">delivery phases</a></li>
+      <li><a href="#risks">risks</a></li>
+      <li><a href="#questions">open questions</a></li>
+      <li><a href="#references">references</a></li>
+    </ol>
+  </nav>
+</aside>
+
+<main class="doc">
+
+<header class="masthead">
+  <p class="eyebrow">Product &amp; architecture plan · rev 1 · 25 Aug 2026</p>
+  <h1>Ferret</h1>
+  <p class="lede">An open-source, cross-platform file manager with a terminal that follows you. Rust, GPUI, GPL-3.0.</p>
+  <dl class="facts">
+    <div><dt>Status</dt><dd>Scaffolding — no feature built</dd></div>
+    <div><dt>Targets</dt><dd>Linux · macOS · Windows</dd></div>
+    <div><dt>Stack</dt><dd>Rust 2024 · GPUI · gpui-component</dd></div>
+    <div><dt>Reference product</dt><dd>Iruka 1.1.8.2 (macOS, paid)</dd></div>
+    <div><dt>Features catalogued</dt><dd class="num">46</dd></div>
+    <div><dt>Phases</dt><dd class="num">10 (0–9)</dd></div>
+  </dl>
+</header>
+
+<!-- ======================================================================= -->
+<section id="summary">
+  <span class="sec-tag">§1</span>
+  <h2>Summary</h2>
+  <p class="sec-intro">What we are building, and why it is worth building.</p>
+
+  <p>Ferret is a file manager for people who work in a shell. You browse folders in a
+  graphical pane; an embedded terminal is already <em>in</em> that folder. No <code>cd</code>.
+  Around that spine sit the things a developer actually needs from a file browser and
+  never gets: git status in the listing, grep-and-regex search over file contents,
+  real previews for Markdown and source code, SSH connections that mount as browsable
+  folders, and a queue that shows what your copies are doing.</p>
+
+  <p>The idea is not ours. <a href="https://iruka.dorienherremans.com/">Iruka</a> ships it
+  today — a paid, closed-source, macOS-only app, itself an homage to KDE's Dolphin.
+  Ferret's contribution is the two things Iruka is not: <strong>open source</strong> and
+  <strong>cross-platform</strong>. Linux users lose Dolphin's terminal panel the moment they
+  step outside KDE; Windows has no equivalent at all. That gap is the reason to build.</p>
+
+  <p>This document is the whole-product plan: the UI we are copying, every feature with
+  an ID, the crate architecture, per-OS hazards, the decisions already made, and the
+  order of work. Each feature will get its own detailed plan later; those plans should
+  cite the IDs used here.</p>
+
+  <div class="note">
+    <strong>How to read this</strong>
+    <p>Feature entries in §4 collapse and expand. Everything marked <span class="pill p-core">core</span>
+    is load-bearing for the product's identity — if it is cut, Ferret stops being Ferret.
+    <span class="pill p-later">later</span> means deliberately deferred past v1.0, not forgotten.</p>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="scope">
+  <span class="sec-tag">§2</span>
+  <h2>Scope &amp; non-goals</h2>
+  <p class="sec-intro">Drawing the line before any code is written.</p>
+
+  <h3>In scope for v1.0</h3>
+  <p>Feature parity with Iruka's five shipped roadmap phases — synced terminal, SSH,
+  Markdown preview, git control, Power Search, syntax-highlighted previews, dual pane,
+  in-place editing, cloud mounts, batch rename, operations queue, symlinks — running
+  natively on Linux, macOS and Windows, with a light and a dark theme.</p>
+
+  <h3>Explicit non-goals</h3>
+  <div class="scroller">
+    <table>
+      <caption>Deliberately not building</caption>
+      <thead><tr><th>Not building</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Licensing, activation, trial timers, payment</td><td>Ferret is GPL-3.0. There is nothing to unlock.</td></tr>
+        <tr><td>Sparkle-style in-app auto-update</td><td>Ship through the platforms people already use: GitHub Releases, Homebrew, Flatpak, AUR, winget, Scoop. Revisit only if release friction proves real.</td></tr>
+        <tr><td>Telemetry or analytics of any kind</td><td>A file manager sees every path you touch. It should phone home never.</td></tr>
+        <tr><td>Iruka's name, icon, artwork, copy or brand</td><td>Functional layout is fair to reimplement; identity assets are not. Ferret gets its own name, icon and words. Do not copy strings from Iruka's site into the app.</td></tr>
+        <tr><td>A general-purpose text editor</td><td>In-place editing (F-36) means quick fixes to a config file, not an IDE. Anything larger opens in the user's editor.</td></tr>
+        <tr><td>Mobile, web or a plugin runtime</td><td>Scope control. Revisit after v1.0.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note warn">
+    <strong>On cloning a commercial product</strong>
+    <p>Reimplementing a competitor's <em>functionality</em> and general window layout is ordinary
+    and legitimate. Copying its assets, icon, name, marketing copy or code is not. Ferret
+    should look like a native file manager of the same family — a three-pane browser over a
+    terminal, which Dolphin, Finder and Explorer all converge on anyway — without lifting
+    anything that identifies Iruka. Keep that line visible in code review.</p>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="surface">
+  <span class="sec-tag">§3</span>
+  <h2>Product surface</h2>
+  <p class="sec-intro">The window, region by region, derived from Iruka's published screenshots.</p>
+
+  <h3>Window anatomy</h3>
+  <div class="anatomy" role="img" aria-label="Diagram of the Ferret window: a title bar across the top; below it a left sidebar beside a main area containing a tab strip, path bar, file list with status bar, and a terminal panel; and a preview pane on the right.">
+    <div class="an-row">
+      <div class="an-cell an-title" style="flex:1">
+        <b>Title bar</b>
+        <span>window controls · back / forward / up · title · view-mode segmented control · toolbar (theme, search, new file, new folder, hidden files, refresh, toggle preview, toggle terminal, overflow)</span>
+      </div>
+    </div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 12.5rem">
+        <b>Sidebar</b>
+        <span>Places<br>Favorites<br>Connections&nbsp;<em>+</em><br>Volumes</span>
+      </div>
+      <div class="an-cell" style="flex:1.55">
+        <b>Tab strip</b><span>one tab per folder · <em>+</em></span>
+        <b style="margin-top:.5rem">Path bar</b><span>breadcrumb / editable path with autocomplete · inline filter</span>
+        <b style="margin-top:.5rem">File pane</b><span>list · column · icon &nbsp;|&nbsp; Name · Date Modified · Size · Kind · Cols…</span>
+        <b style="margin-top:.5rem">Status bar</b><span>N items · M selected — size &nbsp;|&nbsp; branch · ahead/behind · Pull · Commit…</span>
+        <b style="margin-top:.5rem">Terminal panel</b><span>header: title · SSH · Sync &nbsp;|&nbsp; PTY viewport</span>
+      </div>
+      <div class="an-cell" style="flex:1.2">
+        <b>Preview pane</b>
+        <span>Edit toggle<br><br>rendered Markdown · highlighted code · image · PDF · CSV grid</span>
+      </div>
+    </div>
+  </div>
+
+  <h3>Layout rules</h3>
+  <ul>
+    <li>Sidebar, preview pane and terminal panel are each independently collapsible, and each remembers its width or height across sessions.</li>
+    <li>Every divider is drag-resizable. Terminal is horizontal-split under the file pane; preview is vertical-split to the right of it.</li>
+    <li>Dual pane (F-05) splits the file pane itself, leaving one shared preview and one terminal per pane.</li>
+    <li>The window uses a transparent, blurred background where the OS supports it, so chrome surfaces must stay translucent. This is already enforced by <code>Theme::window_fill()</code>.</li>
+    <li>Minimum usable window is 760 × 480; below that, the preview pane collapses first, then the sidebar.</li>
+  </ul>
+
+  <h3>Visual language</h3>
+  <p>Ferret should read as native on each OS rather than as a macOS app ported twice.
+  In practice that means one layout with per-platform details: title bar controls follow
+  the host convention, the accent colour follows the system accent where one is exposed,
+  and the default monospace font differs per platform. Light and dark are equal
+  first-class themes — every token defined in both, no colour hard-coded for one.</p>
+</section>
+
+<!-- ======================================================================= -->
+<section id="features">
+  <span class="sec-tag">§4</span>
+  <h2>Feature catalogue</h2>
+  <p class="sec-intro">46 features in eight groups. IDs are stable; per-feature plans should reference them.</p>
+
+  <p>Each entry names the crate that will own it, the <code>gpui-component</code> parts it
+  should build on rather than hand-roll, and the phase it lands in. <em>Behaviour</em> notes
+  are the details that are easy to get wrong and expensive to retrofit.</p>
+
+  <!-- ---------------- Browsing ---------------- -->
+  <h3>4.1 Browsing &amp; navigation</h3>
+
+  <details class="feat" open>
+    <summary><span class="fid">F-01</span><span class="fname">Directory browsing &amp; view modes <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>The file pane, in three modes: <strong>list</strong> (columns: Name, Date Modified,
+      Size, Kind), <strong>column</strong> (Miller columns — parent, current, preview of
+      selection), and <strong>icon</strong> (grid of thumbnails). Directories expand inline
+      via a disclosure triangle in list mode.</p>
+      <p><em>Behaviour:</em> reading a directory must never block the frame. Entries stream
+      in; metadata (size, kind, git status, thumbnail) resolves asynchronously and fills in.
+      A 200,000-entry directory must scroll at full frame rate, which means virtualised rows
+      and no per-row allocation on scroll.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-vfs</code>, <code>ferret-ui</code></dd>
+        <dt>Components</dt><dd><code>table</code>, <code>virtual_list</code>, <code>tree</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-02</span><span class="fname">Smart path bar with autocomplete <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>A bar under the tab strip showing the current path. Click it and it becomes an
+      editable text field; type and it completes directory names inline with a dropdown of
+      matches. <kbd>Enter</kbd> navigates. Supports <code>~</code>, environment variables and
+      relative paths.</p>
+      <p><em>Behaviour:</em> completion is per-path-segment and case-insensitive on
+      case-insensitive filesystems only. It must handle Windows drive letters
+      (<code>C:\</code>), UNC paths (<code>\\server\share</code>) and remote VFS URIs
+      (<code>sftp://host/path</code>) through the same field.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code>, <code>ferret-vfs</code></dd>
+        <dt>Components</dt><dd><code>input</code>, <code>breadcrumb</code>, <code>popover</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-03</span><span class="fname">Tabs</span></summary>
+    <div class="fbody">
+      <p>One tab per folder, with a <em>+</em> button. Each tab owns its own history stack,
+      view mode, sort, scroll position, selection and terminal session.</p>
+      <p><em>Behaviour:</em> closing a tab kills its terminal session only after confirming
+      if a foreground process is running. Tabs restore on launch (F-83).</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code></dd>
+        <dt>Components</dt><dd><code>tab</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-04</span><span class="fname">Sidebar: Places, Favorites, Connections, Volumes</span></summary>
+    <div class="fbody">
+      <p>Four sections. <strong>Places</strong> is the OS's standard user directories (Home,
+      Desktop, Documents, Downloads, Music, Pictures, Applications). <strong>Favorites</strong>
+      is user-pinned folders, reorderable by drag. <strong>Connections</strong> lists saved SSH
+      and cloud endpoints with a <em>+</em> to add (F-20). <strong>Volumes</strong> lists mounted
+      drives with an eject affordance.</p>
+      <p><em>Behaviour:</em> dropping files onto a sidebar row copies or moves into that
+      target. Volumes must live-update on mount and unmount.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code>, <code>ferret-platform</code></dd>
+        <dt>Components</dt><dd><code>sidebar</code>, <code>tree</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-05</span><span class="fname">Dual-pane browsing</span></summary>
+    <div class="fbody">
+      <p>Split the file pane into two independent browsers side by side, each with its own
+      path, selection and history. <kbd>Tab</kbd> moves focus between them; copy and move
+      default to "the other pane".</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code></dd>
+        <dt>Components</dt><dd><code>resizable</code>, <code>dock</code></dd>
+        <dt>Phase</dt><dd>8</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-06</span><span class="fname">Per-folder view preferences</span></summary>
+    <div class="fbody">
+      <p>View mode, sort key, sort direction and visible columns are remembered per
+      directory and restored on return.</p>
+      <p><em>Behaviour:</em> stored in Ferret's own database keyed by canonical path, not in
+      dotfiles scattered across the user's disk. Needs an eviction policy so the store does
+      not grow without bound, and a "reset all folder views" action in settings.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-settings</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-07</span><span class="fname">Sorting, column configuration, inline filter</span></summary>
+    <div class="fbody">
+      <p>Click a column header to sort; a <em>Cols…</em> menu chooses which columns show.
+      A "Filter by name…" field above the list narrows the current listing live. Directories
+      sort before files by default, and sorting is natural (so <code>file10</code> follows
+      <code>file9</code>).</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code></dd>
+        <dt>Components</dt><dd><code>table</code>, <code>input</code>, <code>menu</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-08</span><span class="fname">Hidden files toggle</span></summary>
+    <div class="fbody">
+      <p>Toolbar button and shortcut to show or hide dotfiles. On Windows this must also
+      respect the <code>HIDDEN</code> and <code>SYSTEM</code> file attributes, not just a
+      leading dot.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-vfs</code>, <code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Terminal ---------------- -->
+  <h3>4.2 Terminal</h3>
+
+  <details class="feat" open>
+    <summary><span class="fid">F-10</span><span class="fname">Embedded terminal panel <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>A real, xterm-compatible terminal docked beneath the file pane. One PTY session per
+      tab. Full VT support: colours, mouse reporting, alternate screen, resize, scrollback,
+      clickable URLs, copy and paste.</p>
+      <p><em>Behaviour:</em> this is the feature that decides whether Ferret is credible. It
+      has to be a genuine terminal — <code>vim</code>, <code>htop</code>, <code>tmux</code> and
+      a TUI coding agent must all work — not a command runner with a log view. Plan for
+      <code>alacritty_terminal</code> as the VT parser and grid model, with our own GPUI
+      renderer on top.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-terminal</code></dd>
+        <dt>Reference</dt><dd>Zed's <code>crates/terminal</code> and <code>crates/terminal_view</code> are the closest working example of exactly this on GPUI.</dd>
+        <dt>Phase</dt><dd>2</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat" open>
+    <summary><span class="fid">F-11</span><span class="fname">Directory sync between UI and terminal <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>The signature feature. Navigate in the file pane and the terminal <code>cd</code>s
+      to match. A <em>Sync</em> toggle in the terminal header turns it off for when you are
+      deliberately somewhere else.</p>
+      <p><em>Behaviour:</em> sync must be safe. Never inject a <code>cd</code> while a
+      foreground process is running or the shell is on the alternate screen — queue it and
+      apply when the prompt returns. Paths must be shell-quoted. The reverse direction
+      (terminal <code>cd</code> updates the file pane) is the harder half: it needs OSC 7
+      working-directory reporting from the shell, with a fallback to reading
+      <code>/proc/&lt;pid&gt;/cwd</code> on Linux or <code>proc_pidinfo</code> on macOS. Windows
+      has neither, so OSC 7 is the only path there and we ship shell snippets for
+      PowerShell, bash, zsh and fish.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-terminal</code></dd>
+        <dt>Depends on</dt><dd>F-10</dd>
+        <dt>Phase</dt><dd>2</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-12</span><span class="fname">Terminal themes &amp; adjustable text size</span></summary>
+    <div class="fbody">
+      <p>Sixteen-colour ANSI palettes loaded from JSON, plus independent font-size control
+      for the terminal and for the rest of the interface. Groknight ships as the default
+      dark palette; it is already in <code>crates/ferret-ui/themes/groknight.json</code>.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-terminal</code>, <code>ferret-settings</code></dd>
+        <dt>Phase</dt><dd>2</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-13</span><span class="fname">SSH terminal that follows a mounted remote folder</span></summary>
+    <div class="fbody">
+      <p>While browsing an SFTP mount, a network button in the terminal header opens a real
+      SSH session that lands in the remote folder you are viewing and keeps following you as
+      you navigate.</p>
+      <p><em>Behaviour:</em> the interactive session shells out to the system
+      <code>ssh</code> binary so the user's <code>~/.ssh/config</code>, agent, jump hosts and
+      MFA all work unchanged. Only the <em>browsing</em> half uses an in-process SFTP client.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-terminal</code>, <code>ferret-remote</code></dd>
+        <dt>Depends on</dt><dd>F-11, F-21</dd>
+        <dt>Phase</dt><dd>7</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Remote ---------------- -->
+  <h3>4.3 Remote &amp; cloud</h3>
+
+  <details class="feat">
+    <summary><span class="fid">F-20</span><span class="fname">Saved SSH connections</span></summary>
+    <div class="fbody">
+      <p>A <em>New Connection</em> dialog with Name, Host, Username, Port, SSH key path and
+      Notes, and a live-generated <code>ssh user@host</code> command with a copy button.
+      Saved entries appear under Connections in the sidebar; one click connects.</p>
+      <p><em>Behaviour:</em> import hosts from <code>~/.ssh/config</code> rather than making
+      people retype them. Never store passwords in the settings file — use the OS keychain
+      (Keychain, libsecret, Credential Manager) or nothing at all.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-remote</code></dd>
+        <dt>Components</dt><dd><code>dialog</code>, <code>form</code>, <code>input</code>, <code>clipboard</code></dd>
+        <dt>Phase</dt><dd>7</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-21</span><span class="fname">SFTP mounts as browsable folders</span></summary>
+    <div class="fbody">
+      <p>A saved connection mounts as a folder you browse exactly like a local one:
+      listing, preview, rename, delete, copy in and out.</p>
+      <p><em>Behaviour:</em> everything is latency-bound, so the <code>Vfs</code> trait must
+      be async end to end and the UI must show pending state rather than freeze. Directory
+      listings and stat results need a short-lived cache with explicit invalidation. Plan for
+      <code>russh</code> + <code>russh-sftp</code> — pure Rust, works identically on all three
+      platforms, no FUSE or WinFsp dependency.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-remote</code></dd>
+        <dt>Depends on</dt><dd>F-20</dd>
+        <dt>Phase</dt><dd>7</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-22</span><span class="fname">SCP transfer from the context menu</span></summary>
+    <div class="fbody">
+      <p>Right-click any local file → <em>Send to</em> → a saved connection. Transfer runs
+      through the operations queue (F-60) with progress and cancel.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-remote</code>, <code>ferret-ops</code></dd>
+        <dt>Depends on</dt><dd>F-20, F-60</dd>
+        <dt>Phase</dt><dd>7</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-23</span><span class="fname">Root-enabled SFTP mounts <span class="pill p-risky">sharp edge</span></span></summary>
+    <div class="fbody">
+      <p>A <em>Mount as root</em> switch on a connection runs the remote SFTP subsystem under
+      <code>sudo</code>, so the mount can read and write outside the user's own tree.</p>
+      <p><em>Behaviour:</em> this hands a GUI unrestricted write access to a remote machine.
+      It needs an unmistakable confirmation, a persistent visual marker on the mount, and a
+      refusal to enable silently from restored session state. Requires passwordless
+      <code>sudo</code> for the SFTP subsystem on the remote host; document that, do not paper
+      over it.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-remote</code></dd>
+        <dt>Depends on</dt><dd>F-21</dd>
+        <dt>Phase</dt><dd>7</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-24</span><span class="fname">S3 mounts <span class="pill p-later">later</span></span></summary>
+    <div class="fbody">
+      <p>Browse an S3-compatible bucket as a folder tree. Behind a <code>s3</code> cargo
+      feature, off by default, because the AWS SDK is a heavy dependency.</p>
+      <p><em>Behaviour:</em> object stores have no real directories. The backend synthesises
+      them from key prefixes, which makes rename a copy-then-delete and makes "folder size"
+      an expensive lie. Surface that honestly rather than pretending it is a filesystem.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-remote</code> (feature <code>s3</code>)</dd>
+        <dt>Phase</dt><dd>8</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-25</span><span class="fname">WebDAV mounts <span class="pill p-later">later</span></span></summary>
+    <div class="fbody">
+      <p>Same <code>Vfs</code> contract over WebDAV, behind a <code>webdav</code> feature.
+      Covers Nextcloud, ownCloud and most self-hosted setups.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-remote</code> (feature <code>webdav</code>)</dd>
+        <dt>Phase</dt><dd>8</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Preview ---------------- -->
+  <h3>4.4 Preview &amp; editing</h3>
+
+  <details class="feat" open>
+    <summary><span class="fid">F-30</span><span class="fname">Preview pane <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>A resizable pane on the right that renders the selected file. It stays open while
+      you navigate, swapping content as the selection changes. A registry maps file type to
+      a provider; unknown types fall back to a plain-text or hex view with a size cap.</p>
+      <p><em>Behaviour:</em> never read a whole file to preview it. Providers get a streaming
+      handle and a byte budget. Selection changes are debounced so arrow-keying down a list
+      does not spawn a hundred reads.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code></dd>
+        <dt>Components</dt><dd><code>resizable</code>, <code>scroll</code></dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-31</span><span class="fname">Markdown rendering <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>Rendered Markdown with headings, lists, tables, code blocks, links and inline code —
+      not a source dump. Tables render as real tables.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code></dd>
+        <dt>Components</dt><dd><code>text</code> (built-in Markdown renderer)</dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-32</span><span class="fname">Syntax-highlighted code preview</span></summary>
+    <div class="fbody">
+      <p>Source files render with syntax highlighting across the common languages.
+      <code>gpui-component</code> ships tree-sitter grammars for 35 languages behind the
+      <code>tree-sitter-languages</code> feature; enable the set we want rather than all of
+      them, since each grammar costs compile time and binary size.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code></dd>
+        <dt>Components</dt><dd><code>highlighter</code></dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-33</span><span class="fname">Image preview &amp; thumbnails</span></summary>
+    <div class="fbody">
+      <p>PNG, JPEG, GIF, WebP, SVG, BMP in the preview pane, and thumbnails in icon view.</p>
+      <p><em>Behaviour:</em> decode off the main thread, cap decoded dimensions, and cache
+      thumbnails on disk keyed by path plus mtime plus size. Never decode a 200&nbsp;MP image
+      at full resolution to draw a 64&nbsp;px tile.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code></dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-34</span><span class="fname">PDF preview <span class="pill p-warn">unresolved</span></span></summary>
+    <div class="fbody">
+      <p>First page, or a scrollable page view, in the preview pane.</p>
+      <p><em>Behaviour:</em> there is no clean cross-platform pure-Rust PDF renderer. macOS
+      has PDFKit; Linux and Windows need <code>pdfium</code> (a large C++ blob) or
+      <code>poppler</code>. See §9 — this is a genuine open question and may ship as
+      macOS-only in v1.0 with a "open externally" fallback elsewhere.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code></dd>
+        <dt>Phase</dt><dd>3 (macOS) · 9 (others)</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-35</span><span class="fname">CSV rendered as a grid</span></summary>
+    <div class="fbody">
+      <p>CSV and TSV files render as a sortable, scrollable table instead of raw text.
+      Header row detection, delimiter sniffing, and virtualised rows so a 500&nbsp;MB export
+      still opens.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code></dd>
+        <dt>Components</dt><dd><code>table</code></dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-36</span><span class="fname">In-place text &amp; code editing</span></summary>
+    <div class="fbody">
+      <p>An <em>Edit</em> button in the preview header turns the preview into an editable
+      buffer. Save writes back in place. Deliberately minimal: no LSP, no multi-file, no
+      project.</p>
+      <p><em>Behaviour:</em> save must be atomic (write to a temp file in the same directory,
+      then rename) and must preserve permissions, ownership where possible, and the file's
+      existing line endings. Warn if the file changed on disk since it was opened. Refuse to
+      edit binary files.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code>, <code>ferret-vfs</code></dd>
+        <dt>Components</dt><dd><code>input</code> (Rope-backed CodeEditor)</dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Search ---------------- -->
+  <h3>4.5 Search</h3>
+
+  <details class="feat" open>
+    <summary><span class="fid">F-40</span><span class="fname">Power Search — filename <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>A modal search panel over the window. Filename field with All / Files / Folders
+      toggles, an extension filter, and a case-sensitivity toggle. Results table shows Name,
+      Location and Kind, with a live count.</p>
+      <p><em>Behaviour:</em> no index, no background daemon — results stream as the walk
+      proceeds, exactly as Iruka does it. Respects <code>.gitignore</code> optionally.
+      Cancels immediately when the query changes.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-search</code></dd>
+        <dt>Components</dt><dd><code>dialog</code>, <code>table</code>, <code>input</code></dd>
+        <dt>Phase</dt><dd>4</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-41</span><span class="fname">Content search: grep &amp; regex <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>A <em>Content Search</em> section inside the same panel searches inside files.
+      Full regex support, with a Types filter (<code>*.swift, *.py…</code>) to scope by glob.
+      Built on the ripgrep crates (<code>grep-searcher</code>, <code>grep-regex</code>,
+      <code>ignore</code>) — the same engine, in-process, no subprocess.</p>
+      <p><em>Behaviour:</em> parallel walk across cores, binary files skipped by
+      content sniffing, memory-mapped reads for large files, hard result cap with a
+      "showing first N" notice.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-search</code></dd>
+        <dt>Depends on</dt><dd>F-40</dd>
+        <dt>Phase</dt><dd>4</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-42</span><span class="fname">Filters: type, extension, date, size</span></summary>
+    <div class="fbody">
+      <p>Narrow results by kind, extension list, modification date range and size range.
+      Filters apply to the streaming results without restarting the walk where possible.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-search</code></dd>
+        <dt>Phase</dt><dd>4</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-43</span><span class="fname">Search scope tabs</span></summary>
+    <div class="fbody">
+      <p>Current Folder / Home / Root tabs switch the search root without retyping the
+      query. Remote mounts add their own scope when active.</p>
+      <p><em>Behaviour:</em> searching a remote mount cannot use the local walker — it either
+      runs a remote <code>grep</code> over SSH or falls back to filename-only. Decide per
+      backend and tell the user which they got.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-search</code></dd>
+        <dt>Phase</dt><dd>4</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Git ---------------- -->
+  <h3>4.6 Git</h3>
+
+  <details class="feat">
+    <summary><span class="fid">F-50</span><span class="fname">Branch and ahead/behind in the status bar</span></summary>
+    <div class="fbody">
+      <p>When the current folder is inside a repository, the status bar shows the branch
+      name, changed-file count, ahead/behind counts, and <em>Pull</em> / <em>Commit…</em>
+      buttons.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-git</code></dd>
+        <dt>Components</dt><dd><code>status_bar</code>, <code>tag</code></dd>
+        <dt>Phase</dt><dd>5</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-51</span><span class="fname">Per-file git status in the listing</span></summary>
+    <div class="fbody">
+      <p>Modified, staged, untracked and ignored files carry a badge or colour in the file
+      list, including a rolled-up indicator on directories.</p>
+      <p><em>Behaviour:</em> status is computed once per repository and cached, refreshed on
+      filesystem change events, never recomputed per row. In a large repository this is the
+      easiest place in the whole app to destroy scrolling performance.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-git</code></dd>
+        <dt>Depends on</dt><dd>F-01, F-50</dd>
+        <dt>Phase</dt><dd>5</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-52</span><span class="fname">Commit dialog</span></summary>
+    <div class="fbody">
+      <p>A dialog with a multi-line message field and a <em>Stage all changes first
+      (git add -A)</em> checkbox, plus Cancel and Commit.</p>
+      <p><em>Behaviour:</em> v1.0 keeps this deliberately blunt — it matches the reference
+      product and covers the common case. Per-hunk staging is explicitly out of scope; that
+      is a git client, not a file manager.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-git</code></dd>
+        <dt>Components</dt><dd><code>dialog</code>, <code>checkbox</code>, <code>input</code></dd>
+        <dt>Phase</dt><dd>5</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-53</span><span class="fname">Pull and push</span></summary>
+    <div class="fbody">
+      <p>Buttons in the status bar. Output and errors surface as notifications — the
+      reference product shows a real <code>fatal: unable to access …</code> in its terminal
+      when a pull fails, and Ferret should be equally honest rather than swallowing it.</p>
+      <p><em>Behaviour:</em> network git needs credentials. Shelling out to the
+      <code>git</code> binary means the user's existing credential helper, SSH agent and
+      2FA setup all keep working — a decisive advantage over an embedded library. See
+      D-04.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-git</code></dd>
+        <dt>Phase</dt><dd>5</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Operations ---------------- -->
+  <h3>4.7 File operations</h3>
+
+  <details class="feat" open>
+    <summary><span class="fid">F-60</span><span class="fname">Operations queue <span class="pill p-core">core</span></span></summary>
+    <div class="fbody">
+      <p>Every copy, move, delete and transfer becomes a job in a visible queue with live
+      progress, throughput, time remaining, pause and cancel. Jobs survive navigation.</p>
+      <p><em>Behaviour:</em> the queue is the only path for bulk mutation — nothing writes
+      to disk outside it, so there is one place to get correctness right. Copies must handle
+      cross-device moves (copy-then-delete), preserve timestamps and permissions, and be
+      cancellable mid-file without leaving a half-written destination.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ops</code></dd>
+        <dt>Components</dt><dd><code>progress</code>, <code>notification</code>, <code>list</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-61</span><span class="fname">Conflict resolution</span></summary>
+    <div class="fbody">
+      <p>When a destination exists: Replace / Skip / Keep both / Merge folder, each with an
+      "apply to all" option, showing both files' size and date so the choice is informed.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ops</code></dd>
+        <dt>Depends on</dt><dd>F-60</dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-62</span><span class="fname">Batch rename</span></summary>
+    <div class="fbody">
+      <p>Rename many files at once with stacked rules: find-and-replace (literal or regex),
+      prefix, suffix, sequential numbering, case change, extension change. A live preview
+      table shows old name → new name before anything is applied.</p>
+      <p><em>Behaviour:</em> validate the whole plan before executing — reject collisions,
+      empty names and illegal characters up front. On Windows that means the reserved names
+      (<code>CON</code>, <code>PRN</code>, <code>NUL</code>, <code>COM1</code>…) too. Apply as
+      a single undoable batch.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ops</code></dd>
+        <dt>Components</dt><dd><code>dialog</code>, <code>table</code>, <code>form</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-63</span><span class="fname">Drop stack</span></summary>
+    <div class="fbody">
+      <p>A temporary shelf. Drop files onto it from anywhere, navigate elsewhere, then copy
+      or move the whole collection in one action. Survives tab switches.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ops</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-64</span><span class="fname">Symlink support</span></summary>
+    <div class="fbody">
+      <p>Symlinks show as links with their target, resolve on open, and can be created from
+      the context menu. Broken links are visibly broken.</p>
+      <p><em>Behaviour:</em> the walker must not follow links into cycles. On Windows,
+      creating a symlink needs Developer Mode or elevation — detect and explain rather than
+      failing opaquely.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-vfs</code>, <code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-65</span><span class="fname">Archive create &amp; extract <span class="pill p-later">later</span></span></summary>
+    <div class="fbody">
+      <p>Zip, tar, tar.gz and tar.zst from the context menu, running through the operations
+      queue. Not in the reference product; a Ferret addition, deferred past v1.0.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ops</code></dd>
+        <dt>Phase</dt><dd>post-1.0</dd>
+      </dl>
+    </div>
+  </details>
+
+  <!-- ---------------- Platform ---------------- -->
+  <h3>4.8 Platform integration &amp; application shell</h3>
+
+  <details class="feat">
+    <summary><span class="fid">F-70</span><span class="fname">Shell integration — "Open in Ferret"</span></summary>
+    <div class="fbody">
+      <p>A context-menu entry in the system file manager, and a <code>ferret .</code> CLI
+      that opens or focuses a window at that path.</p>
+      <p><em>Behaviour:</em> three completely separate implementations — a Finder Sync
+      extension on macOS, a <code>.desktop</code> action plus per-file-manager scripts on
+      Linux, and a shell extension DLL or registry entry on Windows. Budget accordingly.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-platform</code>, <code>ferret</code></dd>
+        <dt>Phase</dt><dd>9</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-71</span><span class="fname">Trash / Recycle Bin</span></summary>
+    <div class="fbody">
+      <p>Delete moves to the OS trash by default; <kbd>Shift</kbd>+Delete deletes
+      permanently after confirmation. Uses the <code>trash</code> crate, which covers all
+      three platforms.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-72</span><span class="fname">Open with default application</span></summary>
+    <div class="fbody">
+      <p>Double-click or <kbd>Enter</kbd> opens a file in its default app; a submenu lists
+      alternatives and a "Reveal in system file manager" action.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-73</span><span class="fname">Volumes &amp; removable media</span></summary>
+    <div class="fbody">
+      <p>Enumerate mounted volumes with free-space readout, watch for mount and unmount, and
+      offer eject where the platform supports it.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-74</span><span class="fname">Drag &amp; drop with the OS</span></summary>
+    <div class="fbody">
+      <p>Drag files out of Ferret into other applications and drop them in from outside,
+      with the correct copy/move modifier semantics per platform.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code>, <code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-75</span><span class="fname">Space-to-preview (Quick Look)</span></summary>
+    <div class="fbody">
+      <p><kbd>Space</kbd> on a selection opens a large overlay preview. On macOS this can
+      defer to Quick Look; elsewhere it reuses Ferret's own preview providers at full size.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-preview</code>, <code>ferret-platform</code></dd>
+        <dt>Phase</dt><dd>3</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-80</span><span class="fname">Command palette</span></summary>
+    <div class="fbody">
+      <p>Every action reachable by name from one fuzzy-searchable palette, showing its
+      keybinding. Free discoverability, and the standard way to reach anything that does not
+      earn toolbar space.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code></dd>
+        <dt>Components</dt><dd><code>command</code></dd>
+        <dt>Phase</dt><dd>4</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-81</span><span class="fname">Settings &amp; keymap</span></summary>
+    <div class="fbody">
+      <p>A settings window backed by a human-editable JSON file, plus a remappable keymap.
+      Sections: General, Appearance, Terminal, Preview, Search, Connections, Shortcuts.</p>
+      <p><em>Behaviour:</em> settings live in the OS config directory via the
+      <code>dirs</code> crate — never next to the binary. The file is the source of truth;
+      the UI is a view over it, and external edits reload live.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-settings</code></dd>
+        <dt>Components</dt><dd><code>setting</code>, <code>form</code>, <code>kbd</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-82</span><span class="fname">Light &amp; dark themes</span></summary>
+    <div class="fbody">
+      <p>Both themes at equal quality, following the system appearance by default with a
+      manual override. Themes are JSON files; users can add their own.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code>, <code>ferret-settings</code></dd>
+        <dt>Components</dt><dd><code>theme</code></dd>
+        <dt>Phase</dt><dd>1</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-83</span><span class="fname">Session restore</span></summary>
+    <div class="fbody">
+      <p>Reopen with the previous window geometry, tabs, panel sizes and collapse states.
+      Mounts are <em>not</em> auto-reconnected without consent — especially root mounts (F-23).</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-settings</code></dd>
+        <dt>Phase</dt><dd>9</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-84</span><span class="fname">Notifications</span></summary>
+    <div class="fbody">
+      <p>Non-blocking toasts for completed operations, failures and background results.
+      Errors state what failed and what to do about it — never a bare error code.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd><code>ferret-ui</code></dd>
+        <dt>Components</dt><dd><code>notification</code>, <code>alert</code></dd>
+        <dt>Phase</dt><dd>6</dd>
+      </dl>
+    </div>
+  </details>
+
+  <details class="feat">
+    <summary><span class="fid">F-85</span><span class="fname">Packaging &amp; distribution</span></summary>
+    <div class="fbody">
+      <p>Signed and notarised <code>.dmg</code> for macOS; AppImage, Flatpak and an AUR
+      package for Linux; MSI or NSIS installer plus winget and Scoop manifests for Windows.
+      Built by CI on every tagged release.</p>
+      <dl class="meta">
+        <dt>Crate</dt><dd>— (CI, <code>cargo-bundle</code> / <code>cargo-packager</code>)</dd>
+        <dt>Phase</dt><dd>9</dd>
+      </dl>
+    </div>
+  </details>
+</section>
+
+<!-- ======================================================================= -->
+<section id="architecture">
+  <span class="sec-tag">§5</span>
+  <h2>Crate architecture</h2>
+  <p class="sec-intro">Where the two-crate scaffold is heading, and the rule that keeps it from tangling.</p>
+
+  <h3>Today</h3>
+  <p>The repository holds two crates: <code>ferret</code> (the binary — GPUI bootstrap,
+  window, menus, actions) and <code>ferret-ui</code> (views, components, theme). That is the
+  correct starting point and should not be split before there is code to put in the new
+  crates.</p>
+
+  <h3>Target</h3>
+  <p>As features land, <code>ferret-ui</code> sheds its non-visual concerns into service
+  crates. Twelve crates in total, in three layers.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Target workspace</caption>
+      <thead>
+        <tr><th class="crate">Crate</th><th>Layer</th><th>Owns</th><th>Notable dependencies</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="crate">ferret</td><td>binary</td><td>Bootstrap, window options, native menus, global actions, keybinding registration, CLI entry (<code>ferret .</code>), single-instance.</td><td><code>gpui_platform</code></td></tr>
+        <tr><td class="crate">ferret-ui</td><td>view</td><td>Every view, panel and component. Browser shell, sidebar, tab strip, path bar, file pane, status bar, dialogs, command palette, theme.</td><td><code>gpui-component</code> <em>(only crate that may)</em></td></tr>
+        <tr><td class="crate">ferret-core</td><td>base</td><td>Shared domain types: <code>Entry</code>, <code>EntryKind</code>, <code>VfsPath</code>, <code>SortKey</code>, ids, error type, cross-crate events. Depends on nothing in the workspace.</td><td><code>thiserror</code>, <code>serde</code></td></tr>
+        <tr><td class="crate">ferret-vfs</td><td>service</td><td>The <code>Vfs</code> trait, the local-disk backend, path canonicalisation, the change watcher, mount registry.</td><td><code>notify</code>, <code>async-trait</code></td></tr>
+        <tr><td class="crate">ferret-remote</td><td>service</td><td>SFTP/SSH, S3 and WebDAV backends implementing <code>Vfs</code>; saved connections; SCP.</td><td><code>russh</code>, <code>russh-sftp</code>; <code>aws-sdk-s3</code> and <code>reqwest</code> behind features</td></tr>
+        <tr><td class="crate">ferret-ops</td><td>service</td><td>Operation engine: queue, copy/move/delete, conflict policy, batch rename, drop stack, undo.</td><td><code>regex</code></td></tr>
+        <tr><td class="crate">ferret-terminal</td><td>service</td><td>PTY spawn, VT parsing, grid model, scrollback, cwd sync, SSH-backed sessions.</td><td><code>alacritty_terminal</code></td></tr>
+        <tr><td class="crate">ferret-git</td><td>service</td><td>Repository discovery, status cache, branch and ahead/behind, stage, commit, pull, push.</td><td>the <code>git</code> binary (see D-04)</td></tr>
+        <tr><td class="crate">ferret-search</td><td>service</td><td>Filename and content search, filters, streaming results, cancellation.</td><td><code>ignore</code>, <code>grep-searcher</code>, <code>grep-regex</code></td></tr>
+        <tr><td class="crate">ferret-preview</td><td>service</td><td>Provider registry and the providers: markdown, code, image, PDF, CSV, plain, binary.</td><td>image decoders; PDF backend TBD</td></tr>
+        <tr><td class="crate">ferret-settings</td><td>service</td><td>Typed settings, per-folder view prefs, keymap, session state, theme loading.</td><td><code>serde_json</code></td></tr>
+        <tr><td class="crate">ferret-platform</td><td>service</td><td>Per-OS shims: trash, reveal, open-with, volume enumeration, standard directories, shell integration, keychain.</td><td><code>trash</code>, <code>opener</code>, <code>dirs</code>, <code>windows</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The layering rule</h3>
+  <div class="note">
+    <strong>One direction only</strong>
+    <p><code>ferret</code> → <code>ferret-ui</code> → service crates → <code>ferret-core</code>.
+    No service crate may depend on <code>ferret-ui</code>, and no crate other than
+    <code>ferret-ui</code> may depend on <code>gpui-component</code>. Service crates may
+    depend on <code>gpui</code> itself for its background executor and entity system — this
+    is exactly how Zed structures <code>project</code>, <code>terminal</code> and
+    <code>fs</code>, and fighting it costs more than it saves.</p>
+  </div>
+
+  <p>The payoff is that every service crate is testable without opening a window, and the
+  parts most likely to be wrong — path handling, conflict policy, rename planning, search
+  filtering — are exactly the parts that end up outside the UI.</p>
+
+  <h3>The Vfs contract</h3>
+  <p>One trait carries local disk, SFTP, S3 and WebDAV. Getting it right early is what makes
+  remote mounts feel like folders rather than a bolted-on transfer client.</p>
+  <ul>
+    <li><strong>Async throughout.</strong> Even local calls, so a slow network mount can never block a frame.</li>
+    <li><strong>Streaming listings.</strong> <code>read_dir</code> yields entries as they arrive, not a completed <code>Vec</code>.</li>
+    <li><strong>Cheap metadata, expensive metadata.</strong> Name and kind come free with the listing; size, permissions and git status are separate, cancellable follow-ups.</li>
+    <li><strong>Capabilities are declared.</strong> A backend advertises what it supports (symlinks, permissions, atomic rename, random-access write). The UI greys out what a mount cannot do instead of failing at the last step.</li>
+    <li><strong>Paths are opaque.</strong> <code>VfsPath</code>, not <code>std::path::PathBuf</code> — remote paths are not local paths, and Windows path rules are not POSIX rules.</li>
+  </ul>
+</section>
+
+<!-- ======================================================================= -->
+<section id="platforms">
+  <span class="sec-tag">§6</span>
+  <h2>Platform matrix</h2>
+  <p class="sec-intro">Where "cross-platform" stops being free. These rows are the actual work.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Per-feature platform hazards</caption>
+      <thead>
+        <tr><th>Concern</th><th>Linux</th><th>macOS</th><th>Windows</th><th>Approach</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>PTY (F-10)</td>
+          <td class="yes">forkpty</td><td class="yes">forkpty</td><td class="part">ConPTY</td>
+          <td>Separate spawn paths behind one trait. ConPTY needs Windows 10 1809+ and behaves differently around resize.</td>
+        </tr>
+        <tr>
+          <td>Terminal cwd reporting (F-11)</td>
+          <td class="yes">OSC 7 or <code>/proc</code></td><td class="yes">OSC 7 or <code>proc_pidinfo</code></td><td class="part">OSC 7 only</td>
+          <td>OSC 7 is the primary mechanism everywhere; ship shell snippets. The <code>/proc</code> path is a fallback, not the design.</td>
+        </tr>
+        <tr>
+          <td>Path semantics (F-01, F-02)</td>
+          <td class="yes">case-sensitive, UTF-8-ish bytes</td><td class="part">case-insensitive, NFD normalisation</td><td class="part">drive letters, UNC, UTF-16, reserved names, 260-char legacy limit</td>
+          <td><code>VfsPath</code> abstracts it. macOS Unicode normalisation and Windows reserved names both need explicit handling in rename (F-62).</td>
+        </tr>
+        <tr>
+          <td>File watching (F-01)</td>
+          <td class="yes">inotify</td><td class="yes">FSEvents</td><td class="yes">ReadDirectoryChangesW</td>
+          <td><code>notify</code> covers all three. Watch out for inotify watch limits on large trees.</td>
+        </tr>
+        <tr>
+          <td>Trash (F-71)</td>
+          <td class="yes">XDG trash</td><td class="yes">Finder trash</td><td class="yes">Recycle Bin</td>
+          <td>The <code>trash</code> crate handles all three.</td>
+        </tr>
+        <tr>
+          <td>Symlink creation (F-64)</td>
+          <td class="yes">free</td><td class="yes">free</td><td class="part">needs Developer Mode or elevation</td>
+          <td>Detect the privilege up front and explain it. Never fail with a raw OS error.</td>
+        </tr>
+        <tr>
+          <td>Window blur / vibrancy (§3)</td>
+          <td class="part">compositor-dependent</td><td class="yes">native</td><td class="part">Mica / Acrylic, version-gated</td>
+          <td>Degrade to an opaque themed background. The theme must be legible without blur.</td>
+        </tr>
+        <tr>
+          <td>Shell integration (F-70)</td>
+          <td class="part">per-file-manager</td><td class="part">Finder Sync extension</td><td class="part">shell extension</td>
+          <td>Three separate implementations. Schedule as its own slice of Phase 9, not as a footnote.</td>
+        </tr>
+        <tr>
+          <td>Credential storage (F-20)</td>
+          <td class="yes">libsecret</td><td class="yes">Keychain</td><td class="yes">Credential Manager</td>
+          <td>One keyring abstraction in <code>ferret-platform</code>. Never a plaintext fallback.</td>
+        </tr>
+        <tr>
+          <td>PDF rendering (F-34)</td>
+          <td class="no">no clean option</td><td class="yes">PDFKit</td><td class="no">no clean option</td>
+          <td>Unresolved — see Q-01.</td>
+        </tr>
+        <tr>
+          <td>Menus &amp; shortcuts (F-81)</td>
+          <td class="part">in-window</td><td class="yes">native menu bar</td><td class="part">in-window</td>
+          <td>Every binding needs a non-<kbd>Cmd</kbd> equivalent registered from day one.</td>
+        </tr>
+        <tr>
+          <td>Metal shader build</td>
+          <td class="yes">n/a</td><td class="part">needs full Xcode</td><td class="yes">n/a</td>
+          <td>Building on macOS requires the Metal compiler from Xcode; Command Line Tools alone are not enough. Document in the README and pin in CI.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note risk">
+    <strong>The honest read</strong>
+    <p>Roughly a third of the total effort is in this table, not in the feature list. Iruka
+    is a one-platform product; the moment Ferret commits to three, the terminal, paths,
+    shell integration and packaging each triple. Plan Phase 9 as real work, and get a
+    Windows and a Linux machine into CI from Phase 0 so drift is caught the week it
+    happens rather than the month before release.</p>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="decisions">
+  <span class="sec-tag">§7</span>
+  <h2>Decisions</h2>
+  <p class="sec-intro">Settled choices with their reasoning. Assumptions and unknowns are in §9, kept separate on purpose.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Accepted decisions</caption>
+      <thead><tr><th class="id">ID</th><th>Decision</th><th>Reasoning</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="id">D-01</td>
+          <td>GPUI from Zed's Git repository, not a crates.io release.</td>
+          <td><code>gpui_platform</code> is not published, and <code>gpui-component</code> resolves <code>gpui</code> from the same Git source. Using both from Git lets Cargo unify them into one crate instance. Reproducibility comes from <code>Cargo.lock</code>. <strong>Consequence:</strong> never add a <code>rev</code> to one without pinning the other to match.</td>
+        </tr>
+        <tr>
+          <td class="id">D-02</td>
+          <td>Adopt <code>gpui-component</code> rather than hand-rolling widgets.</td>
+          <td>It already provides the exact set this product needs — virtualised <code>table</code>, <code>tree</code>, <code>dock</code>, <code>resizable</code>, Rope-backed <code>input</code>, <code>highlighter</code>, Markdown <code>text</code>, <code>command</code> — is Apache-2.0, and targets all three platforms. Rebuilding that is a year of work with no product in it.</td>
+        </tr>
+        <tr>
+          <td class="id">D-03</td>
+          <td>Rust edition 2024, MSRV 1.90.</td>
+          <td><code>gpui-component</code> is edition 2024; matching avoids friction at the boundary.</td>
+        </tr>
+        <tr>
+          <td class="id">D-04</td>
+          <td>Git via the <code>git</code> binary, not <code>libgit2</code> or <code>gitoxide</code>.</td>
+          <td>Credential helpers, SSH agents, 2FA, signing, hooks and <code>includeIf</code> configs all work for free. No C toolchain, no vendored build, no divergence from what the user sees in their own terminal. <strong>Cost:</strong> a runtime dependency on git being installed, and parsing porcelain output. Accepted — the reference product visibly does the same thing.</td>
+        </tr>
+        <tr>
+          <td class="id">D-05</td>
+          <td>ripgrep's crates in-process, not a bundled <code>rg</code> subprocess.</td>
+          <td>Structured results, real cancellation, no binary to ship or find on PATH. Same engine either way.</td>
+        </tr>
+        <tr>
+          <td class="id">D-06</td>
+          <td>SFTP through <code>russh</code>, in-process — no FUSE, WinFsp or macFUSE.</td>
+          <td>A kernel-level mount would need a driver install, elevated privileges and three separate implementations. An in-process VFS backend is the same experience inside Ferret with none of that. <strong>Cost:</strong> other applications cannot see the mount.</td>
+        </tr>
+        <tr>
+          <td class="id">D-07</td>
+          <td>Interactive SSH shells out to the system <code>ssh</code>; only file browsing uses <code>russh</code>.</td>
+          <td>Same reasoning as D-04 — the user's existing SSH configuration is not something we should try to reimplement.</td>
+        </tr>
+        <tr>
+          <td class="id">D-08</td>
+          <td>Heavy backends behind default-off cargo features (<code>s3</code>, <code>webdav</code>).</td>
+          <td>The AWS SDK alone would dominate build time for a feature most users never touch.</td>
+        </tr>
+        <tr>
+          <td class="id">D-09</td>
+          <td>All bulk mutation goes through the operations queue (F-60).</td>
+          <td>One code path for correctness, cancellation, conflict handling and progress. No feature gets its own private copy loop.</td>
+        </tr>
+        <tr>
+          <td class="id">D-10</td>
+          <td><code>[profile.dev.package."*"] opt-level = 2</code>.</td>
+          <td>GPUI is unusably slow with unoptimised dependencies. First build is long; incremental builds of our own crates stay fast.</td>
+        </tr>
+        <tr>
+          <td class="id">D-11</td>
+          <td>GPL-3.0-or-later.</td>
+          <td>Copyleft is the point: the reason Ferret exists is that the reference product is closed. <strong>Check:</strong> compatible with GPUI (Apache-2.0) and <code>gpui-component</code> (Apache-2.0) as dependencies.</td>
+        </tr>
+        <tr>
+          <td class="id">D-12</td>
+          <td>Settings are a human-editable JSON file; the settings UI is a view over it.</td>
+          <td>Matches the audience. Anything the UI can set must be expressible in the file, and external edits reload live.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="phases">
+  <span class="sec-tag">§8</span>
+  <h2>Delivery phases</h2>
+  <p class="sec-intro">Ten phases in dependency order. Each names what must exist before it starts and what proves it is done.</p>
+
+  <p>The ordering is not Iruka's release history. It is what a fresh build needs: the
+  filesystem layer first, then the browser, then the terminal — because the terminal is the
+  feature that makes the product worth using and everything after it is easier to judge once
+  it exists.</p>
+
+  <div class="phase">
+    <span class="pn">00</span>
+    <div>
+      <h3>Foundations <span class="pill p-done">done</span></h3>
+      <p class="dep">depends on: —</p>
+      <ul>
+        <li>Workspace renamed to <code>ferret</code> / <code>ferret-ui</code>, edition 2024, GPL-3.0.</li>
+        <li><code>gpui-component</code> wired into the dependency graph and proven to resolve against the same <code>gpui</code> instance.</li>
+        <li><code>justfile</code>, <code>AGENTS.md</code> and this plan in place.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> <code>cargo check --workspace</code> passes and the app opens a window.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">01</span>
+    <div>
+      <h3>Filesystem layer &amp; browser shell</h3>
+      <p class="dep">depends on: 0 · delivers F-01 · F-02 · F-03 · F-04 · F-06 · F-07 · F-08 · F-72 · F-73 · F-81 · F-82</p>
+      <ul>
+        <li><code>ferret-core</code> and <code>ferret-vfs</code> split out; <code>Vfs</code> trait plus the local backend and watcher.</li>
+        <li>The full window: title bar, sidebar, tab strip, path bar, file pane, status bar.</li>
+        <li>All three view modes, sorting, column config, inline filter, hidden-files toggle.</li>
+        <li>Light and dark themes; settings file and keymap.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> Ferret can replace the system file manager for browsing and opening files on all three platforms, and a 200,000-entry directory scrolls smoothly.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">02</span>
+    <div>
+      <h3>Terminal &amp; sync <span class="pill p-core">the product</span></h3>
+      <p class="dep">depends on: 1 · delivers F-10 · F-11 · F-12</p>
+      <ul>
+        <li><code>ferret-terminal</code>: PTY spawn on all three platforms, VT parsing, GPUI renderer, scrollback, selection, copy/paste.</li>
+        <li>UI→terminal sync with the safety rules from F-11; the <em>Sync</em> toggle.</li>
+        <li>Terminal→UI sync via OSC 7, with shell snippets for bash, zsh, fish and PowerShell.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> <code>vim</code>, <code>htop</code> and <code>tmux</code> all behave correctly, and navigating the file pane moves the shell without ever corrupting a running command.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">03</span>
+    <div>
+      <h3>Preview &amp; in-place editing</h3>
+      <p class="dep">depends on: 1 · delivers F-30 · F-31 · F-32 · F-33 · F-35 · F-36 · F-75 · F-34 (macOS)</p>
+      <ul>
+        <li><code>ferret-preview</code> with the provider registry and streaming reads.</li>
+        <li>Markdown, syntax-highlighted code, images with a thumbnail cache, CSV grid.</li>
+        <li>Edit mode with atomic save and line-ending preservation.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> arrow-keying down a directory of mixed file types renders each preview without a dropped frame, and editing a config file round-trips byte-identically apart from the intended change.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">04</span>
+    <div>
+      <h3>Search</h3>
+      <p class="dep">depends on: 1 · delivers F-40 · F-41 · F-42 · F-43 · F-80</p>
+      <ul>
+        <li><code>ferret-search</code> over the ripgrep crates; streaming, cancellable, parallel.</li>
+        <li>The Power Search panel: filename, content, filters, scope tabs.</li>
+        <li>Command palette.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> a regex content search over a large tree streams first results in well under a second and cancels instantly when the query changes.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">05</span>
+    <div>
+      <h3>Git</h3>
+      <p class="dep">depends on: 1 · delivers F-50 · F-51 · F-52 · F-53</p>
+      <ul>
+        <li><code>ferret-git</code>: repository discovery, cached status refreshed from watch events.</li>
+        <li>Status bar branch readout; per-file badges; commit dialog; pull and push.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> browsing a large repository shows correct per-file status with no measurable scroll cost, and a failed push surfaces git's actual message.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">06</span>
+    <div>
+      <h3>File operations</h3>
+      <p class="dep">depends on: 1 · delivers F-60 · F-61 · F-62 · F-63 · F-64 · F-71 · F-74 · F-84</p>
+      <ul>
+        <li><code>ferret-ops</code>: the queue, conflict policy, cancellation, undo.</li>
+        <li>Batch rename with rule stacking and live preview; drop stack; symlinks.</li>
+        <li>Trash, OS drag-and-drop, notifications.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> a large cross-device move can be paused, resumed and cancelled without leaving a partial file, and batch rename rejects every invalid plan before touching disk.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">07</span>
+    <div>
+      <h3>SSH, SFTP &amp; SCP</h3>
+      <p class="dep">depends on: 1, 2, 6 · delivers F-13 · F-20 · F-21 · F-22 · F-23</p>
+      <ul>
+        <li><code>ferret-remote</code>: saved connections with keychain storage and <code>~/.ssh/config</code> import.</li>
+        <li>SFTP as a <code>Vfs</code> backend; SCP through the operations queue.</li>
+        <li>SSH terminal that follows the mounted folder; root mounts with their guardrails.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> a remote folder browses, previews and edits like a local one over a high-latency link without the UI ever blocking.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">08</span>
+    <div>
+      <h3>Cloud mounts &amp; dual pane</h3>
+      <p class="dep">depends on: 7 · delivers F-05 · F-24 · F-25</p>
+      <ul>
+        <li>S3 and WebDAV backends behind their cargo features.</li>
+        <li>Dual-pane browsing with cross-pane copy and move.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> a bucket and a WebDAV share both browse through the same <code>Vfs</code> contract with capabilities correctly declared, and dual pane transfers between two different backends.</p>
+    </div>
+  </div>
+
+  <div class="phase">
+    <span class="pn">09</span>
+    <div>
+      <h3>Platform polish &amp; release</h3>
+      <p class="dep">depends on: all · delivers F-70 · F-83 · F-85 · F-34 (Linux, Windows)</p>
+      <ul>
+        <li>Shell integration on each platform; session restore.</li>
+        <li>Signing, notarisation, installers and package manifests; release CI.</li>
+        <li>Accessibility pass, keyboard-only navigation, high-contrast check.</li>
+        <li>User documentation and a full keyboard-shortcut reference.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> a tagged commit produces installable artefacts for all three platforms and a new user can install, launch and work without reading anything.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="risks">
+  <span class="sec-tag">§9</span>
+  <h2>Risks</h2>
+
+  <div class="scroller">
+    <table>
+      <caption>Ranked by expected cost</caption>
+      <thead><tr><th class="id">ID</th><th>Risk</th><th>Impact</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="id">R-01</td>
+          <td>The terminal is far harder than it looks. A credible VT implementation with correct resize, alternate screen, mouse reporting and ConPTY behaviour is months of work, and it is the feature the product is named after.</td>
+          <td><span class="pill p-risky">critical</span></td>
+          <td>Start from <code>alacritty_terminal</code> for the grid and parser. Read Zed's <code>terminal</code> crate closely — it solves this exact problem on this exact framework. Prototype ConPTY in Phase 0 or 1, before committing to the Phase 2 schedule.</td>
+        </tr>
+        <tr>
+          <td class="id">R-02</td>
+          <td>GPUI is unstable and undocumented. It tracks Zed's main branch, has no stability guarantee, and its documentation is thin.</td>
+          <td><span class="pill p-risky">high</span></td>
+          <td><code>Cargo.lock</code> pins the commit, so updates are deliberate. Budget time for breakage at each bump. Zed's own source is the real documentation.</td>
+        </tr>
+        <tr>
+          <td class="id">R-03</td>
+          <td>Three-platform scope. Every system-touching feature is written up to three times; see §6.</td>
+          <td><span class="pill p-risky">high</span></td>
+          <td>Get all three into CI in Phase 0. Push platform differences behind <code>ferret-platform</code> traits so they cannot leak into feature code.</td>
+        </tr>
+        <tr>
+          <td class="id">R-04</td>
+          <td>Scope. This is a two-person-year feature list at commercial pace.</td>
+          <td><span class="pill p-risky">high</span></td>
+          <td>Phases 1 and 2 alone are a usable, differentiated product. Ship them and get users before building phases 7 and 8. Treat anything marked <span class="pill p-later">later</span> as genuinely optional.</td>
+        </tr>
+        <tr>
+          <td class="id">R-05</td>
+          <td>Performance in large directories and large repositories. Naïve per-row metadata or git status will make scrolling unusable, and it will not show up in a small test folder.</td>
+          <td><span class="pill p-warn">medium</span></td>
+          <td>Virtualise from the first commit. Keep a fixture directory of 200,000 entries and a large repository in the test set from Phase 1.</td>
+        </tr>
+        <tr>
+          <td class="id">R-06</td>
+          <td>Data loss. A file manager that mishandles a move or an in-place save destroys the user's work — the single worst failure this product can have.</td>
+          <td><span class="pill p-risky">critical</span></td>
+          <td>All mutation through <code>ferret-ops</code> (D-09). Atomic saves. Trash by default. Heavy unit testing of <code>ferret-ops</code> and <code>ferret-vfs</code> against temp directories. Never a destructive default.</td>
+        </tr>
+        <tr>
+          <td class="id">R-07</td>
+          <td>Build friction discourages contributors: a Git GPUI dependency, a long first build, and full Xcode required on macOS.</td>
+          <td><span class="pill p-warn">medium</span></td>
+          <td>Document prerequisites precisely in the README. Provide a devcontainer or Nix flake. Cache the Cargo registry and Git checkouts in CI.</td>
+        </tr>
+        <tr>
+          <td class="id">R-08</td>
+          <td><code>gpui-component</code> is a single-vendor dependency at version 0.5 with <code>publish = false</code> at the workspace root.</td>
+          <td><span class="pill p-warn">medium</span></td>
+          <td>It is Apache-2.0 and forkable. Keep usage inside <code>ferret-ui</code> (§5) so a fork or replacement stays a contained change.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="questions">
+  <span class="sec-tag">§10</span>
+  <h2>Open questions</h2>
+  <p class="sec-intro">Unresolved. Each needs an answer before the phase that depends on it starts.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>To decide</caption>
+      <thead><tr><th class="id">ID</th><th>Question</th><th>Needed by</th></tr></thead>
+      <tbody>
+        <tr><td class="id">Q-01</td><td>How does PDF preview (F-34) work on Linux and Windows? Bundle <code>pdfium</code> and accept the binary size and build complexity, shell out to <code>poppler</code> where present, or ship macOS-only in v1.0 with an "open externally" fallback?</td><td>Phase 3</td></tr>
+        <tr><td class="id">Q-02</td><td>Which tree-sitter grammars ship by default (F-32)? All 35 costs build time and binary size; too few looks broken. Is a runtime-loadable grammar path worth the complexity?</td><td>Phase 3</td></tr>
+        <tr><td class="id">Q-03</td><td>What is the per-folder preferences store (F-06)? A single JSON file will not scale to tens of thousands of directories. SQLite adds a dependency; a custom log-structured file adds work.</td><td>Phase 1</td></tr>
+        <tr><td class="id">Q-04</td><td>Is undo (F-60) full or partial? Undoing a move is easy; undoing a delete-to-trash is possible; undoing an overwrite is not without a staging copy. Where is the line, and how is it communicated?</td><td>Phase 6</td></tr>
+        <tr><td class="id">Q-05</td><td>Does the terminal support multiple sessions per tab, or exactly one? Multiple means tabs-within-tabs and a more complex sync model (F-11).</td><td>Phase 2</td></tr>
+        <tr><td class="id">Q-06</td><td>What is the app actually called, and what is its icon? "Ferret" is the working name from the repository directory. Confirm the name is unencumbered before packaging (F-85).</td><td>Phase 9</td></tr>
+        <tr><td class="id">Q-07</td><td>Do we adopt <code>gpui-component</code>'s theme system wholesale, or layer Ferret tokens on top? The current <code>Theme</code> struct in <code>ferret-ui</code> predates the decision and will need reconciling.</td><td>Phase 1</td></tr>
+        <tr><td class="id">Q-08</td><td>Which Linux desktop file managers get "Open in Ferret" integration (F-70), and is a generic <code>.desktop</code> action enough for most of them?</td><td>Phase 9</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<section id="references">
+  <span class="sec-tag">§11</span>
+  <h2>References</h2>
+
+  <h3>Framework &amp; components</h3>
+  <ul>
+    <li><a href="https://github.com/zed-industries/zed/tree/main/crates/gpui">GPUI source</a> — the framework, in Zed's repository.</li>
+    <li><a href="https://www.gpui.rs/">gpui.rs</a> and <a href="https://docs.rs/gpui/">docs.rs/gpui</a> — guide and API docs.</li>
+    <li><a href="https://github.com/longbridge/gpui-component">gpui-component</a> and its <a href="https://longbridge.github.io/gpui-component">component gallery</a> — Apache-2.0, ~60 components.</li>
+    <li><a href="https://github.com/zed-industries/zed">Zed</a> — the reference implementation for production GPUI patterns. Read <code>crates/terminal</code> and <code>crates/terminal_view</code> before starting F-10, and <code>crates/fs</code> and <code>crates/project</code> before F-01.</li>
+  </ul>
+
+  <h3>gpui-component modules mapped to Ferret</h3>
+  <div class="scroller">
+    <table>
+      <caption>What to reach for, instead of hand-rolling</caption>
+      <thead><tr><th class="crate">Module</th><th>Used for</th></tr></thead>
+      <tbody>
+        <tr><td class="crate">table, virtual_list</td><td>File list (F-01), search results (F-40), CSV grid (F-35), rename preview (F-62)</td></tr>
+        <tr><td class="crate">tree</td><td>Sidebar (F-04), inline directory expansion (F-01)</td></tr>
+        <tr><td class="crate">dock, resizable</td><td>Panel layout, dual pane (F-05), terminal and preview splits</td></tr>
+        <tr><td class="crate">input</td><td>Path bar (F-02), search fields (F-40), code editor for edit mode (F-36)</td></tr>
+        <tr><td class="crate">highlighter</td><td>Syntax highlighting (F-32)</td></tr>
+        <tr><td class="crate">text</td><td>Markdown rendering (F-31)</td></tr>
+        <tr><td class="crate">command</td><td>Command palette (F-80)</td></tr>
+        <tr><td class="crate">dialog, sheet, form</td><td>New Connection (F-20), Commit (F-52), Batch rename (F-62)</td></tr>
+        <tr><td class="crate">sidebar, tab, breadcrumb</td><td>Browser chrome (F-03, F-04)</td></tr>
+        <tr><td class="crate">notification, progress, status_bar</td><td>Operations queue (F-60), git status (F-50), toasts (F-84)</td></tr>
+        <tr><td class="crate">theme</td><td>Light and dark themes (F-82) — see Q-07</td></tr>
+        <tr><td class="crate">title_bar, window_border</td><td>Custom title bar (§3)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Third-party crates</h3>
+  <ul>
+    <li><a href="https://github.com/alacritty/alacritty">alacritty_terminal</a> — VT parser and grid model (F-10).</li>
+    <li><a href="https://github.com/BurntSushi/ripgrep">ripgrep</a>: <code>ignore</code>, <code>grep-searcher</code>, <code>grep-regex</code> (F-40, F-41).</li>
+    <li><a href="https://github.com/Eugeny/russh">russh</a> and <a href="https://github.com/AspectUnk/russh-sftp">russh-sftp</a> — pure-Rust SSH and SFTP (F-21).</li>
+    <li><a href="https://github.com/notify-rs/notify">notify</a> — cross-platform file watching (F-01).</li>
+    <li><a href="https://github.com/Byron/trash-rs">trash</a>, <a href="https://github.com/Seeker14491/opener">opener</a>, <a href="https://github.com/dirs-dev/dirs-rs">dirs</a> (F-71, F-72, F-81).</li>
+  </ul>
+
+  <h3>Prior art</h3>
+  <ul>
+    <li><a href="https://iruka.dorienherremans.com/">Iruka</a> — the reference product. Its <a href="https://iruka.dorienherremans.com/docs">docs</a> are the best available spec for expected behaviour.</li>
+    <li><a href="https://apps.kde.org/dolphin/">KDE Dolphin</a> — the original terminal-panel file manager, and the idea Iruka is itself built on.</li>
+    <li><a href="https://github.com/gokcehan/lf">lf</a>, <a href="https://github.com/ranger/ranger">ranger</a>, <a href="https://yazi-rs.github.io/">Yazi</a> — terminal file managers worth studying for keyboard model and preview architecture.</li>
+    <li><a href="https://github.com/files-community/Files">Files</a> (Windows) — a well-built open-source file manager with a comparable feature set.</li>
+  </ul>
+
+  <h3>In this repository</h3>
+  <ul>
+    <li><code>AGENTS.md</code> — contributor and agent working rules, including the dependency policy behind D-01.</li>
+    <li><code>Cargo.toml</code> — workspace members, shared dependencies, build profiles (D-10).</li>
+    <li><code>crates/ferret-ui/themes/groknight.json</code> — the default dark palette (F-12, F-82).</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Ferret · product &amp; architecture plan · rev 1 · 25 August 2026 · GPL-3.0-or-later<br>
+  Feature IDs (F-nn), decisions (D-nn), risks (R-nn) and questions (Q-nn) are stable — cite them from per-feature plans.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  // Theme toggle: attribute beats media query in both directions.
+  var root = document.documentElement;
+  var btn = document.getElementById('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('ferret-plan-theme'); } catch (e) {}
+  if (saved === 'dark' || saved === 'light') root.setAttribute('data-theme', saved);
+
+  btn.addEventListener('click', function () {
+    var explicit = root.getAttribute('data-theme');
+    var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var current = explicit || (systemDark ? 'dark' : 'light');
+    var next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('ferret-plan-theme', next); } catch (e) {}
+  });
+
+  // Mark the section currently in view in the rail.
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail nav a'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+
+  // Highlight the last section whose heading has passed the top of the viewport,
+  // which is the section the reader is actually in — an intersection test would
+  // also match the previous section while its tail is still on screen.
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
+  var ticking = false;
+
+  function mark() {
+    ticking = false;
+    var line = window.scrollY + 120;
+    var active = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].offsetTop <= line) active = sections[i]; else break;
+    }
+    links.forEach(function (a) { a.classList.remove('is-current'); });
+    if (active && byId[active.id]) byId[active.id].classList.add('is-current');
+  }
+
+  window.addEventListener('scroll', function () {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(mark); }
+  }, { passive: true });
+  window.addEventListener('resize', mark, { passive: true });
+  mark();
+})();
+</script>
+</body>
+</html>

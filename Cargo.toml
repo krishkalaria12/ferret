@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/ferret", "crates/ferret-ui"]
+default-members = ["crates/ferret"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ferret-fm/ferret"
+
+[workspace.dependencies]
+# GPUI is tracked from Zed's Git repository; the exact commit is pinned by Cargo.lock.
+# `gpui-component` resolves `gpui` from the same Git source, so Cargo unifies both to a
+# single crate instance. Do not add a `rev` to one without pinning the other to match.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+
+ferret-ui = { path = "crates/ferret-ui" }
+
+[profile.dev]
+opt-level = 0
+
+# GPUI is unusably slow when its dependencies are built unoptimised.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
