@@ -24,6 +24,57 @@ Phase 1 is the base and must be finished first; phases 2–9 are addons that plu
 the completed shell. Read both documents before proposing structural work, and cite
 feature IDs (F-nn) and decisions (D-nn) when you do.
 
+## The Current Task: build the base
+
+**Implement the whole base explorer shell**, specified by `docs/ui-base.html`.
+Work through its §10 build order in sequence — each step leaves the app runnable,
+which is what makes a long run recoverable when something goes wrong.
+
+Already done, do not redo:
+
+| | |
+| --- | --- |
+| `ferret-vfs` | `Vfs` trait, `LocalFs`, `VfsPath`. Streaming listings, cancel-by-drop. |
+| `ferret-settings` | Settings schema, keymap, per-folder view preferences. |
+| `crates/ferret-ui/assets/icons/` | 64 bundled file icons and their mapping table. |
+| `xtask` | Fixture generator and listing benchmark. |
+
+Still to create: `ferret-platform` (trash, reveal, open-with, volumes, Places),
+the `notify` file watcher in `ferret-vfs`, and everything in `ferret-ui`.
+
+### Gates
+
+Do not move past a gate until it passes. These exist because each one is far
+cheaper to satisfy now than to retrofit.
+
+1. **Virtualisation.** As soon as the file pane renders rows, point it at the
+   fixture's `flat/` (200,000 entries) and scroll. Full frame rate, or stop and
+   fix it — no later work recovers a table that was never virtualised.
+2. **Focus.** Selection is drawn differently when the pane has focus
+   (`--app-selected`) than when it does not (`--app-selected-idle`), and arrow
+   keys follow focus. Build this with selection, not after.
+3. **Both themes.** Check light and dark at every visual step. A token defined
+   for only one is a bug.
+4. **Both platforms.** Every keybinding needs a Windows equivalent. Anything
+   touching paths, permissions or the trash needs a plan for both.
+5. **Trash before delete.** `remove(Trash)` currently returns `Unsupported` on
+   purpose. Wire it to the real trash before any delete path ships — never fall
+   back to permanent deletion.
+6. **Run it.** `cargo check` passing proves nothing about GPUI: every failure
+   mode in the bootstrap contract below is silent at compile time.
+
+### Finished when
+
+You can set Ferret as your default file manager and not miss the system one for
+browsing, opening, renaming, moving and deleting.
+
+### If you get stuck
+
+Prefer leaving a step unfinished and saying so over inventing an abstraction to
+route around it. Open questions Q-01 to Q-08 in `docs/plan.html` are genuinely
+open — if you hit one, say which, and take the simplest option that keeps the
+base shippable.
+
 ```text
 .
 ├── Cargo.toml            # Workspace members, shared dependencies, profiles
@@ -35,14 +86,20 @@ feature IDs (F-nn) and decisions (D-nn) when you do.
 │   ├── ferret-ui/        # Views and Ferret-specific theme tokens
 │   │   ├── src/lib.rs    # Public API and RootView
 │   │   ├── src/theme.rs  # Terminal ANSI palette (interface colours come from gpui-component)
+│   │   ├── assets/icons/ # Bundled file icons (Material Icon Theme, MIT) + mapping
 │   │   └── themes/groknight.json
+│   ├── ferret-settings/  # Settings schema and per-folder view preferences
+│   │   ├── src/schema.rs # The settings file's shape (D-21)
+│   │   ├── src/folder_prefs.rs  # Per-folder views, bounded LRU (D-16)
+│   │   ├── src/errors.rs
+│   │   ├── src/config.rs
+│   │   └── default-settings.json  # Generated; a test keeps it in sync
 │   └── ferret-vfs/       # Storage layer
 │       ├── src/vfs.rs    # The Vfs trait (D-17)
 │       ├── src/local.rs  # LocalFs over std::fs
 │       ├── src/path.rs   # VfsPath
 │       ├── src/errors.rs # VfsError + the crate's Result alias
-│       ├── src/config.rs # Every tunable in the crate
-│       └── src/folder_prefs.rs  # Per-folder view preferences, bounded LRU (D-16)
+│       └── src/config.rs # Every tunable in the crate
 ├── xtask/                # Fixture generator and listing benchmark
 │   ├── src/config.rs     # Fixture shape and performance budgets
 │   ├── src/fixture.rs
@@ -56,7 +113,8 @@ feature IDs (F-nn) and decisions (D-nn) when you do.
 | --- | --- | --- |
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
-| `crates/ferret-vfs` | `ferret-vfs` | The `Vfs` trait, the local backend, path handling, per-folder view preferences. Knows nothing about GPUI. |
+| `crates/ferret-settings` | `ferret-settings` | The settings schema, per-folder view preferences, the keymap. Knows nothing about GPUI or the filesystem layer. |
+| `crates/ferret-vfs` | `ferret-vfs` | The `Vfs` trait, the local backend, path handling. Knows nothing about GPUI. |
 | `xtask` | `xtask` | Development tasks: the performance fixture and the listing benchmark. |
 
 **Ownership rule:** put behavior in the crate that owns it. Window and
@@ -71,8 +129,12 @@ exists. `ferret-core` is the same: the shared domain types currently live in
 
 Respect the layering: no service crate may depend on `ferret-ui`, and **only
 `ferret-ui` may depend on `gpui-component`**. Service crates should stay
-GPUI-free where they can — `ferret-vfs` is, and its 31 tests run without opening
-a window. That is the standard to hold.
+GPUI-free where they can — `ferret-vfs` and `ferret-settings` both are, and their
+50 tests run without opening a window. That is the standard to hold.
+
+`ferret-settings` deliberately does **not** depend on `ferret-vfs`. It keys folder
+preferences by plain `&str`; the caller passes `VfsPath::preference_key()`. Keep
+that boundary — settings is not a storage concern.
 
 ## Quick Start
 

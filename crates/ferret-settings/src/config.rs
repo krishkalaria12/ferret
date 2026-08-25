@@ -1,0 +1,39 @@
+//! Every tunable in this crate.
+
+use std::time::Duration;
+
+/// Directory name under the OS config directory.
+///
+/// Resolves to `~/Library/Application Support/Ferret` on macOS and
+/// `%APPDATA%\Ferret` on Windows, via the `dirs` crate. Never beside the binary:
+/// installs are read-only and shared.
+pub const APP_DIR: &str = "Ferret";
+
+/// The user-editable settings file.
+pub const SETTINGS_FILE: &str = "settings.json";
+
+/// The per-folder view preference store, written by the app rather than by hand.
+pub const FOLDER_PREFS_FILE: &str = "folder-views.json";
+
+/// How many folders keep their view preferences before the oldest is evicted.
+///
+/// Roughly 500 KB on disk and a sub-10 ms load. Windows Explorer caps its
+/// equivalent store too — the requirement is "remember the folders I use", not
+/// "remember every folder forever", and an unbounded file would grow for the
+/// life of the install. See D-16.
+pub const FOLDER_PREFS_CAPACITY: usize = 4_000;
+
+/// How long to wait after the last change before writing to disk.
+///
+/// Every sort click and column drag is a change; without this, dragging a column
+/// edge would write the file on every frame.
+pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Bounds on the interface font size, so a hand-edited file cannot make the app
+/// unusable and unfixable through its own UI.
+pub const MIN_FONT_SIZE: f32 = 9.0;
+pub const MAX_FONT_SIZE: f32 = 24.0;
+
+/// Bounds on the sidebar width, matching the geometry in `docs/ui-base.html` §4.
+pub const MIN_SIDEBAR_WIDTH: f32 = 180.0;
+pub const MAX_SIDEBAR_WIDTH: f32 = 400.0;

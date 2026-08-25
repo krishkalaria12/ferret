@@ -19,6 +19,9 @@
 //! Deliberately *not* sidecar files. `.DS_Store` needs write permission the
 //! user may not have, fails on read-only volumes and network shares, and
 //! litters every directory it touches — including their repositories.
+//!
+//! Keys come from `VfsPath::preference_key()` in `ferret-vfs`, but this module
+//! takes plain `&str` so settings never has to depend on the storage layer.
 
 use crate::config::FOLDER_PREFS_CAPACITY;
 use serde::{Deserialize, Serialize};

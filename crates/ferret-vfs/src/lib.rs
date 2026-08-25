@@ -26,6 +26,9 @@
 //! the crate's [`Result`] alias live in `errors.rs`, and every tunable lives in
 //! [`config`].
 //!
+//! View preferences are *not* here — they are a settings concern and live in
+//! `ferret-settings`. This crate deals only with storage.
+//!
 //! Shared domain types live here for now. They move to a `ferret-core` crate
 //! when a second service crate needs them — not before.
 
@@ -33,14 +36,12 @@ pub mod config;
 
 mod entry;
 mod errors;
-mod folder_prefs;
 mod local;
 mod path;
 mod vfs;
 
 pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
 pub use errors::{Result, VfsError};
-pub use folder_prefs::{FolderPrefs, FolderView, SortKey, SortOrder, ViewMode};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
 pub use vfs::{Capabilities, RemoveMode, Vfs};

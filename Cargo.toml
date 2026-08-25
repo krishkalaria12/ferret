@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferret", "crates/ferret-ui", "crates/ferret-vfs", "xtask"]
+members = [
+    "crates/ferret",
+    "crates/ferret-settings",
+    "crates/ferret-ui",
+    "crates/ferret-vfs",
+    "xtask",
+]
 default-members = ["crates/ferret"]
 
 [workspace.package]
@@ -36,6 +42,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 ferret-ui = { path = "crates/ferret-ui" }
+ferret-settings = { path = "crates/ferret-settings" }
 ferret-vfs = { path = "crates/ferret-vfs" }
 
 anyhow = "1"

@@ -1,0 +1,35 @@
+{
+  "appearance": {
+    "theme": "system",
+    "ui_font_size": 13.0,
+    "row_density": "comfortable",
+    "alternate_row_colors": true
+  },
+  "browser": {
+    "default_view": "list",
+    "sort_key": "name",
+    "sort_order": "ascending",
+    "directories_first": true,
+    "natural_sort": true,
+    "show_hidden": false,
+    "columns": [
+      "name",
+      "modified",
+      "size"
+    ],
+    "confirm_permanent_delete": true,
+    "enter_opens": true,
+    "remember_folder_views": true
+  },
+  "sidebar": {
+    "visible": true,
+    "width": 208.0,
+    "favorites": [],
+    "show_places": true,
+    "show_volumes": true
+  },
+  "window": {
+    "restore_session": true,
+    "default_directory": null
+  }
+}

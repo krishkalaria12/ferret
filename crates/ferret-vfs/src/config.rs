@@ -16,14 +16,6 @@
 /// that the buffer is a rounding error against the rows already on screen.
 pub const LISTING_BUFFER: usize = 512;
 
-/// How many folders keep their view preferences before the oldest is evicted.
-///
-/// Roughly 500 KB on disk and a sub-10 ms load. Windows Explorer caps its
-/// equivalent store too — the requirement is "remember the folders I use", not
-/// "remember every folder forever", and an unbounded file would grow for the
-/// life of the install. See D-16.
-pub const FOLDER_PREFS_CAPACITY: usize = 4_000;
-
 /// Bytes read when sniffing a file's type or building a preview.
 ///
 /// Nothing may read a whole file speculatively: arrow-keying down a directory

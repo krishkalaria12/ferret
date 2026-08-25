@@ -24,18 +24,26 @@ Targets **macOS and Windows** (Linux deferred, not abandoned), built in Rust on
 
 ```
 crates/
-  ferret/      # native binary: bootstrap, window, menus, actions  (bin `ferret`)
-  ferret-ui/   # views and Ferret-specific theme tokens            (lib `ferret-ui`)
-  ferret-vfs/  # the Vfs trait, local backend, folder view prefs   (lib `ferret-vfs`)
-xtask/         # fixture generator and listing benchmark
+  ferret/           # native binary: bootstrap, window, menus, actions
+  ferret-ui/        # views, theme tokens, bundled file icons
+  ferret-vfs/       # the Vfs trait, local backend, path handling
+  ferret-settings/  # settings schema, keymap, per-folder view preferences
+xtask/              # fixture generator and listing benchmark
 docs/
   ui-base.html # base explorer shell — the UI reference to build against
   plan.html    # product + architecture plan
 ```
 
-`docs/plan.html` describes the target architecture the workspace grows into. Note
-that `ferret-core` does not exist yet — the shared domain types live in
-`ferret-vfs` until a second service crate needs them.
+`docs/plan.html` describes the target architecture the workspace grows into.
+`ferret-core` does not exist yet — the shared domain types live in `ferret-vfs`
+until a second service crate needs them.
+
+## Settings
+
+A human-editable JSON file at `~/Library/Application Support/Ferret/settings.json`
+(macOS) or `%APPDATA%\Ferret\settings.json` (Windows). Every key is optional, so
+a partial file works and deleting it is always safe. See
+`crates/ferret-settings/default-settings.json` for the full shape.
 
 ## Build
 
