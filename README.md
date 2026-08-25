@@ -11,8 +11,14 @@ Targets **Linux, macOS and Windows**, built in Rust on
 [GPUI](https://www.gpui.rs/) with [gpui-component](https://github.com/longbridge/gpui-component).
 
 > **Status: scaffolding.** The workspace builds and opens a window; none of the
-> product features are implemented yet. The full design lives in
-> **[`docs/plan.html`](docs/plan.html)** — open it in a browser.
+> product features are implemented yet.
+>
+> - **[`docs/ui-base.html`](docs/ui-base.html)** — the base explorer shell: mockup,
+>   geometry, component map, tokens, interaction contract. **Build this first.**
+> - **[`docs/plan.html`](docs/plan.html)** — the whole product: 51 features, target
+>   architecture, platform hazards, decisions, phases.
+>
+> Open either in a browser.
 
 ## Workspace
 
@@ -21,6 +27,7 @@ crates/
   ferret/      # native binary: bootstrap, window, menus, actions  (bin `ferret`)
   ferret-ui/   # views and Ferret-specific theme tokens            (lib `ferret-ui`)
 docs/
+  ui-base.html # base explorer shell — the UI reference to build against
   plan.html    # product + architecture plan
 ```
 

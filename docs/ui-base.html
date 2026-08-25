@@ -1,0 +1,1098 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferret — Base UI Reference</title>
+<style>
+/* ===========================================================================
+   Two palettes live in this file, on purpose.
+
+   1. Document chrome  (--ink, --ground, --rule …) — matches docs/plan.html so
+      the two documents read as one set.
+   2. The Ferret app palette (--app-*) — the actual proposed application
+      design. This is the part you build against.
+   =========================================================================== */
+:root {
+  /* -- document chrome -- */
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+
+  --measure: 68ch;
+  --rail: 16.5rem;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+
+  /* -- Ferret application palette: LIGHT -- */
+  --app-accent:        #0a6cff;
+  --app-accent-fg:     #ffffff;
+  --app-window:        #ffffff;
+  --app-titlebar:      #f0f0f3;
+  --app-sidebar:       #f4f4f7;
+  --app-pane:          #ffffff;
+  --app-header:        #fafafc;
+  --app-statusbar:     #f4f4f7;
+  --app-border:        #dcdce2;
+  --app-border-strong: #c6c6ce;
+  --app-fg:            #1a1a1f;
+  --app-fg-muted:      #71717f;
+  --app-fg-faint:      #9a9aa8;
+  --app-row-alt:       #fafafb;
+  --app-hover:         #ececf1;
+  --app-selected:      #0a6cff;
+  --app-selected-fg:   #ffffff;
+  --app-selected-idle: #e2e2e9;
+  --app-folder:        #4a9eff;
+  --app-tab-active:    #ffffff;
+  --app-focus-ring:    #0a6cff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --accent:      #7aa2f7;
+    --accent-soft: #18202f;
+    --accent-line: #2c405f;
+    --ok:   #9ece6a;
+    --warn: #e0af68;
+    --risk: #f7768e;
+    --violet: #bb9af7;
+
+    --ground:  #101116;
+    --panel:   #16181e;
+    --sunken:  #1b1e25;
+    --rule:    #2a2e38;
+    --rule-soft: #22252d;
+
+    --ink:     #e3e5ea;
+    --ink-mid: #a3a8b5;
+    --ink-dim: #767c8b;
+
+    --app-accent:        #4d8dff;
+    --app-accent-fg:     #ffffff;
+    --app-window:        #1c1c20;
+    --app-titlebar:      #26262c;
+    --app-sidebar:       #1a1a1e;
+    --app-pane:          #1c1c20;
+    --app-header:        #222227;
+    --app-statusbar:     #1f1f24;
+    --app-border:        #35353d;
+    --app-border-strong: #45454f;
+    --app-fg:            #e6e6ea;
+    --app-fg-muted:      #9a9aa6;
+    --app-fg-faint:      #6e6e7a;
+    --app-row-alt:       #202025;
+    --app-hover:         #2a2a31;
+    --app-selected:      #2f6bd4;
+    --app-selected-fg:   #ffffff;
+    --app-selected-idle: #33333c;
+    --app-folder:        #5aa6ff;
+    --app-tab-active:    #34343c;
+    --app-focus-ring:    #4d8dff;
+  }
+}
+
+:root[data-theme="dark"] {
+  --accent: #7aa2f7; --accent-soft: #18202f; --accent-line: #2c405f;
+  --ok: #9ece6a; --warn: #e0af68; --risk: #f7768e; --violet: #bb9af7;
+  --ground: #101116; --panel: #16181e; --sunken: #1b1e25;
+  --rule: #2a2e38; --rule-soft: #22252d;
+  --ink: #e3e5ea; --ink-mid: #a3a8b5; --ink-dim: #767c8b;
+
+  --app-accent: #4d8dff; --app-accent-fg: #ffffff;
+  --app-window: #1c1c20; --app-titlebar: #26262c; --app-sidebar: #1a1a1e;
+  --app-pane: #1c1c20; --app-header: #222227; --app-statusbar: #1f1f24;
+  --app-border: #35353d; --app-border-strong: #45454f;
+  --app-fg: #e6e6ea; --app-fg-muted: #9a9aa6; --app-fg-faint: #6e6e7a;
+  --app-row-alt: #202025; --app-hover: #2a2a31;
+  --app-selected: #2f6bd4; --app-selected-fg: #ffffff; --app-selected-idle: #33333c;
+  --app-folder: #5aa6ff; --app-tab-active: #34343c; --app-focus-ring: #4d8dff;
+}
+
+:root[data-theme="light"] {
+  --accent: #3b6fd4; --accent-soft: #e8eefb; --accent-line: #b9cdf2;
+  --ok: #4a7a22; --warn: #8a6410; --risk: #b8384f; --violet: #6f4bbf;
+  --ground: #fbfbfd; --panel: #ffffff; --sunken: #f2f3f7;
+  --rule: #dfe1e9; --rule-soft: #ebedf2;
+  --ink: #16181d; --ink-mid: #4c515e; --ink-dim: #767c8b;
+
+  --app-accent: #0a6cff; --app-accent-fg: #ffffff;
+  --app-window: #ffffff; --app-titlebar: #f0f0f3; --app-sidebar: #f4f4f7;
+  --app-pane: #ffffff; --app-header: #fafafc; --app-statusbar: #f4f4f7;
+  --app-border: #dcdce2; --app-border-strong: #c6c6ce;
+  --app-fg: #1a1a1f; --app-fg-muted: #71717f; --app-fg-faint: #9a9aa8;
+  --app-row-alt: #fafafb; --app-hover: #ececf1;
+  --app-selected: #0a6cff; --app-selected-fg: #ffffff; --app-selected-idle: #e2e2e9;
+  --app-folder: #4a9eff; --app-tab-active: #ffffff; --app-focus-ring: #0a6cff;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: var(--sans); font-size: 15.5px; line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--mono); font-weight: 600;
+  letter-spacing: -0.015em; text-wrap: balance; margin: 0;
+}
+h1 { font-size: clamp(1.9rem, 4.4vw, 2.9rem); line-height: 1.1; letter-spacing: -0.035em; }
+h2 { font-size: clamp(1.3rem, 2.6vw, 1.6rem); line-height: 1.2; }
+h3 { font-size: 1.06rem; margin-top: 2rem; margin-bottom: .5rem; }
+h4 { font-size: .94rem; letter-spacing: 0; margin-top: 1.4rem; margin-bottom: .35rem; }
+
+p, li { max-width: var(--measure); }
+p { margin: 0 0 .9rem; }
+ul, ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+li { margin-bottom: .35rem; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code {
+  font-family: var(--mono); font-size: .875em; background: var(--sunken);
+  border: 1px solid var(--rule-soft); padding: .05em .34em; border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+kbd {
+  font-family: var(--mono); font-size: .8em; background: var(--panel);
+  border: 1px solid var(--rule); border-bottom-width: 2px;
+  padding: .1em .4em; border-radius: 4px; white-space: nowrap;
+}
+
+/* --- shell --- */
+.shell {
+  display: grid; grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: var(--gutter); max-width: 82rem; margin: 0 auto;
+  padding: 0 var(--gutter) 6rem;
+}
+.rail {
+  position: sticky; top: 0; align-self: start; max-height: 100vh; overflow-y: auto;
+  padding: 2.25rem 0 2rem; font-family: var(--mono); font-size: .8rem; line-height: 1.5;
+}
+.rail-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: .5rem;
+  padding-bottom: .75rem; margin-bottom: .75rem; border-bottom: 1px solid var(--rule);
+}
+.rail-head b { font-size: .95rem; letter-spacing: -.02em; }
+.rail nav ol { list-style: none; margin: 0; padding: 0; }
+.rail nav li { margin: 0; max-width: none; }
+.rail nav a {
+  display: block; padding: .28rem .5rem .28rem 1.35rem; color: var(--ink-mid);
+  text-decoration: none; border-left: 2px solid transparent; position: relative;
+  overflow-wrap: anywhere;
+}
+.rail nav a::before { content: "├─"; position: absolute; left: .18rem; color: var(--ink-dim); opacity: .55; }
+.rail nav li:last-child a::before { content: "└─"; }
+.rail nav a:hover { color: var(--ink); background: var(--sunken); }
+.rail nav a.is-current { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
+.doc { padding-top: 2.25rem; min-width: 0; }
+
+.masthead { padding: 1.5rem 0 2.25rem; border-bottom: 1px solid var(--rule); margin-bottom: 2rem; }
+.eyebrow {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-dim); margin: 0 0 .85rem;
+}
+.masthead .lede { font-size: 1.12rem; color: var(--ink-mid); margin: 1rem 0 0; max-width: 60ch; }
+
+section { padding-top: 3.25rem; }
+section > h2 { margin-bottom: .3rem; }
+.sec-tag {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .08em;
+  color: var(--ink-dim); display: block; margin-bottom: .45rem;
+}
+.sec-intro { color: var(--ink-mid); margin-top: .85rem; }
+
+/* --- tables --- */
+.scroller { overflow-x: auto; margin: 1.1rem 0 1.4rem; border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: .875rem; min-width: 34rem; }
+table.wide { min-width: 50rem; }
+caption {
+  text-align: left; font-family: var(--mono); font-size: .74rem; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-dim); padding: .7rem .85rem;
+  border-bottom: 1px solid var(--rule); background: var(--sunken);
+}
+th, td { text-align: left; padding: .55rem .85rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ink-dim); font-weight: 600; background: var(--panel); border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--sunken); }
+td.num, th.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.mono, th.mono { font-family: var(--mono); font-size: .8rem; }
+td.id { font-family: var(--mono); font-size: .8rem; color: var(--ink-dim); white-space: nowrap; }
+
+/* --- pills / notes --- */
+.pill {
+  display: inline-block; font-family: var(--mono); font-size: .68rem; letter-spacing: .05em;
+  text-transform: uppercase; padding: .12rem .45rem; border-radius: 3px;
+  border: 1px solid; white-space: nowrap; vertical-align: baseline;
+}
+.p-base  { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.p-addon { color: var(--ink-dim); border-color: var(--rule); background: var(--sunken); }
+.note {
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  padding: .85rem 1rem; border-radius: 0 5px 5px 0; margin: 1.2rem 0; font-size: .92rem;
+}
+.note.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.note > :last-child { margin-bottom: 0; }
+.note strong {
+  font-family: var(--mono); font-size: .82rem; letter-spacing: .05em;
+  text-transform: uppercase; display: block; margin-bottom: .3rem;
+}
+
+/* ===========================================================================
+   THE MOCKUP
+   =========================================================================== */
+.stage {
+  overflow-x: auto;
+  padding: 2rem;
+  background:
+    repeating-linear-gradient(45deg, var(--sunken) 0 8px, transparent 8px 16px);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  margin: 1.4rem 0 .6rem;
+}
+.win {
+  width: 1140px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--app-window);
+  color: var(--app-fg);
+  border: 1px solid var(--app-border-strong);
+  box-shadow: 0 20px 50px -18px rgba(0,0,0,.45);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+  user-select: none;
+}
+
+/* -- title bar -- */
+.tbar {
+  display: flex; align-items: center; gap: 10px;
+  height: 46px; padding: 0 12px;
+  background: var(--app-titlebar);
+  border-bottom: 1px solid var(--app-border);
+}
+.lights { display: flex; gap: 8px; padding-right: 6px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.lights i:nth-child(1) { background: #ff5f57; }
+.lights i:nth-child(2) { background: #febc2e; }
+.lights i:nth-child(3) { background: #28c840; }
+.tbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 24px; border-radius: 5px; color: var(--app-fg-muted);
+  flex: none;
+}
+.tbtn.on { background: var(--app-accent); color: var(--app-accent-fg); }
+.tbtn.off { opacity: .35; }
+.nav-group { display: flex; gap: 2px; }
+.wtitle {
+  font-weight: 600; font-size: 13px; margin-left: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tbar .spacer { flex: 1 1 auto; min-width: 8px; }
+.segmented {
+  display: flex; padding: 2px; gap: 2px; border-radius: 6px;
+  background: var(--app-hover);
+}
+.segmented .seg {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 22px; border-radius: 4px; color: var(--app-fg-muted);
+}
+.segmented .seg.active { background: var(--app-window); color: var(--app-fg); box-shadow: 0 1px 2px rgba(0,0,0,.14); }
+.toolgroup { display: flex; gap: 1px; }
+
+/* -- body split -- */
+.body { display: flex; align-items: stretch; height: 452px; }
+
+/* -- sidebar -- */
+.side {
+  width: 208px; flex: none; background: var(--app-sidebar);
+  border-right: 1px solid var(--app-border);
+  padding: 8px 0; overflow: hidden;
+}
+.side h5 {
+  margin: 10px 0 3px; padding: 0 14px; font-family: var(--sans);
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--app-fg-faint);
+}
+.side h5:first-child { margin-top: 2px; }
+/* Inset + rounded so the selection reads as a pill, not a full-bleed band.
+   Margin + padding sum to the 14px text inset the section labels use. */
+.srow {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 6px; padding: 3px 8px; border-radius: 5px; color: var(--app-fg);
+}
+.srow svg { color: var(--app-fg-muted); flex: none; }
+.srow.sel { background: var(--app-selected); color: var(--app-selected-fg); }
+.srow.sel svg { color: var(--app-selected-fg); }
+.srow .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side .grip { color: var(--app-folder); }
+
+/* -- main -- */
+.main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; background: var(--app-pane); }
+
+.tabs {
+  display: flex; align-items: center; gap: 4px; height: 32px;
+  padding: 0 8px; background: var(--app-titlebar);
+  border-bottom: 1px solid var(--app-border);
+}
+.tab {
+  display: flex; align-items: center; gap: 6px; height: 24px;
+  padding: 0 10px; border-radius: 5px; color: var(--app-fg-muted); max-width: 190px;
+}
+.tab.active { background: var(--app-tab-active); color: var(--app-fg); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.tab.active svg { color: var(--app-folder); }
+.tab .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-new {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 5px; color: var(--app-fg-muted);
+}
+
+.pathbar {
+  display: flex; align-items: center; gap: 7px; height: 30px;
+  padding: 0 10px; border-bottom: 1px solid var(--app-border);
+  background: var(--app-pane); color: var(--app-fg);
+}
+.pathbar svg { color: var(--app-folder); flex: none; }
+.pathbar .p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; }
+.pathbar .edit { color: var(--app-fg-faint); flex: none; }
+
+.colhead {
+  display: flex; align-items: center; height: 26px;
+  padding: 0 10px; background: var(--app-header);
+  border-bottom: 1px solid var(--app-border);
+  color: var(--app-fg-muted); font-size: 11.5px;
+}
+.colhead .c { display: flex; align-items: center; gap: 4px; }
+.colhead .c.sorted { color: var(--app-fg); }
+
+/* shared column geometry between header and rows */
+.c-name { flex: 1 1 auto; min-width: 0; padding-left: 20px; }
+.c-date { width: 190px; flex: none; }
+.c-size { width: 84px; flex: none; text-align: right; }
+.c-cols { width: 56px; flex: none; text-align: right; }
+
+.rows { flex: 1 1 auto; overflow: hidden; }
+.row {
+  display: flex; align-items: center; height: 26px;
+  padding: 0 10px; color: var(--app-fg);
+}
+.row:nth-child(even) { background: var(--app-row-alt); }
+.row.sel { background: var(--app-selected); color: var(--app-selected-fg); }
+.row.sel .dim, .row.sel svg { color: var(--app-selected-fg); }
+.row.hover { background: var(--app-hover); }
+.row .disc { width: 14px; flex: none; color: var(--app-fg-faint); display: inline-flex; }
+.row .nm { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.row .nm .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .fold { color: var(--app-folder); flex: none; }
+.row .doc-ic { color: var(--app-fg-muted); flex: none; }
+.row .dim { color: var(--app-fg-muted); }
+.row .num { font-variant-numeric: tabular-nums; }
+.c-name-row { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
+
+.statusbar {
+  display: flex; align-items: center; height: 24px; padding: 0 12px;
+  background: var(--app-statusbar); border-top: 1px solid var(--app-border);
+  color: var(--app-fg-muted); font-size: 11.5px;
+}
+.statusbar .num { font-variant-numeric: tabular-nums; }
+
+/* icon-view variant */
+.grid-rows { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px; align-content: flex-start; }
+.tile {
+  width: 92px; padding: 8px 4px; border-radius: 6px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+}
+.tile.sel { background: var(--app-selected); color: var(--app-selected-fg); }
+.tile.sel svg { color: var(--app-selected-fg); }
+.tile .lbl { font-size: 11.5px; word-break: break-word; line-height: 1.25; }
+
+/* callout markers over the mockup */
+.marker {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--accent); color: #fff; font-family: var(--mono);
+  font-size: 10.5px; font-weight: 600; vertical-align: middle;
+}
+
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .4rem 1.2rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+.legend li { display: flex; gap: .5rem; align-items: baseline; margin: 0; max-width: none; font-size: .88rem; }
+
+/* swatches */
+.swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .5rem; margin: 1rem 0 1.4rem; padding: 0; list-style: none; }
+.swatches li { margin: 0; max-width: none; border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.swatches .chip { height: 34px; border-bottom: 1px solid var(--rule); }
+.swatches .nm { display: block; font-family: var(--mono); font-size: .68rem; padding: .3rem .45rem; color: var(--ink-mid); overflow-wrap: anywhere; }
+
+#theme {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .06em; text-transform: uppercase;
+  background: var(--panel); color: var(--ink-mid); border: 1px solid var(--rule);
+  border-radius: 4px; padding: .2rem .45rem; cursor: pointer; flex: none;
+}
+#theme:hover { color: var(--ink); border-color: var(--accent-line); }
+
+footer {
+  margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--rule);
+  font-family: var(--mono); font-size: .78rem; color: var(--ink-dim);
+}
+
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .rail { position: static; max-height: none; padding: 1.5rem 0 0; border-bottom: 1px solid var(--rule); }
+  .rail nav ol { display: flex; flex-wrap: wrap; gap: .2rem; padding-bottom: 1rem; }
+  .rail nav a { padding: .2rem .5rem; border-left: 0; border-radius: 4px; }
+  .rail nav a::before, .rail nav li:last-child a::before { content: none; }
+  .doc { padding-top: 1.5rem; }
+  .stage { padding: 1rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <g id="i-base" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></g>
+  </defs>
+  <symbol id="ic-sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></g></symbol>
+  <symbol id="ic-left" viewBox="0 0 24 24"><polyline points="15 5 8 12 15 19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-right" viewBox="0 0 24 24"><polyline points="9 5 16 12 9 19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-up" viewBox="0 0 24 24"><polyline points="5 15 12 8 19 15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-list" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><line x1="8" y1="7" x2="20" y2="7"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="17" x2="20" y2="17"/><circle cx="4.5" cy="7" r=".9" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r=".9" fill="currentColor" stroke="none"/><circle cx="4.5" cy="17" r=".9" fill="currentColor" stroke="none"/></g></symbol>
+  <symbol id="ic-cols" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><line x1="9" y1="5" x2="9" y2="19"/><line x1="15" y1="5" x2="15" y2="19"/></g></symbol>
+  <symbol id="ic-grid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="4" y="4" width="6.5" height="6.5" rx="1.4"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.4"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.4"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.4"/></g></symbol>
+  <symbol id="ic-filenew" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"/><polyline points="14 3 14 8 19 8"/><line x1="18" y1="14" x2="18" y2="20"/><line x1="15" y1="17" x2="21" y2="17"/></g></symbol>
+  <symbol id="ic-foldernew" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v3"/><path d="M3 7v11a2 2 0 0 0 2 2h8"/><line x1="18" y1="14" x2="18" y2="20"/><line x1="15" y1="17" x2="21" y2="17"/></g></symbol>
+  <symbol id="ic-eyeoff" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12s3.2-5.5 8-5.5c1.5 0 2.8.5 3.9 1.2"/><path d="M19.5 9.6c.3.4.5.8.5.8s-3.2 5.5-8 5.5c-.9 0-1.7-.2-2.5-.5"/><line x1="4" y1="20" x2="20" y2="4"/></g></symbol>
+  <symbol id="ic-refresh" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-.6 4"/><polyline points="20 5 20 11 14 11"/></g></symbol>
+  <symbol id="ic-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.2 8.2 0 0 1 9.6 4 8.5 8.5 0 1 0 20 14.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-more" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 6 12 12 6 18"/><polyline points="13 6 19 12 13 18"/></g></symbol>
+  <symbol id="ic-plus" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="12" y1="6" x2="12" y2="18"/><line x1="6" y1="12" x2="18" y2="12"/></g></symbol>
+  <symbol id="ic-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" fill="currentColor" opacity=".9"/></symbol>
+  <symbol id="ic-folder-o" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-doc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><polyline points="14 3 14 8 19 8"/></g></symbol>
+  <symbol id="ic-chevron" viewBox="0 0 24 24"><polyline points="10 6 16 12 10 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-caret" viewBox="0 0 24 24"><polyline points="7 10 12 15 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="ic-home" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M4 10.5 12 4l8 6.5"/><path d="M6 10v9h12v-9"/></g></symbol>
+  <symbol id="ic-monitor" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="5" width="18" height="12" rx="2"/><line x1="9" y1="20" x2="15" y2="20" stroke-linecap="round"/></g></symbol>
+  <symbol id="ic-download" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="4" x2="12" y2="15"/><polyline points="7 11 12 16 17 11"/><line x1="5" y1="20" x2="19" y2="20"/></g></symbol>
+  <symbol id="ic-music" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M10 18V6l9-2v12"/><circle cx="7.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></g></symbol>
+  <symbol id="ic-image" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><polyline points="5 17 10 12 14 15 17 13 21 16"/></g></symbol>
+  <symbol id="ic-apps" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="7" cy="7" r="2"/><circle cx="12" cy="7" r="2"/><circle cx="17" cy="7" r="2"/><circle cx="7" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="17" cy="12" r="2"/><circle cx="7" cy="17" r="2"/><circle cx="12" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></g></symbol>
+  <symbol id="ic-drive" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="9" width="18" height="9" rx="2"/><path d="M6 9 8 5h8l2 4"/><circle cx="17" cy="13.5" r="1" fill="currentColor" stroke="none"/></g></symbol>
+  <symbol id="ic-sliders" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="10" cy="8" r="2" fill="var(--app-header)"/><circle cx="15" cy="16" r="2" fill="var(--app-header)"/></g></symbol>
+  <symbol id="ic-pencil" viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+</svg>
+
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-head">
+    <b>ferret/ui-base</b>
+    <button id="theme" type="button" aria-label="Switch colour theme">theme</button>
+  </div>
+  <nav aria-label="Sections">
+    <ol>
+      <li><a href="#what">what this is</a></li>
+      <li><a href="#scope">base vs addon</a></li>
+      <li><a href="#mockup">the shell</a></li>
+      <li><a href="#anatomy">region map</a></li>
+      <li><a href="#views">view modes</a></li>
+      <li><a href="#components">component map</a></li>
+      <li><a href="#tokens">design tokens</a></li>
+      <li><a href="#interaction">interaction</a></li>
+      <li><a href="#states">states</a></li>
+      <li><a href="#order">build order</a></li>
+    </ol>
+  </nav>
+</aside>
+
+<main class="doc">
+
+<header class="masthead">
+  <p class="eyebrow">Base UI reference · rev 1 · 25 Aug 2026</p>
+  <h1>The explorer shell</h1>
+  <p class="lede">The window Ferret is before it is anything else: sidebar, tabs, path bar, file pane, status bar. Build this first; everything else plugs into it.</p>
+</header>
+
+<!-- ==================================================================== -->
+<section id="what">
+  <span class="sec-tag">§1</span>
+  <h2>What this is</h2>
+  <p class="sec-intro">The missing reference — a design to build the base against.</p>
+
+  <p>Ferret's product plan (<a href="plan.html">plan.html</a>) catalogues 51 features but
+  never shows what the window looks like. This document fills that gap for the base: an
+  original mockup of the explorer shell, the region-by-region geometry, the
+  <code>gpui-component</code> widget behind each region, the colour tokens, and the
+  interaction contract.</p>
+
+  <p>It is not a screenshot of anything. Ferret's reference product, Iruka, is closed
+  source and its screenshots are its own copyrighted assets, so nothing from them is
+  reproduced here. What follows is Ferret's own design, converging — as Dolphin, Finder
+  and Explorer all do — on the layout every file manager of this family uses.</p>
+
+  <div class="note">
+    <strong>How to use it</strong>
+    <p>The mockup below follows this page's theme; hit <em>theme</em> in the sidebar to check
+    the other one. Both are first-class — no token may be defined for only one. Every
+    number in §4 is a logical pixel, matching what you pass to <code>px()</code> in GPUI.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="scope">
+  <span class="sec-tag">§2</span>
+  <h2>Base vs addon</h2>
+  <p class="sec-intro">The base is a complete, usable file manager on its own. Nothing in it is a placeholder.</p>
+
+  <p>The test for the base is simple: <strong>can you use Ferret instead of your system
+  file manager for browsing, opening and organising files?</strong> If yes, the base is done.
+  Everything that makes Ferret <em>distinctive</em> — the synced terminal above all — is an
+  addon that lands on top of a finished shell.</p>
+
+  <p>Deliberately excluded from the base: the preview pane, the terminal panel, and the
+  splitters and toggle buttons that drive them. They arrive with their features, so the
+  base ships a full-width file pane rather than empty furniture.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Scope of the base</caption>
+      <thead><tr><th>Region</th><th>In the base</th><th>Deferred to an addon</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">Title bar</td>
+          <td>Window controls, sidebar toggle, back / forward / up, window title, view-mode segmented control, new file, new folder, hidden-files toggle, refresh, theme toggle, overflow menu.</td>
+          <td>Search <span class="pill p-addon">ph 4</span>, preview toggle <span class="pill p-addon">ph 3</span>, terminal toggle <span class="pill p-addon">ph 2</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Sidebar</td>
+          <td>Places, Favorites (reorderable), Volumes. Collapsible, resizable, drop target.</td>
+          <td>Connections <span class="pill p-addon">ph 7</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Tab strip</td>
+          <td>Tabs with per-tab history, new tab, close, reorder.</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td class="mono">Path bar</td>
+          <td>Current path, click to edit, autocomplete, <kbd>Enter</kbd> to navigate.</td>
+          <td>Remote URI schemes <span class="pill p-addon">ph 7</span></td>
+        </tr>
+        <tr>
+          <td class="mono">File pane</td>
+          <td>List, column and icon views. Sort, column config, inline filter, selection, inline folder expansion, context menu, rename, delete to trash, drag and drop.</td>
+          <td>Git status badges <span class="pill p-addon">ph 5</span>, dual pane <span class="pill p-addon">ph 8</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Status bar</td>
+          <td>Item count, selection count, selected size.</td>
+          <td>Git branch and Pull / Commit <span class="pill p-addon">ph 5</span>, operation progress <span class="pill p-addon">ph 6</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="mockup">
+  <span class="sec-tag">§3</span>
+  <h2>The shell</h2>
+  <p class="sec-intro">List view, one row selected, browsing Ferret's own repository.</p>
+
+  <div class="stage">
+    <div class="win" role="img" aria-label="Mockup of the Ferret window. A title bar holds window controls, a sidebar toggle, back forward and up buttons, the window title, a three-way view-mode control, and tool buttons. Below, a sidebar lists Places, Favorites and Volumes beside a main area containing a tab strip, a path bar, a column header, a list of files and folders with one row selected, and a status bar.">
+
+      <!-- title bar -->
+      <div class="tbar">
+        <span class="lights"><i></i><i></i><i></i></span>
+        <span class="tbtn"><svg width="16" height="16"><use href="#ic-sidebar"/></svg></span>
+        <span class="nav-group">
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-left"/></svg></span>
+          <span class="tbtn off"><svg width="16" height="16"><use href="#ic-right"/></svg></span>
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-up"/></svg></span>
+        </span>
+        <span class="wtitle">Ferret — ferret</span>
+        <span class="spacer"></span>
+        <span class="segmented">
+          <span class="seg active"><svg width="15" height="15"><use href="#ic-list"/></svg></span>
+          <span class="seg"><svg width="15" height="15"><use href="#ic-cols"/></svg></span>
+          <span class="seg"><svg width="15" height="15"><use href="#ic-grid"/></svg></span>
+        </span>
+        <span class="spacer"></span>
+        <span class="toolgroup">
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-filenew"/></svg></span>
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-foldernew"/></svg></span>
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-eyeoff"/></svg></span>
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-refresh"/></svg></span>
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-moon"/></svg></span>
+          <span class="tbtn"><svg width="16" height="16"><use href="#ic-more"/></svg></span>
+        </span>
+      </div>
+
+      <div class="body">
+        <!-- sidebar -->
+        <nav class="side">
+          <h5>Places</h5>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-home"/></svg><span class="lbl">Home</span></div>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-monitor"/></svg><span class="lbl">Desktop</span></div>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-doc"/></svg><span class="lbl">Documents</span></div>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-download"/></svg><span class="lbl">Downloads</span></div>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-music"/></svg><span class="lbl">Music</span></div>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-image"/></svg><span class="lbl">Pictures</span></div>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-apps"/></svg><span class="lbl">Applications</span></div>
+
+          <h5>Favorites</h5>
+          <div class="srow sel"><svg width="15" height="15" class="grip"><use href="#ic-folder"/></svg><span class="lbl">ferret</span></div>
+          <div class="srow"><svg width="15" height="15" class="grip"><use href="#ic-folder"/></svg><span class="lbl">Coding</span></div>
+          <div class="srow"><svg width="15" height="15" class="grip"><use href="#ic-folder"/></svg><span class="lbl">Projects</span></div>
+          <div class="srow"><svg width="15" height="15" class="grip"><use href="#ic-folder"/></svg><span class="lbl">tmp</span></div>
+
+          <h5>Volumes</h5>
+          <div class="srow"><svg width="15" height="15"><use href="#ic-drive"/></svg><span class="lbl">Macintosh HD</span></div>
+        </nav>
+
+        <!-- main -->
+        <div class="main">
+          <div class="tabs">
+            <span class="tab active"><svg width="14" height="14"><use href="#ic-folder"/></svg><span class="lbl">ferret</span></span>
+            <span class="tab"><svg width="14" height="14"><use href="#ic-folder-o"/></svg><span class="lbl">Downloads</span></span>
+            <span class="tab-new"><svg width="15" height="15"><use href="#ic-plus"/></svg></span>
+          </div>
+
+          <div class="pathbar">
+            <svg width="14" height="14"><use href="#ic-folder"/></svg>
+            <span class="p">~/Desktop/Coding/Desktop apps/ferret</span>
+            <span class="edit"><svg width="13" height="13"><use href="#ic-pencil"/></svg></span>
+          </div>
+
+          <div class="colhead">
+            <span class="c c-name sorted">Name <svg width="12" height="12"><use href="#ic-caret"/></svg></span>
+            <span class="c c-date">Date Modified</span>
+            <span class="c c-size" style="display:block">Size</span>
+            <span class="c c-cols" style="display:flex;justify-content:flex-end"><svg width="13" height="13"><use href="#ic-sliders"/></svg></span>
+          </div>
+
+          <div class="rows">
+            <div class="row">
+              <span class="c-name-row"><span class="disc"><svg width="12" height="12"><use href="#ic-chevron"/></svg></span><span class="nm"><svg width="15" height="15" class="fold"><use href="#ic-folder"/></svg><span class="lbl">crates</span></span></span>
+              <span class="c-date dim num">12 Aug 2026 at 19:24</span>
+              <span class="c-size dim">—</span><span class="c-cols"></span>
+            </div>
+            <div class="row">
+              <span class="c-name-row"><span class="disc"><svg width="12" height="12"><use href="#ic-chevron"/></svg></span><span class="nm"><svg width="15" height="15" class="fold"><use href="#ic-folder"/></svg><span class="lbl">docs</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:34</span>
+              <span class="c-size dim">—</span><span class="c-cols"></span>
+            </div>
+            <div class="row hover">
+              <span class="c-name-row"><span class="disc"><svg width="12" height="12"><use href="#ic-chevron"/></svg></span><span class="nm"><svg width="15" height="15" class="fold"><use href="#ic-folder"/></svg><span class="lbl">target</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:29</span>
+              <span class="c-size dim">—</span><span class="c-cols"></span>
+            </div>
+            <div class="row">
+              <span class="c-name-row"><span class="disc"></span><span class="nm"><svg width="15" height="15" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">AGENTS.md</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:31</span>
+              <span class="c-size dim num">12 KB</span><span class="c-cols"></span>
+            </div>
+            <div class="row sel">
+              <span class="c-name-row"><span class="disc"></span><span class="nm"><svg width="15" height="15" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">Cargo.lock</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:22</span>
+              <span class="c-size dim num">174 KB</span><span class="c-cols"></span>
+            </div>
+            <div class="row">
+              <span class="c-name-row"><span class="disc"></span><span class="nm"><svg width="15" height="15" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">Cargo.toml</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:18</span>
+              <span class="c-size dim num">1 KB</span><span class="c-cols"></span>
+            </div>
+            <div class="row">
+              <span class="c-name-row"><span class="disc"></span><span class="nm"><svg width="15" height="15" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">LICENSE</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:12</span>
+              <span class="c-size dim num">34 KB</span><span class="c-cols"></span>
+            </div>
+            <div class="row">
+              <span class="c-name-row"><span class="disc"></span><span class="nm"><svg width="15" height="15" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">README.md</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 12:30</span>
+              <span class="c-size dim num">2 KB</span><span class="c-cols"></span>
+            </div>
+            <div class="row">
+              <span class="c-name-row"><span class="disc"></span><span class="nm"><svg width="15" height="15" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">justfile</span></span></span>
+              <span class="c-date dim num">25 Aug 2026 at 11:58</span>
+              <span class="c-size dim num">1 KB</span><span class="c-cols"></span>
+            </div>
+          </div>
+
+          <div class="statusbar"><span class="num">9 items · 1 selected — 174 KB</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:.85rem;color:var(--ink-dim);margin-top:.6rem">Drawn at the default window width of 1140 px. Scroll the frame sideways on a narrow screen.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="anatomy">
+  <span class="sec-tag">§4</span>
+  <h2>Region map</h2>
+  <p class="sec-intro">Every measurement in logical pixels — the value you pass to <code>px()</code>.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Geometry</caption>
+      <thead><tr><th>Region</th><th class="num">Size</th><th class="num">Min / max</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">Window</td><td class="num">1180 × 760</td><td class="num">760 × 480 min</td><td>Default on first launch; restored from session afterwards.</td></tr>
+        <tr><td class="mono">Title bar</td><td class="num">h 46</td><td class="num">fixed</td><td>App-drawn. Window controls inset 12 left; 12 px circles, 8 px gap.</td></tr>
+        <tr><td class="mono">Sidebar</td><td class="num">w 208</td><td class="num">180 / 400</td><td>Drag-resizable right edge; collapses to 0 via the toggle.</td></tr>
+        <tr><td class="mono">Sidebar section label</td><td class="num">h 20</td><td class="num">fixed</td><td>10.5 px, 700 weight, uppercase, <code>--app-fg-faint</code>.</td></tr>
+        <tr><td class="mono">Sidebar row</td><td class="num">h 22</td><td class="num">fixed</td><td>Icon 15 px, 8 px gap, text inset 14. Selection is an inset pill — 6 px side margin, 5 px radius — not a full-bleed band.</td></tr>
+        <tr><td class="mono">Tab strip</td><td class="num">h 32</td><td class="num">fixed</td><td>Tabs max 190 wide, truncate with ellipsis. Hidden when one tab remains? No — always shown, so <em>+</em> is always reachable.</td></tr>
+        <tr><td class="mono">Path bar</td><td class="num">h 30</td><td class="num">fixed</td><td>Becomes a text input on click; the pencil affordance is a hit target, not decoration.</td></tr>
+        <tr><td class="mono">Column header</td><td class="num">h 26</td><td class="num">fixed</td><td>11.5 px. Sorted column takes <code>--app-fg</code> and shows a caret.</td></tr>
+        <tr><td class="mono">File row</td><td class="num">h 26</td><td class="num">fixed</td><td>Fixed height is what lets the list virtualise cheaply. Icon 15 px, disclosure column 14 px.</td></tr>
+        <tr><td class="mono">Column: Name</td><td class="num">flex</td><td class="num">220 min</td><td>Absorbs all spare width.</td></tr>
+        <tr><td class="mono">Column: Date Modified</td><td class="num">w 190</td><td class="num">resizable</td><td>Tabular numerals.</td></tr>
+        <tr><td class="mono">Column: Size</td><td class="num">w 84</td><td class="num">resizable</td><td>Right-aligned, tabular numerals. Directories show an em dash.</td></tr>
+        <tr><td class="mono">Column: config</td><td class="num">w 56</td><td class="num">fixed</td><td>Opens the column-visibility menu.</td></tr>
+        <tr><td class="mono">Status bar</td><td class="num">h 24</td><td class="num">fixed</td><td>11.5 px, muted.</td></tr>
+        <tr><td class="mono">Icon-view tile</td><td class="num">w 92</td><td class="num">—</td><td>48 px glyph, 6 px gap, label wraps to two lines then truncates.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="views">
+  <span class="sec-tag">§5</span>
+  <h2>View modes</h2>
+  <p class="sec-intro">Three renderings of the same directory, switched by the segmented control.</p>
+
+  <h3>Icon view</h3>
+  <div class="stage">
+    <div class="win" style="width:620px" role="img" aria-label="Icon view: a grid of file and folder tiles, each a large glyph above a label, with one tile selected.">
+      <div class="colhead">
+        <span class="c c-name sorted" style="padding-left:6px">Name <svg width="12" height="12"><use href="#ic-caret"/></svg></span>
+      </div>
+      <div class="grid-rows" style="height:230px">
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-folder)"><use href="#ic-folder"/></svg><span class="lbl">crates</span></span>
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-folder)"><use href="#ic-folder"/></svg><span class="lbl">docs</span></span>
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-folder)"><use href="#ic-folder"/></svg><span class="lbl">target</span></span>
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-fg-muted)"><use href="#ic-doc"/></svg><span class="lbl">AGENTS.md</span></span>
+        <span class="tile sel"><svg width="42" height="42" style="color:var(--app-fg-muted)"><use href="#ic-doc"/></svg><span class="lbl">Cargo.lock</span></span>
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-fg-muted)"><use href="#ic-doc"/></svg><span class="lbl">Cargo.toml</span></span>
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-fg-muted)"><use href="#ic-doc"/></svg><span class="lbl">LICENSE</span></span>
+        <span class="tile"><svg width="42" height="42" style="color:var(--app-fg-muted)"><use href="#ic-doc"/></svg><span class="lbl">README.md</span></span>
+      </div>
+      <div class="statusbar"><span class="num">9 items · 1 selected — 174 KB</span></div>
+    </div>
+  </div>
+
+  <h3>Column view</h3>
+  <div class="stage">
+    <div class="win" style="width:700px" role="img" aria-label="Column view: three vertical panes side by side showing ancestor, current directory and the selection's contents.">
+      <div style="display:flex;height:230px">
+        <div style="width:200px;border-right:1px solid var(--app-border);padding:4px 0;overflow:hidden">
+          <div class="row" style="padding:0 8px"><span class="c-name-row"><span class="nm"><svg width="14" height="14" class="fold"><use href="#ic-folder"/></svg><span class="lbl">Desktop apps</span></span></span></div>
+          <div class="row sel" style="padding:0 8px"><span class="c-name-row"><span class="nm"><svg width="14" height="14" class="fold"><use href="#ic-folder"/></svg><span class="lbl">ferret</span></span></span><svg width="12" height="12"><use href="#ic-chevron"/></svg></div>
+        </div>
+        <div style="width:210px;border-right:1px solid var(--app-border);padding:4px 0;overflow:hidden">
+          <div class="row" style="padding:0 8px"><span class="c-name-row"><span class="nm"><svg width="14" height="14" class="fold"><use href="#ic-folder"/></svg><span class="lbl">crates</span></span></span><svg width="12" height="12"><use href="#ic-chevron"/></svg></div>
+          <div class="row" style="padding:0 8px"><span class="c-name-row"><span class="nm"><svg width="14" height="14" class="fold"><use href="#ic-folder"/></svg><span class="lbl">docs</span></span></span><svg width="12" height="12"><use href="#ic-chevron"/></svg></div>
+          <div class="row sel" style="padding:0 8px"><span class="c-name-row"><span class="nm"><svg width="14" height="14" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">Cargo.lock</span></span></span></div>
+          <div class="row" style="padding:0 8px"><span class="c-name-row"><span class="nm"><svg width="14" height="14" class="doc-ic"><use href="#ic-doc"/></svg><span class="lbl">README.md</span></span></span></div>
+        </div>
+        <div style="flex:1;padding:16px;display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--app-fg-muted)">
+          <svg width="46" height="46" style="color:var(--app-fg-muted)"><use href="#ic-doc"/></svg>
+          <b style="color:var(--app-fg);font-size:12px">Cargo.lock</b>
+          <span style="font-size:11.5px">174 KB · 25 Aug 2026</span>
+        </div>
+      </div>
+      <div class="statusbar"><span class="num">9 items · 1 selected — 174 KB</span></div>
+    </div>
+  </div>
+  <p>The rightmost column shows metadata for the selection, not a file preview — the
+  preview pane is an addon. When the selection is a directory, that column becomes the
+  next listing.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="components">
+  <span class="sec-tag">§6</span>
+  <h2>Component map</h2>
+  <p class="sec-intro">What to build each region from. Reach for the library before hand-rolling.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Region → gpui-component</caption>
+      <thead><tr><th>Region</th><th class="mono">Module</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Title bar</td><td class="mono">title_bar</td><td><code>TitleBar</code>. Window options must derive from <code>TitleBar::window_options()</code>.</td></tr>
+        <tr><td>Toolbar buttons</td><td class="mono">button</td><td><code>Button</code> with <code>.ghost()</code> and <code>.icon()</code>; <code>.selected()</code> for toggles.</td></tr>
+        <tr><td>View-mode control</td><td class="mono">button</td><td>A button group with a single selected member — no separate segmented widget exists.</td></tr>
+        <tr><td>Sidebar</td><td class="mono">sidebar</td><td><code>Sidebar</code> + <code>SidebarGroup</code> + <code>SidebarMenu</code> / <code>SidebarMenuItem</code>. <code>SidebarCollapsible::Offcanvas</code> matches the toggle behaviour.</td></tr>
+        <tr><td>Tab strip</td><td class="mono">tab</td><td><code>TabBar</code>. Reorder by drag is built in.</td></tr>
+        <tr><td>Path bar</td><td class="mono">breadcrumb, input</td><td>Breadcrumb when idle; swap to <code>TextInput</code> on click, with a <code>popover</code> completion list.</td></tr>
+        <tr><td>File pane — list</td><td class="mono">table</td><td><code>Table</code>, virtualised, with fixed and resizable columns. This is the single most important widget in the app.</td></tr>
+        <tr><td>File pane — icon</td><td class="mono">virtual_list</td><td><code>h_virtual_list</code> over rows of tiles; do not lay out a plain wrapped flex of 200,000 children.</td></tr>
+        <tr><td>File pane — column</td><td class="mono">virtual_list</td><td>One virtual list per column, in an <code>h_flex</code>.</td></tr>
+        <tr><td>Inline folder expansion</td><td class="mono">tree</td><td>Or flatten the tree into the table's row model — decide once, in Phase 1.</td></tr>
+        <tr><td>Column config menu</td><td class="mono">menu, popover</td><td>Checkable items.</td></tr>
+        <tr><td>Context menu</td><td class="mono">menu</td><td>Right-click on a row, on the selection, or on empty space — three different menus.</td></tr>
+        <tr><td>Inline rename</td><td class="mono">input</td><td><code>TextInput</code> overlaid on the row, pre-selecting the stem and not the extension.</td></tr>
+        <tr><td>Status bar</td><td class="mono">status_bar</td><td><code>StatusBar</code>.</td></tr>
+        <tr><td>Confirm dialogs</td><td class="mono">dialog, alert</td><td>Requires the window root to be a <code>Root</code>, or they never appear.</td></tr>
+        <tr><td>Toasts</td><td class="mono">notification</td><td>Same <code>Root</code> requirement.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="tokens">
+  <span class="sec-tag">§7</span>
+  <h2>Design tokens</h2>
+  <p class="sec-intro">Ferret's own names, mapped to <code>gpui-component</code>'s theme where one already fits.</p>
+
+  <p>Per decision D-14 in the plan, general interface colour comes from
+  <code>cx.theme()</code>. The table below is the mapping the mockup uses; only rows marked
+  <em>Ferret</em> need defining in <code>ferret-ui</code>.</p>
+
+  <h4>Live values (this page's theme)</h4>
+  <ul class="swatches">
+    <li><span class="chip" style="background:var(--app-window)"></span><span class="nm">--app-window</span></li>
+    <li><span class="chip" style="background:var(--app-titlebar)"></span><span class="nm">--app-titlebar</span></li>
+    <li><span class="chip" style="background:var(--app-sidebar)"></span><span class="nm">--app-sidebar</span></li>
+    <li><span class="chip" style="background:var(--app-header)"></span><span class="nm">--app-header</span></li>
+    <li><span class="chip" style="background:var(--app-border)"></span><span class="nm">--app-border</span></li>
+    <li><span class="chip" style="background:var(--app-selected)"></span><span class="nm">--app-selected</span></li>
+    <li><span class="chip" style="background:var(--app-accent)"></span><span class="nm">--app-accent</span></li>
+    <li><span class="chip" style="background:var(--app-folder)"></span><span class="nm">--app-folder</span></li>
+    <li><span class="chip" style="background:var(--app-fg)"></span><span class="nm">--app-fg</span></li>
+    <li><span class="chip" style="background:var(--app-fg-muted)"></span><span class="nm">--app-fg-muted</span></li>
+  </ul>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Token mapping</caption>
+      <thead><tr><th class="mono">Token</th><th>Source</th><th>Used for</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">--app-window</td><td><code>cx.theme().background</code></td><td>File pane and window ground.</td></tr>
+        <tr><td class="mono">--app-titlebar</td><td><code>cx.theme().title_bar</code></td><td>Title bar and tab strip.</td></tr>
+        <tr><td class="mono">--app-sidebar</td><td><code>cx.theme().sidebar</code></td><td>Sidebar ground.</td></tr>
+        <tr><td class="mono">--app-header</td><td><code>cx.theme().secondary</code></td><td>Column header.</td></tr>
+        <tr><td class="mono">--app-border</td><td><code>cx.theme().border</code></td><td>All hairlines.</td></tr>
+        <tr><td class="mono">--app-fg</td><td><code>cx.theme().foreground</code></td><td>File names, primary text.</td></tr>
+        <tr><td class="mono">--app-fg-muted</td><td><code>cx.theme().muted_foreground</code></td><td>Dates, sizes, status bar.</td></tr>
+        <tr><td class="mono">--app-fg-faint</td><td><code>cx.theme().muted_foreground</code> at 70%</td><td>Section labels, disclosure triangles.</td></tr>
+        <tr><td class="mono">--app-accent</td><td><code>cx.theme().primary</code></td><td>Active toggles, focus ring.</td></tr>
+        <tr><td class="mono">--app-selected</td><td><code>cx.theme().selection</code></td><td>Selected row fill when the pane has focus.</td></tr>
+        <tr><td class="mono">--app-selected-idle</td><td><span class="pill p-base">Ferret</span></td><td>Selected row when the pane has lost focus — a real state Finder and Explorer both distinguish.</td></tr>
+        <tr><td class="mono">--app-row-alt</td><td><span class="pill p-base">Ferret</span></td><td>Alternating row stripe. Must be nearly invisible: 2–3% off the ground.</td></tr>
+        <tr><td class="mono">--app-folder</td><td><span class="pill p-base">Ferret</span></td><td>Folder glyph tint. The one place colour carries meaning in the listing.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>Type</h4>
+  <ul>
+    <li>Interface: the platform UI face — <code>-apple-system</code> / <code>Segoe UI</code> / system default. 13 px rows, 11.5 px chrome, 10.5 px section labels.</li>
+    <li><strong>Tabular numerals everywhere a number stacks</strong> — dates, sizes, counts. Without it the Size column visibly jitters.</li>
+    <li>No monospace in the base. It arrives with the terminal.</li>
+  </ul>
+</section>
+
+<!-- ==================================================================== -->
+<section id="interaction">
+  <span class="sec-tag">§8</span>
+  <h2>Interaction</h2>
+  <p class="sec-intro">"Ability for everything" made explicit. A file manager is judged on these, not on its colours.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Pointer</caption>
+      <thead><tr><th>Gesture</th><th>Target</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Click</td><td>Row</td><td>Select, replacing the current selection.</td></tr>
+        <tr><td><kbd>Cmd</kbd>/<kbd>Ctrl</kbd> + click</td><td>Row</td><td>Toggle that row in the selection.</td></tr>
+        <tr><td><kbd>Shift</kbd> + click</td><td>Row</td><td>Extend selection from the anchor.</td></tr>
+        <tr><td>Double-click</td><td>Folder / file</td><td>Enter the folder / open in the default application.</td></tr>
+        <tr><td>Click</td><td>Disclosure triangle</td><td>Expand or collapse in place, without changing the current directory.</td></tr>
+        <tr><td>Right-click</td><td>Row / selection / empty space</td><td>Three distinct context menus.</td></tr>
+        <tr><td>Click then pause, or slow second click</td><td>Selected row's name</td><td>Inline rename, stem pre-selected.</td></tr>
+        <tr><td>Drag</td><td>Rows</td><td>Move within a volume, copy across volumes; <kbd>Alt</kbd> forces copy. Drop targets: rows that are folders, the sidebar, other applications.</td></tr>
+        <tr><td>Drag</td><td>Column edge</td><td>Resize. Double-click to size to content.</td></tr>
+        <tr><td>Click</td><td>Column header</td><td>Sort by it; click again to reverse.</td></tr>
+        <tr><td>Drag</td><td>Sidebar edge</td><td>Resize between 180 and 400.</td></tr>
+        <tr><td>Drag</td><td>Sidebar favourite</td><td>Reorder.</td></tr>
+        <tr><td>Rubber-band drag</td><td>Empty space</td><td>Marquee-select. Required in icon view; expected in list view.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Keyboard — every one needs a non-Cmd equivalent</caption>
+      <thead><tr><th class="mono">macOS</th><th class="mono">Linux / Windows</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">↑ ↓</td><td class="mono">↑ ↓</td><td>Move selection. <kbd>Shift</kbd> extends.</td></tr>
+        <tr><td class="mono">→ ←</td><td class="mono">→ ←</td><td>Expand / collapse a folder row.</td></tr>
+        <tr><td class="mono">Enter</td><td class="mono">Enter</td><td>Open. <em>Note:</em> on macOS Finder this renames — Ferret opens, consistently across platforms, and renames on <kbd>F2</kbd>.</td></tr>
+        <tr><td class="mono">Cmd ↑ / ↓</td><td class="mono">Alt ↑ / Enter</td><td>Go to parent / enter folder.</td></tr>
+        <tr><td class="mono">Cmd [ / ]</td><td class="mono">Alt ← / →</td><td>Back / forward.</td></tr>
+        <tr><td class="mono">Cmd T</td><td class="mono">Ctrl T</td><td>New tab.</td></tr>
+        <tr><td class="mono">Cmd W</td><td class="mono">Ctrl W</td><td>Close tab.</td></tr>
+        <tr><td class="mono">Cmd L</td><td class="mono">Ctrl L</td><td>Focus and edit the path bar.</td></tr>
+        <tr><td class="mono">Cmd Shift .</td><td class="mono">Ctrl H</td><td>Toggle hidden files.</td></tr>
+        <tr><td class="mono">Cmd 1 / 2 / 3</td><td class="mono">Ctrl 1 / 2 / 3</td><td>List / column / icon view.</td></tr>
+        <tr><td class="mono">Cmd N</td><td class="mono">Ctrl N</td><td>New window.</td></tr>
+        <tr><td class="mono">Cmd Shift N</td><td class="mono">Ctrl Shift N</td><td>New folder.</td></tr>
+        <tr><td class="mono">F2</td><td class="mono">F2</td><td>Rename.</td></tr>
+        <tr><td class="mono">Cmd Backspace</td><td class="mono">Delete</td><td>Move to trash.</td></tr>
+        <tr><td class="mono">Cmd Shift Backspace</td><td class="mono">Shift Delete</td><td>Delete permanently, after confirmation.</td></tr>
+        <tr><td class="mono">Cmd C / V / X</td><td class="mono">Ctrl C / V / X</td><td>Copy, paste, cut.</td></tr>
+        <tr><td class="mono">Cmd A</td><td class="mono">Ctrl A</td><td>Select all.</td></tr>
+        <tr><td class="mono">Cmd R</td><td class="mono">F5</td><td>Refresh.</td></tr>
+        <tr><td class="mono">Type-ahead</td><td class="mono">Type-ahead</td><td>Typing letters jumps to the first matching name.</td></tr>
+        <tr><td class="mono">Tab</td><td class="mono">Tab</td><td>Move focus between sidebar, path bar and file pane. Focus must be visible.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note warn">
+    <strong>Do not skip focus</strong>
+    <p>Which pane has focus changes what the arrow keys do and how the selection is drawn
+    (<code>--app-selected</code> versus <code>--app-selected-idle</code>). Retrofitting a
+    focus model onto a finished shell is painful; build it in from the first commit.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="states">
+  <span class="sec-tag">§9</span>
+  <h2>States</h2>
+  <p class="sec-intro">The listing is not always a tidy list of files. Each of these needs a design before it needs code.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Every state the file pane can be in</caption>
+      <thead><tr><th>State</th><th>What the user sees</th></tr></thead>
+      <tbody>
+        <tr><td><b>Loading</b></td><td>Rows stream in as the directory is read. No spinner-then-swap: show what has arrived. If nothing has arrived after ~200 ms, a subtle indeterminate bar in the column header.</td></tr>
+        <tr><td><b>Empty folder</b></td><td>Centred, muted: "This folder is empty." Status bar reads <span class="mono">0 items</span>.</td></tr>
+        <tr><td><b>Everything filtered out</b></td><td>"No items match <em>«query»</em>" with a Clear filter action. Distinct from an empty folder — never conflate the two.</td></tr>
+        <tr><td><b>Permission denied</b></td><td>Named and actionable: "Ferret can't read this folder. You don't have permission to open <span class="mono">/private/var/root</span>." Not a raw <code>EACCES</code>.</td></tr>
+        <tr><td><b>Folder deleted while open</b></td><td>Detected by the watcher: banner offering to go to the nearest existing parent.</td></tr>
+        <tr><td><b>Broken symlink</b></td><td>Row shown with a struck-through or warning-tinted icon and the dead target in the Name column.</td></tr>
+        <tr><td><b>Very large directory</b></td><td>No cap and no warning — virtualisation is the answer. 200,000 entries must scroll at full frame rate.</td></tr>
+        <tr><td><b>No selection</b></td><td>Status bar shows the item count only, no selection clause.</td></tr>
+        <tr><td><b>Multi-selection</b></td><td><span class="mono">9 items · 3 selected — 210 KB</span>. Size is the sum, and directories contribute nothing rather than a lie.</td></tr>
+        <tr><td><b>Pane unfocused</b></td><td>Selection drops to <code>--app-selected-idle</code>; arrow keys go to whatever has focus.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="order">
+  <span class="sec-tag">§10</span>
+  <h2>Build order</h2>
+  <p class="sec-intro">Inside the base, this is the sequence that keeps something runnable at every step.</p>
+
+  <ol>
+    <li><b>Filesystem layer.</b> <code>ferret-core</code> types and <code>ferret-vfs</code> with the local backend: streaming <code>read_dir</code>, metadata, canonicalisation. Testable with no window — write the tests here.</li>
+    <li><b>Window shell.</b> Title bar, a static sidebar, and a file pane rendering one hard-coded directory as a virtualised <code>Table</code>. This is the moment to prove scrolling at 200,000 rows.</li>
+    <li><b>Navigation.</b> Double-click to enter, up, back and forward with per-tab history, and the path bar.</li>
+    <li><b>Selection and focus.</b> Single, range and toggle selection; the focus model; the status bar.</li>
+    <li><b>Sidebar for real.</b> Places from the OS, Favorites with reorder and persistence, Volumes with mount and unmount watching.</li>
+    <li><b>Tabs.</b> Per-tab state, new, close, reorder.</li>
+    <li><b>Sort, columns, filter.</b> Header sorting, column resize and visibility, the inline name filter.</li>
+    <li><b>The other two views.</b> Icon and column, sharing the selection and navigation model already built.</li>
+    <li><b>Mutation.</b> Context menus, new file, new folder, inline rename, trash, copy/paste. Every path through a confirm-and-report flow.</li>
+    <li><b>Watching.</b> Live updates from <code>notify</code>, including the deleted-folder case.</li>
+    <li><b>Settings and themes.</b> Settings file, keymap, light and dark, per-folder view preferences.</li>
+  </ol>
+
+  <p>Steps 1 and 2 are where the project's performance ceiling is set. If the table is not
+  virtualised properly there, no later work recovers it.</p>
+
+  <div class="note">
+    <strong>Done when</strong>
+    <p>You can set Ferret as your default file manager and not miss the system one for
+    browsing, opening, renaming, moving and deleting — on Linux, macOS and Windows.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Ferret · base UI reference · rev 1 · 25 August 2026 · GPL-3.0-or-later<br>
+  Companion to <a href="plan.html">plan.html</a>, which catalogues the addons. Original design; no third-party assets reproduced.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('ferret-ui-theme'); } catch (e) {}
+  if (saved === 'dark' || saved === 'light') root.setAttribute('data-theme', saved);
+
+  btn.addEventListener('click', function () {
+    var explicit = root.getAttribute('data-theme');
+    var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var current = explicit || (systemDark ? 'dark' : 'light');
+    var next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('ferret-ui-theme', next); } catch (e) {}
+  });
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail nav a'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
+  var ticking = false;
+
+  function mark() {
+    ticking = false;
+    var line = window.scrollY + 120;
+    var active = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].offsetTop <= line) active = sections[i]; else break;
+    }
+    links.forEach(function (a) { a.classList.remove('is-current'); });
+    if (active && byId[active.id]) byId[active.id].classList.add('is-current');
+  }
+
+  window.addEventListener('scroll', function () {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(mark); }
+  }, { passive: true });
+  window.addEventListener('resize', mark, { passive: true });
+  mark();
+})();
+</script>
+</body>
+</html>

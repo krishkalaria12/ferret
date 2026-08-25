@@ -669,6 +669,15 @@ footer {
     <li>Minimum usable window is 760 × 480; below that, the preview pane collapses first, then the sidebar.</li>
   </ul>
 
+  <div class="note">
+    <strong>Build against the reference, not this section</strong>
+    <p>This section frames the window. <a href="ui-base.html">docs/ui-base.html</a> is the
+    buildable specification for the base shell: an original mockup in both themes, region
+    geometry in logical pixels, the <code>gpui-component</code> widget behind each region,
+    the token mapping, the full pointer and keyboard contract, and every state the file pane
+    can be in.</p>
+  </div>
+
   <h3>Visual language</h3>
   <p>Ferret should read as native on each OS rather than as a macOS app ported twice.
   In practice that means one layout with per-platform details: title bar controls follow
@@ -1734,6 +1743,16 @@ footer {
   feature that makes the product worth using and everything after it is easier to judge once
   it exists.</p>
 
+  <div class="note">
+    <strong>Base, then addons</strong>
+    <p><strong>Phase 1 is the base</strong>: the explorer shell, specified in full by
+    <a href="ui-base.html">the base UI reference</a>. It is a complete, usable file manager
+    on its own. <strong>Phases 2–9 are addons</strong> — each plugs into the finished shell
+    and each is independently shippable. The preview pane, the terminal panel and the
+    splitters that drive them are deliberately <em>not</em> in the base; they arrive with
+    their features rather than as empty furniture.</p>
+  </div>
+
   <div class="phase">
     <span class="pn">00</span>
     <div>
@@ -1753,15 +1772,21 @@ footer {
   <div class="phase">
     <span class="pn">01</span>
     <div>
-      <h3>Filesystem layer &amp; browser shell</h3>
-      <p class="dep">depends on: 0 · delivers F-01 · F-02 · F-03 · F-04 · F-06 · F-07 · F-08 · F-72 · F-73 · F-81 · F-82</p>
+      <h3>The base — filesystem layer &amp; explorer shell <span class="pill p-core">the foundation</span></h3>
+      <p class="dep">depends on: 0 · delivers F-01 · F-02 · F-03 · F-04 · F-06 · F-07 · F-08 · F-72 · F-73 · F-81 · F-82 · plus rename, trash, copy/paste and context menus from F-60/F-71</p>
+      <p>Everything from Phase 2 on is an <strong>addon</strong> that plugs into this shell. The
+      base is not a skeleton — it is a complete file manager, and it must be finished before
+      the first addon starts. Build it against
+      <a href="ui-base.html">the base UI reference</a>, which specifies the layout, geometry,
+      tokens, interaction contract and states.</p>
       <ul>
         <li><code>ferret-core</code> and <code>ferret-vfs</code> split out; <code>Vfs</code> trait plus the local backend and watcher.</li>
-        <li>The full window: title bar, sidebar, tab strip, path bar, file pane, status bar.</li>
-        <li>All three view modes, sorting, column config, inline filter, hidden-files toggle.</li>
-        <li>Light and dark themes; settings file and keymap.</li>
+        <li>The window: title bar with toolbar, sidebar (Places / Favorites / Volumes), tab strip, path bar, file pane, status bar.</li>
+        <li>All three view modes, sorting, column config and resize, inline filter, hidden-files toggle.</li>
+        <li>Selection and focus model; full keyboard map with non-<kbd>Cmd</kbd> equivalents; context menus; inline rename; trash; copy, paste and drag-and-drop.</li>
+        <li>Light and dark themes; settings file and keymap; per-folder view preferences.</li>
       </ul>
-      <p class="accept"><b>Done when</b> Ferret can replace the system file manager for browsing and opening files on all three platforms, and a 200,000-entry directory scrolls smoothly.</p>
+      <p class="accept"><b>Done when</b> you can set Ferret as your default file manager and not miss the system one for browsing, opening, renaming, moving and deleting — on all three platforms — and a 200,000-entry directory scrolls at full frame rate.</p>
     </div>
   </div>
 

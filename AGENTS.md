@@ -10,8 +10,19 @@ with a terminal that stays synced to the folder you are browsing. It is a Rust
 [gpui-component](https://github.com/longbridge/gpui-component).
 
 **The repository is currently scaffolding.** It builds and opens a window; no
-product feature is implemented. The product and architecture design lives in
-[`docs/plan.html`](docs/plan.html) — read it before proposing structural work.
+product feature is implemented.
+
+- [`docs/ui-base.html`](docs/ui-base.html) — the **base** explorer shell (sidebar,
+  tabs, path bar, file pane, status bar): mockup in both themes, region geometry in
+  logical pixels, the `gpui-component` widget behind each region, token mapping,
+  pointer and keyboard contract, and every state the file pane can be in. **This is
+  the specification for the current phase of work.**
+- [`docs/plan.html`](docs/plan.html) — the whole product: 51 feature IDs, target
+  architecture, platform hazards, decisions, phases.
+
+Phase 1 is the base and must be finished first; phases 2–9 are addons that plug into
+the completed shell. Read both documents before proposing structural work, and cite
+feature IDs (F-nn) and decisions (D-nn) when you do.
 
 ```text
 .
@@ -287,6 +298,7 @@ Do not mix formatting churn, unrelated cleanup, and feature work in one change.
 
 ## Resources
 
+- [`docs/ui-base.html`](docs/ui-base.html) — the base explorer shell specification
 - [`docs/plan.html`](docs/plan.html) — Ferret's product and architecture plan
 - [GPUI official site and guide](https://www.gpui.rs/)
 - [GPUI API documentation](https://docs.rs/gpui/)
