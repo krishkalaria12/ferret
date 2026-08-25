@@ -5,25 +5,11 @@
 //! budget is measured against `flat/`, and every awkward-name and broken-link
 //! bug is reproducible here rather than only on a user's disk.
 
+use crate::config::{DEEP_LEVELS, EXTENSIONS, FIXTURE_MAX_THREADS, FLAT_ENTRIES, SPARSE_LEN};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-/// Entries in `flat/`. The scroll-performance target from the plan.
-pub const FLAT_ENTRIES: usize = 200_000;
-/// Nesting depth in `deep/`. Enough to catch recursion and path-length limits.
-const DEEP_LEVELS: usize = 512;
-/// Apparent size of `sparse/huge.bin`. Allocates almost nothing on APFS or NTFS.
-const SPARSE_LEN: u64 = 4 * 1024 * 1024 * 1024;
-
-const EXTENSIONS: &[&str] = &[
-    "rs", "toml", "lock", "md", "txt", "json", "yaml", "yml", "html", "css", "js", "ts", "tsx",
-    "py", "go", "c", "h", "cpp", "hpp", "java", "kt", "swift", "rb", "php", "sh", "zsh", "fish",
-    "sql", "csv", "tsv", "parquet", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico",
-    "pdf", "zip", "tar", "gz", "zst", "7z", "mp3", "wav", "flac", "mp4", "mov", "mkv", "ttf",
-    "otf", "woff2", "so", "dylib", "dll", "exe", "bin",
-];
 
 pub struct Report {
     pub root: PathBuf,
@@ -73,7 +59,7 @@ fn flat(root: &Path, report: &mut Report) -> Result<()> {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .min(8);
+        .min(FIXTURE_MAX_THREADS);
     let per = FLAT_ENTRIES.div_ceil(threads);
 
     std::thread::scope(|scope| -> Result<()> {

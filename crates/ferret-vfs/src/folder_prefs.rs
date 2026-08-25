@@ -10,7 +10,7 @@
 //! * **Lookup is synchronous and O(1).** The whole map is in memory. Anything
 //!   that has to await here shows the wrong view mode for a frame before
 //!   correcting itself, which is very visible.
-//! * **The file is bounded by construction.** [`FolderPrefs::CAPACITY`] entries,
+//! * **The file is bounded by construction.** [`FOLDER_PREFS_CAPACITY`] entries,
 //!   LRU-evicted, so it cannot grow without limit however long Ferret runs.
 //! * **Writes are cheap.** Callers debounce and call [`FolderPrefs::to_json`]
 //!   on the way out; a whole-file rewrite of a few hundred kilobytes is
@@ -20,6 +20,7 @@
 //! user may not have, fails on read-only volumes and network shares, and
 //! litters every directory it touches — including their repositories.
 
+use crate::config::FOLDER_PREFS_CAPACITY;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -99,10 +100,6 @@ pub struct FolderPrefs {
 }
 
 impl FolderPrefs {
-    /// Roughly 500 KB on disk and a sub-10 ms load — large enough that eviction
-    /// is invisible in ordinary use.
-    pub const CAPACITY: usize = 4_000;
-
     pub fn new() -> Self {
         Self::default()
     }
@@ -215,10 +212,10 @@ impl FolderPrefs {
     }
 
     fn evict_to_capacity(&mut self) {
-        if self.entries.len() <= Self::CAPACITY {
+        if self.entries.len() <= FOLDER_PREFS_CAPACITY {
             return;
         }
-        let excess = self.entries.len() - Self::CAPACITY;
+        let excess = self.entries.len() - FOLDER_PREFS_CAPACITY;
         let mut by_age: Vec<(u64, String)> = self
             .entries
             .iter()
@@ -281,17 +278,17 @@ mod tests {
     #[test]
     fn evicts_the_least_recently_used_past_capacity() {
         let mut prefs = FolderPrefs::new();
-        for i in 0..FolderPrefs::CAPACITY {
+        for i in 0..FOLDER_PREFS_CAPACITY {
             prefs.set(format!("/f{i}"), icons());
         }
-        assert_eq!(prefs.len(), FolderPrefs::CAPACITY);
+        assert_eq!(prefs.len(), FOLDER_PREFS_CAPACITY);
 
         // Touch the oldest so it is no longer the eviction candidate.
         assert!(prefs.get("/f0").is_some());
 
         prefs.set("/newcomer", by_size());
 
-        assert_eq!(prefs.len(), FolderPrefs::CAPACITY);
+        assert_eq!(prefs.len(), FOLDER_PREFS_CAPACITY);
         assert!(prefs.peek("/newcomer").is_some(), "the new entry survives");
         assert!(prefs.peek("/f0").is_some(), "the touched entry survives");
         assert!(
@@ -309,7 +306,7 @@ mod tests {
     #[test]
     fn an_oversized_file_is_trimmed_on_load() {
         let mut oversized = Persisted::default();
-        for i in 0..(FolderPrefs::CAPACITY + 50) {
+        for i in 0..(FOLDER_PREFS_CAPACITY + 50) {
             oversized.folders.insert(
                 format!("/f{i}"),
                 Record {
@@ -319,7 +316,7 @@ mod tests {
             );
         }
         let prefs = FolderPrefs::from_json(&serde_json::to_string(&oversized).unwrap());
-        assert_eq!(prefs.len(), FolderPrefs::CAPACITY);
+        assert_eq!(prefs.len(), FOLDER_PREFS_CAPACITY);
     }
 
     #[test]

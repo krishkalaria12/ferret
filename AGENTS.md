@@ -40,8 +40,13 @@ feature IDs (F-nn) and decisions (D-nn) when you do.
 │       ├── src/vfs.rs    # The Vfs trait (D-17)
 │       ├── src/local.rs  # LocalFs over std::fs
 │       ├── src/path.rs   # VfsPath
+│       ├── src/errors.rs # VfsError + the crate's Result alias
+│       ├── src/config.rs # Every tunable in the crate
 │       └── src/folder_prefs.rs  # Per-folder view preferences, bounded LRU (D-16)
 ├── xtask/                # Fixture generator and listing benchmark
+│   ├── src/config.rs     # Fixture shape and performance budgets
+│   ├── src/fixture.rs
+│   └── src/bench.rs
 ├── docs/ui-base.html     # Base explorer shell — the UI spec for current work
 ├── docs/plan.html        # Product + architecture plan
 └── README.md
@@ -131,6 +136,7 @@ Follow standard Rust and `rustfmt` conventions:
 - Keep functions focused and place helpers near the behavior they support.
 - Use comments to explain constraints or intent, not to restate the code.
 - Avoid `unwrap()` in recoverable application paths. At process boundaries, use an error message that explains the failed operation.
+- Put the error type in `errors.rs` and tunables in `config.rs` — see below.
 - Do not add dependencies when GPUI, `gpui-component`, the standard library, or a small local helper already solves the problem clearly.
 
 ### Imports and public APIs
@@ -147,6 +153,71 @@ pub use status_badge::{StatusBadge, StatusKind};
 
 This allows the binary crate to use `ferret_ui::StatusBadge` without depending on
 the UI crate's internal file layout.
+
+### Errors live in `errors.rs`
+
+Every library crate defines its error type in its own `errors.rs`, using
+[`thiserror`](https://docs.rs/thiserror). Alongside it, define the crate's
+`Result` alias **with the error type as a default parameter**:
+
+```rust
+// crates/<crate>/src/errors.rs
+pub type Result<T, E = VfsError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum VfsError {
+    #[error("Ferret can't read {path} — you don't have permission to open it.")]
+    PermissionDenied { path: VfsPath },
+    // …
+}
+```
+
+The default parameter is the point: it ties the error to the `Result` so every
+signature in the crate reads `Result<T>` and the error type is never spelled out,
+never accidentally varies, and changes in one place. Leaving the second parameter
+open means a caller that genuinely needs a different error can still write
+`Result<T, OtherError>` instead of importing `std::result::Result` and shadowing
+the alias.
+
+Re-export both from `lib.rs` (`pub use errors::{Result, VfsError};`) and keep the
+module private — callers want the types, not the file.
+
+Two more rules:
+
+- **Libraries use `thiserror`, binaries use `anyhow`.** A library's caller needs
+  to match on what went wrong; a binary's caller is a person reading a message.
+  `ferret-vfs` uses `thiserror`; `xtask` and `ferret` use `anyhow`.
+- **Every variant carries its subject.** "Operation not permitted" with no path
+  is the failure this convention exists to prevent. Write `Display` text that can
+  be shown to a person unedited, and say what they can do about it.
+
+### Configuration lives in `config.rs`
+
+Every crate keeps its tunables in one `config.rs`, not scattered beside the code
+that reads them:
+
+```rust
+// crates/ferret-vfs/src/config.rs
+/// How many entries may sit in a listing channel before the producer parks.
+///
+/// Bounded on purpose: unbounded would let a 200,000-entry walk materialise the
+/// whole directory in memory, which is what streaming exists to avoid.
+pub const LISTING_BUFFER: usize = 512;
+```
+
+Knobs are then findable and comparable in one place rather than discovered one
+`grep` at a time, and changing a budget or a capacity shows up as a diff to a
+single file. **Document the reasoning for each value** — a constant with no
+explanation is one nobody can safely change.
+
+This is for *tunables*: buffer sizes, capacities, budgets, limits, default paths.
+Values that are part of a type's contract — an enum discriminant, a protocol
+constant, a magic number in a file format — belong with that type. Runtime
+user-facing settings are different again and belong to `ferret-settings` when it
+exists (D-12).
+
+Keep `config` public (`pub mod config;`) so tests and other crates can assert
+against the same constants the code uses, rather than restating them.
 
 ## Advanced GPUI Guidance
 
@@ -292,6 +363,8 @@ place to add tests in this project — write them against a temp directory.
 - Assuming macOS path, permission or shell semantics. Windows has drive letters, UNC paths, UTF-16 names, reserved names (`CON`, `NUL`, `COM1`) and needs Developer Mode for symlinks.
 - Collecting a directory listing into a `Vec` before yielding it. `cargo xtask bench` exists to catch this; time-to-first-row is 0.3 ms against 143 ms for a full 200,000-entry listing, and that gap is the whole point.
 - Adding a `ferret-vfs` type that duplicates something `std` already provides. It is a thin wrapper over the platform, not a filesystem.
+- Declaring a bare `std::result::Result` in a crate that has its own alias, or hard-coding a magic number next to the code that reads it. Both have a designated home.
+- Writing an error variant that does not name what it failed on.
 - Running only `cargo check` and skipping visual verification for a visible change.
 - Creating a new workspace crate before there is code to put in it.
 

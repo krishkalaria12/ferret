@@ -1,3 +1,4 @@
+use crate::config::LISTING_BUFFER;
 use crate::{
     Capabilities, Entry, EntryKind, Metadata, RemoveMode, Result, SymlinkTarget, Vfs, VfsError,
     VfsPath,
@@ -7,13 +8,6 @@ use futures::stream::{BoxStream, StreamExt};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-
-/// How many entries may sit in the channel before the producer thread parks.
-///
-/// Bounded on purpose: an unbounded channel would let a 200,000-entry walk
-/// materialise the whole directory in memory, which is exactly what streaming
-/// is meant to avoid.
-const LISTING_BUFFER: usize = 512;
 
 /// The local disk backend, over `std::fs`.
 #[derive(Clone, Copy, Debug, Default)]

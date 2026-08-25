@@ -1,7 +1,15 @@
 use crate::VfsPath;
 use std::io;
 
-pub type Result<T> = std::result::Result<T, VfsError>;
+/// This crate's `Result`, with its error type as the default.
+///
+/// The default parameter is what ties the two together: `Result<T>` means
+/// `Result<T, VfsError>` at every call site in the crate, so the error type is
+/// never spelled out and never accidentally varies. The second parameter stays
+/// open so a caller that needs a different error — a test, or a caller layering
+/// `anyhow` on top — can still write `Result<T, OtherError>` without importing
+/// `std::result::Result` and shadowing this one.
+pub type Result<T, E = VfsError> = std::result::Result<T, E>;
 
 /// Failures the file list has to render.
 ///

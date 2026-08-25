@@ -4,6 +4,7 @@
 //! it is the entire justification for streaming listings, and a regression here
 //! means someone collected into a `Vec` somewhere.
 
+use crate::config::{BENCH_FIXTURES, FIRST_ROW_BUDGET, FLAT_TOTAL_BUDGET};
 use anyhow::{Context, Result};
 use ferret_vfs::{LocalFs, Vfs, VfsPath};
 use futures::StreamExt;
@@ -19,10 +20,6 @@ pub struct Measurement {
     pub metadata_in_listing: bool,
 }
 
-/// Budgets from the plan. Exceeding one is a bug, not a slow machine.
-pub const FIRST_ROW_BUDGET: Duration = Duration::from_millis(50);
-pub const FLAT_TOTAL_BUDGET: Duration = Duration::from_secs(3);
-
 pub fn run(root: &Path) -> Result<Vec<Measurement>> {
     anyhow::ensure!(
         root.exists(),
@@ -33,10 +30,7 @@ pub fn run(root: &Path) -> Result<Vec<Measurement>> {
     let fs = LocalFs::new();
     let mut results = Vec::new();
 
-    // `links` is in the sweep because a cyclic symlink must not hang the walk —
-    // if this row never prints, something is following links without tracking
-    // where it has been.
-    for name in ["flat", "types", "realistic", "names", "links"] {
+    for name in BENCH_FIXTURES {
         let dir = root.join(name);
         if !dir.exists() {
             continue;

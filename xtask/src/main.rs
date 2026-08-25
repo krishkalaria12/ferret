@@ -7,17 +7,13 @@
 //! ```
 
 mod bench;
+mod config;
 mod fixture;
 
 use anyhow::Result;
+use config::{FLAT_ENTRIES, default_root};
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-/// Outside the repository on purpose: 200,000 files inside a Cargo workspace
-/// makes every `cargo` invocation and every editor file-watcher crawl.
-fn default_root() -> PathBuf {
-    std::env::temp_dir().join("ferret-fixture")
-}
 
 fn main() -> ExitCode {
     match run() {
@@ -55,7 +51,7 @@ fn run() -> Result<bool> {
             eprintln!(
                 "building the fixture in {} — {} files in flat/ alone, so this takes a minute",
                 root.display(),
-                fixture::FLAT_ENTRIES
+                FLAT_ENTRIES
             );
             let report = fixture::build(&root, force)?;
             println!("\nfixture ready at {}", report.root.display());

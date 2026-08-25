@@ -22,18 +22,24 @@
 //! # }
 //! ```
 //!
+//! Layout follows the repository conventions in `AGENTS.md`: the error type and
+//! the crate's [`Result`] alias live in `errors.rs`, and every tunable lives in
+//! [`config`].
+//!
 //! Shared domain types live here for now. They move to a `ferret-core` crate
 //! when a second service crate needs them — not before.
 
+pub mod config;
+
 mod entry;
-mod error;
+mod errors;
 mod folder_prefs;
 mod local;
 mod path;
 mod vfs;
 
 pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
-pub use error::{Result, VfsError};
+pub use errors::{Result, VfsError};
 pub use folder_prefs::{FolderPrefs, FolderView, SortKey, SortOrder, ViewMode};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
