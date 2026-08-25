@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+description = "Ferret development tasks: performance fixtures and listing benchmarks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ferret-vfs.workspace = true
+
+anyhow.workspace = true
+futures = "0.3"
+smol = "2"

@@ -4,9 +4,9 @@ This file explains how humans and coding agents should work in **Ferret**.
 
 ## Project at a Glance
 
-Ferret is an open-source, cross-platform (Linux / macOS / Windows) file manager
-with a terminal that stays synced to the folder you are browsing. It is a Rust
-2024 workspace built on [GPUI](https://www.gpui.rs/) and
+Ferret is an open-source file manager with a terminal that stays synced to the
+folder you are browsing. It targets **macOS and Windows** (Linux deferred, see
+D-19). Rust 2024 workspace built on [GPUI](https://www.gpui.rs/) and
 [gpui-component](https://github.com/longbridge/gpui-component).
 
 **The repository is currently scaffolding.** It builds and opens a window; no
@@ -32,10 +32,17 @@ feature IDs (F-nn) and decisions (D-nn) when you do.
 │   ├── ferret/           # Native binary bootstrap  (bin `ferret`)
 │   │   ├── assets/       # Application icon files
 │   │   └── src/main.rs   # Application, menu, keybindings, window setup
-│   └── ferret-ui/        # Views and Ferret-specific theme tokens
-│       ├── src/lib.rs    # Public API and RootView
-│       ├── src/theme.rs  # Terminal ANSI palette (interface colours come from gpui-component)
-│       └── themes/groknight.json
+│   ├── ferret-ui/        # Views and Ferret-specific theme tokens
+│   │   ├── src/lib.rs    # Public API and RootView
+│   │   ├── src/theme.rs  # Terminal ANSI palette (interface colours come from gpui-component)
+│   │   └── themes/groknight.json
+│   └── ferret-vfs/       # Storage layer
+│       ├── src/vfs.rs    # The Vfs trait (D-17)
+│       ├── src/local.rs  # LocalFs over std::fs
+│       ├── src/path.rs   # VfsPath
+│       └── src/folder_prefs.rs  # Per-folder view preferences, bounded LRU (D-16)
+├── xtask/                # Fixture generator and listing benchmark
+├── docs/ui-base.html     # Base explorer shell — the UI spec for current work
 ├── docs/plan.html        # Product + architecture plan
 └── README.md
 ```
@@ -44,17 +51,23 @@ feature IDs (F-nn) and decisions (D-nn) when you do.
 | --- | --- | --- |
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
+| `crates/ferret-vfs` | `ferret-vfs` | The `Vfs` trait, the local backend, path handling, per-folder view preferences. Knows nothing about GPUI. |
+| `xtask` | `xtask` | Development tasks: the performance fixture and the listing benchmark. |
 
 **Ownership rule:** put behavior in the crate that owns it. Window and
 application lifecycle code belongs in `ferret`; reusable visual behavior belongs
 in `ferret-ui`. Expose cross-crate APIs through the owning crate's `src/lib.rs`
 instead of reaching into private modules.
 
-As features land, `ferret-ui` splits into the service crates described in
-`docs/plan.html` (`ferret-vfs`, `ferret-terminal`, `ferret-git`, …). Do not create
-those crates speculatively — add one when the code that belongs in it exists.
-When you do, respect the layering: no service crate may depend on `ferret-ui`,
-and only `ferret-ui` may depend on `gpui-component`.
+More service crates arrive as features land (`ferret-terminal`, `ferret-git`, …).
+Do not create them speculatively — add one when the code that belongs in it
+exists. `ferret-core` is the same: the shared domain types currently live in
+`ferret-vfs` and move out when a second service crate needs them.
+
+Respect the layering: no service crate may depend on `ferret-ui`, and **only
+`ferret-ui` may depend on `gpui-component`**. Service crates should stay
+GPUI-free where they can — `ferret-vfs` is, and its 31 tests run without opening
+a window. That is the standard to hold.
 
 ## Quick Start
 
@@ -63,8 +76,8 @@ and only `ferret-ui` may depend on `gpui-component`.
 - A current stable Rust toolchain (1.90+) through [rustup](https://rustup.rs/).
 - [`just`](https://github.com/casey/just) for the repository shortcuts (optional).
 - The native build tools required by Rust and GPUI for your operating system.
-  macOS needs the Xcode Command Line Tools; Linux needs a Vulkan loader,
-  `libxkbcommon` and `fontconfig`; Windows needs the MSVC toolchain.
+  macOS needs the Xcode Command Line Tools (not full Xcode — see the dependency
+  policy below); Windows needs the MSVC toolchain.
 
 ### Run the application
 
@@ -72,8 +85,8 @@ and only `ferret-ui` may depend on `gpui-component`.
 just dev          # or: cargo run -p ferret
 ```
 
-The app opens a `1180 × 760` window. Quit with **⌘Q** on macOS or **Ctrl+Q**
-elsewhere.
+The app opens a `1180 × 760` window. Quit with **⌘Q** on macOS or **Ctrl+Q** on
+Windows.
 
 ## Development Commands
 
@@ -86,6 +99,8 @@ elsewhere.
 | `just fmt` | Format all Rust code. | Before finishing any Rust edit. |
 | `just lint` | `fmt --check` plus `clippy -D warnings`. | Before a PR or after non-trivial changes. |
 | `just test` | Run workspace tests. | When behavior changes or tests are added. |
+| `cargo xtask fixture` | Build the performance fixture. | Once, before benchmarking or testing the file pane. |
+| `cargo xtask bench` | Measure listing performance against budget. | After touching `ferret-vfs` or the file pane. Exits non-zero past budget. |
 
 Do not claim a command passed unless you actually ran it. If a command cannot run
 because of the local environment, report the command and the exact blocker.
@@ -239,9 +254,10 @@ cx.on_action(|_: &Quit, cx| cx.quit());
 cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
 ```
 
-Ferret targets three platforms. Every keybinding needs a non-macOS equivalent,
-and anything touching paths, permissions, PTYs or the trash needs a plan for all
-three before it merges.
+Ferret targets macOS and Windows. Every keybinding needs a Windows equivalent, and
+anything touching paths, permissions, PTYs or the trash needs a plan for both
+before it merges. Linux is deferred, not abandoned — keep platform differences
+behind `ferret-platform` traits so re-adding it is not a rewrite.
 
 ## Testing and Validation
 
@@ -253,6 +269,7 @@ three before it merges.
 | Theme or layout | Rust checks plus visual review in light and dark, at default and minimum window sizes. |
 | Window/bootstrap | Rust checks plus launch, quit shortcut, and window-behavior verification. |
 | New logic or bug fix | Add focused tests where practical, then `just test`. |
+| `ferret-vfs` or the file pane | The above plus `cargo xtask bench`, which must stay within budget. |
 | Broad or release-facing work | All of the above plus `just lint` and `just build`. |
 
 Good tests protect behavior rather than restating implementation details. Prefer
@@ -272,7 +289,9 @@ place to add tests in this project — write them against a temp directory.
 - Breaking the bootstrap contract above — every failure mode there is silent at compile time.
 - Adding a `rev` to `gpui` without pinning `gpui-component` to a matching commit.
 - Dropping `gpui_platform`'s `runtime_shaders` feature, which is what lets macOS build without full Xcode.
-- Assuming macOS path, permission or shell semantics.
+- Assuming macOS path, permission or shell semantics. Windows has drive letters, UNC paths, UTF-16 names, reserved names (`CON`, `NUL`, `COM1`) and needs Developer Mode for symlinks.
+- Collecting a directory listing into a `Vec` before yielding it. `cargo xtask bench` exists to catch this; time-to-first-row is 0.3 ms against 143 ms for a full 200,000-entry listing, and that gap is the whole point.
+- Adding a `ferret-vfs` type that duplicates something `std` already provides. It is a thin wrapper over the platform, not a filesystem.
 - Running only `cargo check` and skipping visual verification for a visible change.
 - Creating a new workspace crate before there is code to put in it.
 

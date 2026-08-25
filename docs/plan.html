@@ -549,7 +549,7 @@ footer {
   <p class="lede">An open-source, cross-platform file manager with a terminal that follows you. Rust, GPUI, GPL-3.0.</p>
   <dl class="facts">
     <div><dt>Status</dt><dd>Scaffolding — no feature built</dd></div>
-    <div><dt>Targets</dt><dd>Linux · macOS · Windows</dd></div>
+    <div><dt>Targets</dt><dd>macOS · Windows <small>(Linux deferred)</small></dd></div>
     <div><dt>Stack</dt><dd>Rust 2024 · GPUI · gpui-component</dd></div>
     <div><dt>Reference product</dt><dd>Iruka 1.1.8.2 (macOS, paid)</dd></div>
     <div><dt>Features catalogued</dt><dd class="num">51</dd></div>
@@ -599,7 +599,7 @@ footer {
   <p>Feature parity with Iruka's five shipped roadmap phases — synced terminal, SSH,
   Markdown preview, git control, Power Search, syntax-highlighted previews, dual pane,
   in-place editing, cloud mounts, batch rename, operations queue, symlinks — running
-  natively on Linux, macOS and Windows, with a light and a dark theme.</p>
+  natively on macOS and Windows, with a light and a dark theme. Linux is deferred (D-19), not abandoned.</p>
 
   <h3>Explicit non-goals</h3>
   <div class="scroller">
@@ -860,9 +860,8 @@ footer {
       apply when the prompt returns. Paths must be shell-quoted. The reverse direction
       (terminal <code>cd</code> updates the file pane) is the harder half: it needs OSC 7
       working-directory reporting from the shell, with a fallback to reading
-      <code>/proc/&lt;pid&gt;/cwd</code> on Linux or <code>proc_pidinfo</code> on macOS. Windows
-      has neither, so OSC 7 is the only path there and we ship shell snippets for
-      PowerShell, bash, zsh and fish.</p>
+      <code>proc_pidinfo</code> on macOS. Windows has no equivalent, so OSC 7 is the only
+      path there and we ship shell snippets for PowerShell, bash, zsh and fish.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-terminal</code></dd>
         <dt>Depends on</dt><dd>F-10</dd>
@@ -929,7 +928,7 @@ footer {
       <p><em>Behaviour:</em> everything is latency-bound, so the <code>Vfs</code> trait must
       be async end to end and the UI must show pending state rather than freeze. Directory
       listings and stat results need a short-lived cache with explicit invalidation. Plan for
-      <code>russh</code> + <code>russh-sftp</code> — pure Rust, works identically on all three
+      <code>russh</code> + <code>russh-sftp</code> — pure Rust, works identically on both
       platforms, no FUSE or WinFsp dependency.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-remote</code></dd>
@@ -1064,12 +1063,12 @@ footer {
     <div class="fbody">
       <p>First page, or a scrollable page view, in the preview pane.</p>
       <p><em>Behaviour:</em> there is no clean cross-platform pure-Rust PDF renderer. macOS
-      has PDFKit; Linux and Windows need <code>pdfium</code> (a large C++ blob) or
-      <code>poppler</code>. See §9 — this is a genuine open question and may ship as
-      macOS-only in v1.0 with a "open externally" fallback elsewhere.</p>
+      has PDFKit; Windows needs <code>pdfium</code> (a large C++ blob). See §10 — this is a
+      genuine open question and may ship as macOS-only in v1.0 with an "open
+      externally" fallback on Windows.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-preview</code></dd>
-        <dt>Phase</dt><dd>3 (macOS) · 9 (others)</dd>
+        <dt>Phase</dt><dd>3 (macOS) · 9 (Windows)</dd>
       </dl>
     </div>
   </details>
@@ -1335,9 +1334,9 @@ footer {
     <div class="fbody">
       <p>A context-menu entry in the system file manager, and a <code>ferret .</code> CLI
       that opens or focuses a window at that path.</p>
-      <p><em>Behaviour:</em> three completely separate implementations — a Finder Sync
-      extension on macOS, a <code>.desktop</code> action plus per-file-manager scripts on
-      Linux, and a shell extension DLL or registry entry on Windows. Budget accordingly.</p>
+      <p><em>Behaviour:</em> two completely separate implementations — a Finder Sync
+      extension on macOS, and a shell extension on Windows. Budget accordingly; neither is
+      a footnote.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-platform</code>, <code>ferret</code></dd>
         <dt>Phase</dt><dd>9</dd>
@@ -1477,8 +1476,8 @@ footer {
   <details class="feat">
     <summary><span class="fid">F-85</span><span class="fname">Packaging &amp; distribution</span></summary>
     <div class="fbody">
-      <p>Signed and notarised <code>.dmg</code> for macOS; AppImage, Flatpak and an AUR
-      package for Linux; MSI or NSIS installer plus winget and Scoop manifests for Windows.
+      <p>Signed and notarised <code>.dmg</code> for macOS; MSI or NSIS installer plus winget
+      and Scoop manifests for Windows.
       Built by CI on every tagged release.</p>
       <dl class="meta">
         <dt>Crate</dt><dd>— (CI, <code>cargo-bundle</code> / <code>cargo-packager</code>)</dd>
@@ -1513,8 +1512,8 @@ footer {
       <tbody>
         <tr><td class="crate">ferret</td><td>binary</td><td>Bootstrap, window options, native menus, global actions, keybinding registration, CLI entry (<code>ferret .</code>), single-instance.</td><td><code>gpui_platform</code></td></tr>
         <tr><td class="crate">ferret-ui</td><td>view</td><td>Every view, panel and component. Browser shell, sidebar, tab strip, path bar, file pane, status bar, dialogs, command palette, theme.</td><td><code>gpui-component</code> <em>(only crate that may)</em></td></tr>
-        <tr><td class="crate">ferret-core</td><td>base</td><td>Shared domain types: <code>Entry</code>, <code>EntryKind</code>, <code>VfsPath</code>, <code>SortKey</code>, ids, error type, cross-crate events. Depends on nothing in the workspace.</td><td><code>thiserror</code>, <code>serde</code></td></tr>
-        <tr><td class="crate">ferret-vfs</td><td>service</td><td>The <code>Vfs</code> trait, the local-disk backend, path canonicalisation, the change watcher, mount registry.</td><td><code>notify</code>, <code>async-trait</code></td></tr>
+        <tr><td class="crate">ferret-core</td><td>base</td><td>Shared domain types: <code>Entry</code>, <code>EntryKind</code>, <code>VfsPath</code>, <code>SortKey</code>, ids, error type, cross-crate events. <strong>Not yet created</strong> — these types live in <code>ferret-vfs</code> until a second service crate needs them, per the rule against creating a crate before there is code for it.</td><td><code>thiserror</code>, <code>serde</code></td></tr>
+        <tr><td class="crate">ferret-vfs</td><td>service</td><td><span class="pill p-done">exists</span> The <code>Vfs</code> trait (D-17), the local-disk backend, path handling, per-folder view preferences (D-16). Still to come: the change watcher and mount registry.</td><td><code>async-trait</code>, <code>async-channel</code>, <code>smol</code>, later <code>notify</code></td></tr>
         <tr><td class="crate">ferret-remote</td><td>service</td><td>SFTP/SSH, S3 and WebDAV backends implementing <code>Vfs</code>; saved connections; SCP.</td><td><code>russh</code>, <code>russh-sftp</code>; <code>aws-sdk-s3</code> and <code>reqwest</code> behind features</td></tr>
         <tr><td class="crate">ferret-ops</td><td>service</td><td>Operation engine: queue, copy/move/delete, conflict policy, batch rename, drop stack, undo.</td><td><code>regex</code></td></tr>
         <tr><td class="crate">ferret-terminal</td><td>service</td><td>PTY spawn, VT parsing, grid model, scrollback, cwd sync, SSH-backed sessions.</td><td><code>alacritty_terminal</code></td></tr>
@@ -1564,67 +1563,67 @@ footer {
     <table class="wide">
       <caption>Per-feature platform hazards</caption>
       <thead>
-        <tr><th>Concern</th><th>Linux</th><th>macOS</th><th>Windows</th><th>Approach</th></tr>
+        <tr><th>Concern</th><th>macOS</th><th>Windows</th><th>Approach</th></tr>
       </thead>
       <tbody>
         <tr>
           <td>PTY (F-10)</td>
-          <td class="yes">forkpty</td><td class="yes">forkpty</td><td class="part">ConPTY</td>
+          <td class="yes">forkpty</td><td class="part">ConPTY</td>
           <td>Separate spawn paths behind one trait. ConPTY needs Windows 10 1809+ and behaves differently around resize.</td>
         </tr>
         <tr>
           <td>Terminal cwd reporting (F-11)</td>
-          <td class="yes">OSC 7 or <code>/proc</code></td><td class="yes">OSC 7 or <code>proc_pidinfo</code></td><td class="part">OSC 7 only</td>
+          <td class="yes">OSC 7 or <code>proc_pidinfo</code></td><td class="part">OSC 7 only</td>
           <td>OSC 7 is the primary mechanism everywhere; ship shell snippets. The <code>/proc</code> path is a fallback, not the design.</td>
         </tr>
         <tr>
           <td>Path semantics (F-01, F-02)</td>
-          <td class="yes">case-sensitive, UTF-8-ish bytes</td><td class="part">case-insensitive, NFD normalisation</td><td class="part">drive letters, UNC, UTF-16, reserved names, 260-char legacy limit</td>
+          <td class="part">case-insensitive, NFD normalisation</td><td class="part">drive letters, UNC, UTF-16, reserved names, 260-char legacy limit</td>
           <td><code>VfsPath</code> abstracts it. macOS Unicode normalisation and Windows reserved names both need explicit handling in rename (F-62).</td>
         </tr>
         <tr>
           <td>File watching (F-01)</td>
-          <td class="yes">inotify</td><td class="yes">FSEvents</td><td class="yes">ReadDirectoryChangesW</td>
-          <td><code>notify</code> covers all three. Watch out for inotify watch limits on large trees.</td>
+          <td class="yes">FSEvents</td><td class="yes">ReadDirectoryChangesW</td>
+          <td><code>notify</code> covers both. FSEvents is directory-granular and coalesces, so treat events as hints to re-list rather than as a precise changelog.</td>
         </tr>
         <tr>
           <td>Trash (F-71)</td>
-          <td class="yes">XDG trash</td><td class="yes">Finder trash</td><td class="yes">Recycle Bin</td>
-          <td>The <code>trash</code> crate handles all three.</td>
+          <td class="yes">Finder trash</td><td class="yes">Recycle Bin</td>
+          <td>The <code>trash</code> crate handles both.</td>
         </tr>
         <tr>
           <td>Symlink creation (F-64)</td>
-          <td class="yes">free</td><td class="yes">free</td><td class="part">needs Developer Mode or elevation</td>
+          <td class="yes">free</td><td class="part">needs Developer Mode or elevation</td>
           <td>Detect the privilege up front and explain it. Never fail with a raw OS error.</td>
         </tr>
         <tr>
           <td>Window blur / vibrancy (§3)</td>
-          <td class="part">compositor-dependent</td><td class="yes">native</td><td class="part">Mica / Acrylic, version-gated</td>
+          <td class="yes">native</td><td class="part">Mica / Acrylic, version-gated</td>
           <td>Not used. The design is legible on an opaque themed background; blur stays an optional macOS enhancement nothing depends on.</td>
         </tr>
         <tr>
           <td>Shell integration (F-70)</td>
-          <td class="part">per-file-manager</td><td class="part">Finder Sync extension</td><td class="part">shell extension</td>
+          <td class="part">Finder Sync extension</td><td class="part">shell extension</td>
           <td>Three separate implementations. Schedule as its own slice of Phase 9, not as a footnote.</td>
         </tr>
         <tr>
           <td>Credential storage (F-20)</td>
-          <td class="yes">libsecret</td><td class="yes">Keychain</td><td class="yes">Credential Manager</td>
+          <td class="yes">Keychain</td><td class="yes">Credential Manager</td>
           <td>One keyring abstraction in <code>ferret-platform</code>. Never a plaintext fallback.</td>
         </tr>
         <tr>
           <td>PDF rendering (F-34)</td>
-          <td class="no">no clean option</td><td class="yes">PDFKit</td><td class="no">no clean option</td>
+          <td class="yes">PDFKit</td><td class="no">no clean option</td>
           <td>Unresolved — see Q-01.</td>
         </tr>
         <tr>
           <td>Menus &amp; shortcuts (F-81)</td>
-          <td class="part">in-window</td><td class="yes">native menu bar</td><td class="part">in-window</td>
+          <td class="yes">native menu bar</td><td class="part">in-window</td>
           <td>Every binding needs a non-<kbd>Cmd</kbd> equivalent registered from day one.</td>
         </tr>
         <tr>
           <td>Metal shader build</td>
-          <td class="yes">n/a</td><td class="yes">solved</td><td class="yes">n/a</td>
+          <td class="yes">solved</td><td class="yes">n/a</td>
           <td>GPUI normally compiles its Metal shaders with <code>xcrun metal</code>, which ships only inside full Xcode. <code>gpui_platform</code>'s <code>runtime_shaders</code> feature stitches and compiles them at runtime instead, so Command Line Tools are enough — see D-13.</td>
         </tr>
       </tbody>
@@ -1636,8 +1635,8 @@ footer {
     <p>Roughly a third of the total effort is in this table, not in the feature list. Iruka
     is a one-platform product; the moment Ferret commits to three, the terminal, paths,
     shell integration and packaging each triple. Plan Phase 9 as real work, and get a
-    Windows and a Linux machine into CI from Phase 0 so drift is caught the week it
-    happens rather than the month before release.</p>
+    Windows runner into CI from Phase 0 so drift is caught the week it happens rather
+    than the month before release.</p>
   </div>
 </section>
 
@@ -1660,7 +1659,7 @@ footer {
         <tr>
           <td class="id">D-02</td>
           <td>Adopt <code>gpui-component</code> rather than hand-rolling widgets.</td>
-          <td>It already provides the exact set this product needs — virtualised <code>table</code>, <code>tree</code>, <code>dock</code>, <code>resizable</code>, Rope-backed <code>input</code>, <code>highlighter</code>, Markdown <code>text</code>, <code>command</code> — is Apache-2.0, and targets all three platforms. Rebuilding that is a year of work with no product in it.</td>
+          <td>It already provides the exact set this product needs — virtualised <code>table</code>, <code>tree</code>, <code>dock</code>, <code>resizable</code>, Rope-backed <code>input</code>, <code>highlighter</code>, Markdown <code>text</code>, <code>command</code> — is Apache-2.0, and targets both platforms. Rebuilding that is a year of work with no product in it.</td>
         </tr>
         <tr>
           <td class="id">D-03</td>
@@ -1723,9 +1722,34 @@ footer {
           <td>Resolves Q-07. Adopting <code>cx.theme()</code> wholesale gives light and dark, semantic tokens and component consistency for free, and keeping a parallel palette would guarantee drift. <code>ferret-ui</code> keeps only the terminal's sixteen ANSI slots and the file- and git-state colours, which the component theme has no concept of.</td>
         </tr>
         <tr>
+          <td class="id">D-19</td>
+          <td>Target macOS and Windows. Linux is deferred, not abandoned.</td>
+          <td>Three platforms tripled the work in the terminal, paths, shell integration and packaging (§6) before a single user existed. Two well-supported targets ship sooner. <strong>Consequence:</strong> <code>ferret-platform</code>'s trait boundary stays intact so Linux is a re-add rather than a rewrite, and no POSIX-only assumption may leak into feature code. Note that <code>gpui-base</code> still enables <code>gpui_platform</code>'s <code>wayland</code> and <code>x11</code> features transitively, and Cargo unions features — removing them from our manifest states intent, it does not exclude the code.</td>
+        </tr>
+        <tr>
+          <td class="id">D-16</td>
+          <td>Per-folder view preferences are a bounded LRU in one JSON file, capped at 4,000 folders.</td>
+          <td>Resolves Q-03. The whole map loads at startup, so lookup is synchronous and O(1) — anything that awaits here shows the wrong view mode for a frame before correcting itself. The cap bounds the file by construction (~500 KB) however long Ferret runs, and writes are debounced so a whole-file rewrite costs nothing. <strong>Windows Explorer already caps its equivalent store and evicts old entries</strong>; the real requirement is "remember the folders I use", not "remember every folder forever". Sidecar files (<code>.DS_Store</code>, <code>.directory</code>) were rejected outright: they need write permission the user may not have, fail on read-only volumes and network shares, and litter the user's own repositories. Revisit an embedded store when the thumbnail cache (F-33) gives a second reason for one.</td>
+        </tr>
+        <tr>
+          <td class="id">D-17</td>
+          <td>One <code>Vfs</code> trait: async throughout, streaming listings, capability-declared, cancel-by-drop.</td>
+          <td>A thin wrapper over the platform, not a filesystem reimplementation. Async even for local disk, so the first remote mount is a slow call rather than a frozen window — retrofitting that later would touch every call site. Listings stream, so a large directory paints immediately: measured at <strong>301&nbsp;µs to the first row against 143&nbsp;ms for the full 200,000-entry listing</strong>. Backends declare <code>metadata_in_listing</code> because Windows' <code>FindFirstFileEx</code> returns size and times with the name while macOS's <code>readdir</code> does not — hard-coding either shape wastes one platform. <code>VfsPath</code> rather than <code>PathBuf</code>, so remote and Windows path semantics cannot leak into each other.</td>
+        </tr>
+        <tr>
+          <td class="id">D-18</td>
+          <td>File icons come from the OS, behind an <code>IconProvider</code> trait, with a bundled set shipping first.</td>
+          <td>A Finder replacement whose icons do not match Finder looks wrong on sight, and both targets expose this — <code>NSWorkspace.icon(forFile:)</code> and <code>SHGetFileInfo</code> — including application icons and custom folder icons. A small bundled set (~60 types) ships first behind the same trait so the list never blocks or flickers on an icon lookup; the OS providers land behind it before the base closes. Same interface either way, so no rework.</td>
+        </tr>
+        <tr>
+          <td class="id">D-20</td>
+          <td>Performance is measured against a generated fixture, with budgets that fail the build.</td>
+          <td>"It scrolls fine on my repo" proves nothing. <code>cargo xtask fixture</code> generates one tree covering every cliff — 200,000 flat entries, maximal nesting, 255-character and NFD and emoji names, broken and cyclic symlinks, an unreadable directory, a 4&nbsp;GB sparse file, 59 extensions. <code>cargo xtask bench</code> measures time-to-first-row and full-listing time and exits non-zero past budget: <strong>50&nbsp;ms to first row, 3&nbsp;s for the full 200,000-entry listing</strong>. It lives outside the repository so Cargo and editor watchers do not crawl it.</td>
+        </tr>
+        <tr>
           <td class="id">D-15</td>
           <td>No window blur or vibrancy.</td>
-          <td>The starter scaffold forced <code>WindowBackgroundAppearance::Blurred</code> with a transparent root fill. That constrains every surface to translucency for an effect that is compositor-dependent on Linux and version-gated on Windows. Ferret draws on an opaque themed background; blur can return later as a macOS-only enhancement.</td>
+          <td>The starter scaffold forced <code>WindowBackgroundAppearance::Blurred</code> with a transparent root fill. That constrains every surface to translucency for an effect that is version-gated on Windows and compositor-dependent on Linux whenever that returns. Ferret draws on an opaque themed background; blur can return later as a macOS-only enhancement.</td>
         </tr>
       </tbody>
     </table>
@@ -1786,7 +1810,7 @@ footer {
         <li>Selection and focus model; full keyboard map with non-<kbd>Cmd</kbd> equivalents; context menus; inline rename; trash; copy, paste and drag-and-drop.</li>
         <li>Light and dark themes; settings file and keymap; per-folder view preferences.</li>
       </ul>
-      <p class="accept"><b>Done when</b> you can set Ferret as your default file manager and not miss the system one for browsing, opening, renaming, moving and deleting — on all three platforms — and a 200,000-entry directory scrolls at full frame rate.</p>
+      <p class="accept"><b>Done when</b> you can set Ferret as your default file manager and not miss the system one for browsing, opening, renaming, moving and deleting — on both platforms — and a 200,000-entry directory scrolls at full frame rate.</p>
     </div>
   </div>
 
@@ -1796,7 +1820,7 @@ footer {
       <h3>Terminal &amp; sync <span class="pill p-core">the product</span></h3>
       <p class="dep">depends on: 1 · delivers F-10 · F-11 · F-12</p>
       <ul>
-        <li><code>ferret-terminal</code>: PTY spawn on all three platforms, VT parsing, GPUI renderer, scrollback, selection, copy/paste.</li>
+        <li><code>ferret-terminal</code>: PTY spawn on both platforms (forkpty and ConPTY), VT parsing, GPUI renderer, scrollback, selection, copy/paste.</li>
         <li>UI→terminal sync with the safety rules from F-11; the <em>Sync</em> toggle.</li>
         <li>Terminal→UI sync via OSC 7, with shell snippets for bash, zsh, fish and PowerShell.</li>
       </ul>
@@ -1890,14 +1914,14 @@ footer {
     <span class="pn">09</span>
     <div>
       <h3>Platform polish &amp; release</h3>
-      <p class="dep">depends on: all · delivers F-70 · F-83 · F-85 · F-34 (Linux, Windows)</p>
+      <p class="dep">depends on: all · delivers F-70 · F-83 · F-85 · F-34 (Windows)</p>
       <ul>
         <li>Shell integration on each platform; session restore.</li>
         <li>Signing, notarisation, installers and package manifests; release CI.</li>
         <li>Accessibility pass, keyboard-only navigation, high-contrast check.</li>
         <li>User documentation and a full keyboard-shortcut reference.</li>
       </ul>
-      <p class="accept"><b>Done when</b> a tagged commit produces installable artefacts for all three platforms and a new user can install, launch and work without reading anything.</p>
+      <p class="accept"><b>Done when</b> a tagged commit produces installable artefacts for both platforms and a new user can install, launch and work without reading anything.</p>
     </div>
   </div>
 </section>
@@ -1926,9 +1950,9 @@ footer {
         </tr>
         <tr>
           <td class="id">R-03</td>
-          <td>Three-platform scope. Every system-touching feature is written up to three times; see §6.</td>
+          <td>Two-platform scope. Every system-touching feature is written twice; see §6. Reduced from three by D-19, but not eliminated.</td>
           <td><span class="pill p-risky">high</span></td>
-          <td>Get all three into CI in Phase 0. Push platform differences behind <code>ferret-platform</code> traits so they cannot leak into feature code.</td>
+          <td>Get both into CI in Phase 0. Push platform differences behind <code>ferret-platform</code> traits so they cannot leak into feature code.</td>
         </tr>
         <tr>
           <td class="id">R-04</td>
@@ -1976,14 +2000,14 @@ footer {
       <caption>To decide</caption>
       <thead><tr><th class="id">ID</th><th>Question</th><th>Needed by</th></tr></thead>
       <tbody>
-        <tr><td class="id">Q-01</td><td>How does PDF preview (F-34) work on Linux and Windows? Bundle <code>pdfium</code> and accept the binary size and build complexity, shell out to <code>poppler</code> where present, or ship macOS-only in v1.0 with an "open externally" fallback?</td><td>Phase 3</td></tr>
+        <tr><td class="id">Q-01</td><td>How does PDF preview (F-34) work on Windows? Bundle <code>pdfium</code> and accept the binary size and build complexity, or ship macOS-only in v1.0 with an "open externally" fallback?</td><td>Phase 3</td></tr>
         <tr><td class="id">Q-02</td><td>Which tree-sitter grammars ship by default (F-32)? All 35 costs build time and binary size; too few looks broken. Is a runtime-loadable grammar path worth the complexity?</td><td>Phase 3</td></tr>
-        <tr><td class="id">Q-03</td><td>What is the per-folder preferences store (F-06)? A single JSON file will not scale to tens of thousands of directories. SQLite adds a dependency; a custom log-structured file adds work.</td><td>Phase 1</td></tr>
+        <tr><td class="id">Q-03</td><td><s>What is the per-folder preferences store (F-06)?</s> <strong>Answered:</strong> a bounded LRU capped at 4,000 folders — see D-16. Implemented in <code>ferret-vfs</code>.</td><td><span class="pill p-done">closed</span></td></tr>
         <tr><td class="id">Q-04</td><td>Is undo (F-60) full or partial? Undoing a move is easy; undoing a delete-to-trash is possible; undoing an overwrite is not without a staging copy. Where is the line, and how is it communicated?</td><td>Phase 6</td></tr>
         <tr><td class="id">Q-05</td><td>Does the terminal support multiple sessions per tab, or exactly one? Multiple means tabs-within-tabs and a more complex sync model (F-11).</td><td>Phase 2</td></tr>
         <tr><td class="id">Q-06</td><td>What is the app actually called, and what is its icon? "Ferret" is the working name from the repository directory. Confirm the name is unencumbered before packaging (F-85).</td><td>Phase 9</td></tr>
         <tr><td class="id">Q-07</td><td><s>Do we adopt <code>gpui-component</code>'s theme system wholesale, or layer Ferret tokens on top?</s> <strong>Answered:</strong> adopted wholesale — see D-14.</td><td><span class="pill p-done">closed</span></td></tr>
-        <tr><td class="id">Q-08</td><td>Which Linux desktop file managers get "Open in Ferret" integration (F-70), and is a generic <code>.desktop</code> action enough for most of them?</td><td>Phase 9</td></tr>
+        <tr><td class="id">Q-08</td><td>Does the Windows "Open in Ferret" entry (F-70) use a sparse-package context-menu extension, which needs packaging, or the legacy registry verb, which Windows 11 hides behind "Show more options"?</td><td>Phase 9</td></tr>
       </tbody>
     </table>
   </div>

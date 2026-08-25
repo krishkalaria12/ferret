@@ -535,7 +535,7 @@ footer {
 <header class="masthead">
   <p class="eyebrow">Base UI reference · rev 1 · 25 Aug 2026</p>
   <h1>The explorer shell</h1>
-  <p class="lede">The window Ferret is before it is anything else: sidebar, tabs, path bar, file pane, status bar. Build this first; everything else plugs into it.</p>
+  <p class="lede">The window Ferret is before it is anything else: sidebar, tabs, path bar, file pane, status bar. Build this first; everything else plugs into it. Targets macOS and Windows.</p>
 </header>
 
 <!-- ==================================================================== -->
@@ -868,6 +868,26 @@ footer {
       </tbody>
     </table>
   </div>
+
+  <h3>File icons</h3>
+  <p>Per D-18, icons come from the OS behind an <code>IconProvider</code> trait, because a
+  Finder replacement whose icons do not match Finder looks wrong on sight. Both targets
+  expose this, including application icons and custom folder icons:</p>
+  <div class="scroller">
+    <table>
+      <caption>Icon sources</caption>
+      <thead><tr><th>Platform</th><th class="mono">API</th><th>Gives</th></tr></thead>
+      <tbody>
+        <tr><td>macOS</td><td class="mono">NSWorkspace.icon(forFile:)</td><td>Real Finder icons, app bundles, custom folder icons, document badges.</td></tr>
+        <tr><td>Windows</td><td class="mono">SHGetFileInfo / IShellItemImageFactory</td><td>Real Explorer icons; the latter also yields thumbnails at arbitrary size.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Two rules make this safe at 200,000 rows:</p>
+  <ul>
+    <li><strong>Never call the OS on the render path.</strong> The provider answers instantly from a cache keyed by extension, or returns the bundled fallback and resolves the real icon in the background.</li>
+    <li><strong>Ship the bundled set first.</strong> ~60 types covering the common extensions, so the list is never blank and never blocks. The OS providers land behind the same trait before the base closes — same interface, no rework.</li>
+  </ul>
 </section>
 
 <!-- ==================================================================== -->
@@ -954,12 +974,12 @@ footer {
 
   <div class="scroller">
     <table class="wide">
-      <caption>Keyboard — every one needs a non-Cmd equivalent</caption>
-      <thead><tr><th class="mono">macOS</th><th class="mono">Linux / Windows</th><th>Action</th></tr></thead>
+      <caption>Keyboard — every binding needs a Windows equivalent</caption>
+      <thead><tr><th class="mono">macOS</th><th class="mono">Windows</th><th>Action</th></tr></thead>
       <tbody>
         <tr><td class="mono">↑ ↓</td><td class="mono">↑ ↓</td><td>Move selection. <kbd>Shift</kbd> extends.</td></tr>
         <tr><td class="mono">→ ←</td><td class="mono">→ ←</td><td>Expand / collapse a folder row.</td></tr>
-        <tr><td class="mono">Enter</td><td class="mono">Enter</td><td>Open. <em>Note:</em> on macOS Finder this renames — Ferret opens, consistently across platforms, and renames on <kbd>F2</kbd>.</td></tr>
+        <tr><td class="mono">Enter</td><td class="mono">Enter</td><td>Open. <em>Note:</em> on macOS Finder this renames — Ferret opens, consistently on both platforms, and renames on <kbd>F2</kbd>.</td></tr>
         <tr><td class="mono">Cmd ↑ / ↓</td><td class="mono">Alt ↑ / Enter</td><td>Go to parent / enter folder.</td></tr>
         <tr><td class="mono">Cmd [ / ]</td><td class="mono">Alt ← / →</td><td>Back / forward.</td></tr>
         <tr><td class="mono">Cmd T</td><td class="mono">Ctrl T</td><td>New tab.</td></tr>
@@ -1022,8 +1042,8 @@ footer {
   <p class="sec-intro">Inside the base, this is the sequence that keeps something runnable at every step.</p>
 
   <ol>
-    <li><b>Filesystem layer.</b> <code>ferret-core</code> types and <code>ferret-vfs</code> with the local backend: streaming <code>read_dir</code>, metadata, canonicalisation. Testable with no window — write the tests here.</li>
-    <li><b>Window shell.</b> Title bar, a static sidebar, and a file pane rendering one hard-coded directory as a virtualised <code>Table</code>. This is the moment to prove scrolling at 200,000 rows.</li>
+    <li><b>Filesystem layer.</b> <span class="pill p-base">done</span> <code>ferret-vfs</code>: the <code>Vfs</code> trait, the local backend with streaming <code>read_dir</code>, and the per-folder preference store. Testable with no window — 31 tests live there. Still to come: the change watcher.</li>
+    <li><b>Window shell.</b> Title bar, a static sidebar, and a file pane rendering one hard-coded directory as a virtualised <code>Table</code>. Point it at the fixture's <code>flat/</code> and prove scrolling at 200,000 rows before going further.</li>
     <li><b>Navigation.</b> Double-click to enter, up, back and forward with per-tab history, and the path bar.</li>
     <li><b>Selection and focus.</b> Single, range and toggle selection; the focus model; the status bar.</li>
     <li><b>Sidebar for real.</b> Places from the OS, Favorites with reorder and persistence, Volumes with mount and unmount watching.</li>
@@ -1038,10 +1058,31 @@ footer {
   <p>Steps 1 and 2 are where the project's performance ceiling is set. If the table is not
   virtualised properly there, no later work recovers it.</p>
 
+  <h3>Measuring it</h3>
+  <p><code>cargo xtask fixture</code> generates the tree every one of these steps is tested
+  against — 200,000 flat entries, maximal nesting, 255-character and NFD and emoji names,
+  broken and cyclic symlinks, an unreadable directory, a 4&nbsp;GB sparse file, 59 extensions,
+  and an ordinary project tree for eyeballing the UI on something realistic.
+  <code>cargo xtask bench</code> measures the listing and fails past budget.</p>
+  <div class="scroller">
+    <table>
+      <caption>Budgets</caption>
+      <thead><tr><th>Measure</th><th class="num">Budget</th><th class="num">Actual</th></tr></thead>
+      <tbody>
+        <tr><td>Time to first row, 200k entries</td><td class="num">50 ms</td><td class="num">0.3 ms</td></tr>
+        <tr><td>Full listing, 200k entries</td><td class="num">3 s</td><td class="num">143 ms</td></tr>
+        <tr><td>Frame time while scrolling</td><td class="num">&lt; 8 ms</td><td class="num">measured in the app, not the bench</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The gap between 0.3 ms and 143 ms is the whole argument for streaming listings. If
+  time-to-first-row ever approaches full-listing time, something has started collecting the
+  directory before yielding it.</p>
+
   <div class="note">
     <strong>Done when</strong>
     <p>You can set Ferret as your default file manager and not miss the system one for
-    browsing, opening, renaming, moving and deleting — on Linux, macOS and Windows.</p>
+    browsing, opening, renaming, moving and deleting — on macOS and Windows.</p>
   </div>
 </section>
 

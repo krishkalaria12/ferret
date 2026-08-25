@@ -7,7 +7,7 @@ UI and the embedded terminal is already in that directory — no `cd`. Add SSH a
 SFTP mounts, git status in the file list, grep-powered search, and real previews
 for Markdown, source code, images and PDFs.
 
-Targets **Linux, macOS and Windows**, built in Rust on
+Targets **macOS and Windows** (Linux deferred, not abandoned), built in Rust on
 [GPUI](https://www.gpui.rs/) with [gpui-component](https://github.com/longbridge/gpui-component).
 
 > **Status: scaffolding.** The workspace builds and opens a window; none of the
@@ -26,13 +26,16 @@ Targets **Linux, macOS and Windows**, built in Rust on
 crates/
   ferret/      # native binary: bootstrap, window, menus, actions  (bin `ferret`)
   ferret-ui/   # views and Ferret-specific theme tokens            (lib `ferret-ui`)
+  ferret-vfs/  # the Vfs trait, local backend, folder view prefs   (lib `ferret-vfs`)
+xtask/         # fixture generator and listing benchmark
 docs/
   ui-base.html # base explorer shell — the UI reference to build against
   plan.html    # product + architecture plan
 ```
 
-The two-crate layout is the starting point. `docs/plan.html` describes the target
-architecture this splits into as features land.
+`docs/plan.html` describes the target architecture the workspace grows into. Note
+that `ferret-core` does not exist yet — the shared domain types live in
+`ferret-vfs` until a second service crate needs them.
 
 ## Build
 
@@ -43,8 +46,30 @@ your platform. [`just`](https://github.com/casey/just) is optional.
 just dev          # cargo run -p ferret
 just run          # release
 just check        # cargo check --workspace --all-targets
+just test         # cargo test --workspace
 just lint         # fmt --check + clippy -D warnings
 ```
+
+### Performance fixture
+
+Correctness and performance are measured against a generated tree, not against
+whatever happens to be on your disk:
+
+```sh
+cargo xtask fixture   # build it (~25 s; 200,000 files in flat/ alone)
+cargo xtask bench     # measure; exits non-zero past budget
+cargo xtask clean     # remove it
+```
+
+It covers 200,000 flat entries, maximal nesting, 255-character and NFD and emoji
+names, broken and cyclic symlinks, an unreadable directory, a 4 GB sparse file and
+59 extensions. It is built outside the repository so Cargo and editor
+file-watchers do not crawl it.
+
+| Measure | Budget | Actual (M-series, APFS) |
+| --- | --- | --- |
+| Time to first row, 200k entries | 50 ms | 0.3 ms |
+| Full listing, 200k entries | 3 s | 143 ms |
 
 Quit with **⌘Q** / **Ctrl+Q**.
 
@@ -53,8 +78,10 @@ Quit with **⌘Q** / **Ctrl+Q**.
 | Platform | Notes |
 | --- | --- |
 | macOS | Xcode Command Line Tools are enough — see below. |
-| Linux | Wayland and X11 backends are both enabled; needs the usual GPUI dev packages (Vulkan loader, `libxkbcommon`, `fontconfig`). |
-| Windows | MSVC toolchain. |
+| Windows | MSVC toolchain. Symlink creation needs Developer Mode or an elevated shell. |
+
+Linux is deferred rather than abandoned — `ferret-platform`'s trait boundary stays
+intact so it is a re-add, not a rewrite.
 
 Building GPUI on macOS normally needs the Metal shader compiler, which ships only
 inside **full Xcode** — with Command Line Tools alone, `gpui_macos`'s build script

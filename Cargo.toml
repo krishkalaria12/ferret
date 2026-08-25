@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferret", "crates/ferret-ui"]
+members = ["crates/ferret", "crates/ferret-ui", "crates/ferret-vfs", "xtask"]
 default-members = ["crates/ferret"]
 
 [workspace.package]
@@ -15,10 +15,13 @@ repository = "https://github.com/ferret-fm/ferret"
 # `gpui-component` resolves `gpui` from the same Git source, so Cargo unifies both to a
 # single crate instance. Do not add a `rev` to one without pinning the other to match.
 gpui = { git = "https://github.com/zed-industries/zed" }
+# Ferret targets macOS and Windows for now; the Linux backends are not enabled
+# here. Note that `gpui-base` still turns `wayland` and `x11` on transitively,
+# and Cargo unions features — so this expresses intent rather than excluding
+# code from the build. Keep `ferret-platform`'s trait boundary intact so Linux
+# is a re-add rather than a rewrite. See D-19.
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     "font-kit",
-    "wayland",
-    "x11",
     # Stitch the Metal shaders and compile them at runtime instead of invoking
     # `xcrun metal` from gpui_macos's build script. Without this, building on macOS
     # requires the Metal compiler, which ships only inside full Xcode — Command Line
@@ -33,6 +36,11 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 ferret-ui = { path = "crates/ferret-ui" }
+ferret-vfs = { path = "crates/ferret-vfs" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.dev]
 opt-level = 0
