@@ -33,6 +33,7 @@
 //! when a second service crate needs them — not before.
 
 pub mod config;
+pub mod watch;
 
 mod entry;
 mod errors;
@@ -45,3 +46,4 @@ pub use errors::{Result, VfsError};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
 pub use vfs::{Capabilities, RemoveMode, Vfs};
+pub use watch::{Watch, WatchEvent};

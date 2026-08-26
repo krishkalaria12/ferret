@@ -139,6 +139,30 @@ impl Vfs for LocalFs {
         .await
     }
 
+    async fn create_file(&self, path: &VfsPath) -> Result<()> {
+        let local = Self::require_local(path)?;
+        let owned = path.clone();
+        smol::unblock(move || {
+            fs::File::create_new(&local)
+                .map(|_| ())
+                .map_err(|source| VfsError::from_io("create", &owned, source))
+        })
+        .await
+    }
+
+    async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
+        let src = Self::require_local(from)?;
+        let dst = Self::require_local(to)?;
+        smol::unblock(move || copy_tree(&src, &dst)).await
+    }
+
+    fn watch(&self, dir: &VfsPath) -> Result<crate::Watch> {
+        let local = Self::require_local(dir)?;
+        crate::Watch::start(local).map_err(|source| {
+            VfsError::from_io("watch", dir, std::io::Error::new(source.kind(), source))
+        })
+    }
+
     async fn rename(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
         let src = Self::require_local(from)?;
         let dst = Self::require_local(to)?;
@@ -234,6 +258,50 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
         readonly: md.permissions().readonly(),
         hidden: path.is_hidden_by_name() || platform_hidden(md),
     }
+}
+
+/// Recursive copy used by paste and cross-volume moves.
+///
+/// Symlinks are copied as links, not followed — copying a tree that happens
+/// to contain a link back to `/` must not become a walk of the universe.
+fn copy_tree(src: &PathBuf, dst: &PathBuf) -> Result<()> {
+    fn err(action: &'static str, path: &std::path::Path, source: std::io::Error) -> VfsError {
+        VfsError::from_io(action, &VfsPath::Local(path.to_path_buf()), source)
+    }
+
+    let md = fs::symlink_metadata(src).map_err(|source| err("read", src, source))?;
+
+    if md.is_symlink() {
+        #[cfg(unix)]
+        {
+            let target = fs::read_link(src).map_err(|source| err("read", src, source))?;
+            std::os::unix::fs::symlink(&target, dst)
+                .map_err(|source| err("create", dst, source))?;
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            return Err(VfsError::Unsupported {
+                capability: "copying symlinks",
+            });
+        }
+    }
+
+    if md.is_dir() {
+        fs::create_dir(dst).map_err(|source| err("create", dst, source))?;
+        let items = fs::read_dir(src).map_err(|source| err("read", src, source))?;
+        for item in items {
+            let item = item.map_err(|source| err("read", src, source))?;
+            let child_src = item.path();
+            let child_name = item.file_name();
+            copy_tree(&child_src, &dst.join(child_name))?;
+        }
+        return Ok(());
+    }
+
+    fs::copy(src, dst)
+        .map(|_| ())
+        .map_err(|source| err("copy", src, source))
 }
 
 #[cfg(windows)]
@@ -376,6 +444,54 @@ mod tests {
         let entries = collect(&LocalFs::new(), &VfsPath::Local(root.clone()));
         assert!(entries[".secret"].is_hidden());
         assert!(!entries["plain"].is_hidden());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn copy_copies_files_and_trees_without_following_links() {
+        let root = tempdir("copy");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::write(src.join("a.txt"), b"alpha").unwrap();
+        fs::write(src.join("nested/b.txt"), b"beta").unwrap();
+
+        let fs_ = LocalFs::new();
+        smol::block_on(async {
+            fs_.copy(
+                &VfsPath::Local(src.clone()),
+                &VfsPath::Local(root.join("dst")),
+            )
+            .await
+            .unwrap();
+            // Refuse to overwrite.
+            assert!(
+                fs_.copy(
+                    &VfsPath::Local(src.clone()),
+                    &VfsPath::Local(root.join("dst"))
+                )
+                .await
+                .is_err()
+            );
+        });
+
+        assert_eq!(fs::read(root.join("dst/a.txt")).unwrap(), b"alpha");
+        assert_eq!(fs::read(root.join("dst/nested/b.txt")).unwrap(), b"beta");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_reports_changes() {
+        use super::super::watch::WatchEvent;
+        let root = tempdir("watch");
+        let watch = LocalFs::new().watch(&VfsPath::Local(root.clone())).unwrap();
+
+        fs::write(root.join("x"), b"").unwrap();
+
+        let event = smol::block_on(watch.events.recv()).unwrap();
+        assert_eq!(event, WatchEvent::Changed);
 
         fs::remove_dir_all(&root).ok();
     }

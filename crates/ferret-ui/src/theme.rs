@@ -74,6 +74,43 @@ fn hex(value: u32) -> Hsla {
     Rgba { r, g, b, a }.into()
 }
 
+/// The three tokens `gpui-component` has no concept of (`docs/ui-base.html`
+/// §7): the unfocused selection, the row stripe, and the folder tint.
+///
+/// Every token is defined for both themes — a token defined for only one is a
+/// bug. Values mirror `docs/ui-base.html`'s `--app-selected-idle`,
+/// `--app-row-alt` and `--app-folder`.
+#[derive(Clone, Copy, Debug)]
+pub struct BrowserPalette {
+    /// Selected row fill when the file pane has lost focus.
+    pub selected_idle: Hsla,
+    /// Alternating row stripe — 2–3% off the ground, nearly invisible.
+    pub row_alt: Hsla,
+    /// Folder glyph tint; the one place colour carries meaning in the listing.
+    pub folder: Hsla,
+}
+
+impl BrowserPalette {
+    /// Resolve against the active theme's mode, so switching light/dark moves
+    /// these with it.
+    pub fn resolve(cx: &gpui::App) -> Self {
+        use gpui_component::Theme;
+        if Theme::global(cx).mode.is_dark() {
+            Self {
+                selected_idle: hex(0x33333c),
+                row_alt: hex(0x202025),
+                folder: hex(0x5aa6ff),
+            }
+        } else {
+            Self {
+                selected_idle: hex(0xe2e2e9),
+                row_alt: hex(0xfafafb),
+                folder: hex(0x4a9eff),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

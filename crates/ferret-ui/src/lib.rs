@@ -1,61 +1,51 @@
+//! Ferret's UI crate: views, panels, components and Ferret-specific theme
+//! tokens.
+//!
+//! Layout follows the repository conventions (`AGENTS.md`): public surface is
+//! re-exported here, modules stay private, general interface colour comes
+//! from `cx.theme()`, and only what `gpui-component` has no concept of lives
+//! in [`theme`].
+
+pub mod actions;
+mod assets;
+mod browser;
+mod folder;
+mod format;
+mod icons;
+mod pane;
+mod state;
 mod theme;
 
-pub use theme::TerminalPalette;
+pub use assets::Assets;
+pub use browser::Browser;
+pub use format::{format_date, format_size, natural_compare};
+pub use state::{FerretState, load_state};
+pub use theme::{BrowserPalette, TerminalPalette};
 
-use gpui::{Context, IntoElement, ParentElement as _, Styled as _, Window, div, prelude::*, px};
-use gpui_component::{
-    ActiveTheme as _, TitleBar,
-    button::{Button, ButtonVariants as _},
-    v_flex,
+use gpui::{
+    AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
 };
+use gpui_component::v_flex;
 
-/// The window's root view.
-///
-/// Still the scaffold placeholder. It is replaced by the browser shell — sidebar,
-/// file pane, preview pane and terminal panel — in Phase 1; see `docs/plan.html`.
+/// The window's root view: the browser shell.
 pub struct RootView {
-    clicks: u32,
+    browser: gpui::Entity<Browser>,
 }
 
 impl RootView {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
-        Self { clicks: 0 }
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let browser = cx.new(|cx| Browser::new(window, cx));
+        Self { browser }
+    }
+
+    /// The shell, for tests and embedding.
+    pub fn browser(&self) -> &gpui::Entity<Browser> {
+        &self.browser
     }
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = if self.clicks == 0 {
-            "Ferret — scaffolding only. See docs/plan.html".to_string()
-        } else {
-            format!("Clicked {n}×", n = self.clicks)
-        };
-
-        v_flex()
-            .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            // The window uses a transparent system titlebar, so the app draws its own.
-            // Phase 1 replaces this with the real toolbar; see `docs/plan.html` §3.
-            .child(TitleBar::new().child(div().text_sm().child("Ferret")))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_4()
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(status),
-                    )
-                    .child(Button::new("primary").primary().label("Let's go").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.clicks += 1;
-                            cx.notify();
-                        }),
-                    )),
-            )
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().size_full().child(self.browser.clone())
     }
 }

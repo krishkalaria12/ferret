@@ -12,8 +12,10 @@ name = "ferret"
 path = "src/main.rs"
 
 [dependencies]
+ferret-settings.workspace = true
 ferret-ui.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui_platform.workspace = true
+trash = "5"

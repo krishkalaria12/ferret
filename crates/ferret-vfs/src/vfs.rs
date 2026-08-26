@@ -1,3 +1,4 @@
+use crate::watch::Watch;
 use crate::{Entry, Metadata, Result, VfsPath};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -79,7 +80,38 @@ pub trait Vfs: Send + Sync + 'static {
 
     async fn create_dir(&self, path: &VfsPath) -> Result<()>;
 
+    /// Create an empty file. Refuses to overwrite — "new file" must never
+    /// blank out something the user already had.
+    async fn create_file(&self, path: &VfsPath) -> Result<()> {
+        let _ = path;
+        Err(crate::VfsError::Unsupported {
+            capability: "creating files",
+        })
+    }
+
     async fn rename(&self, from: &VfsPath, to: &VfsPath) -> Result<()>;
+
+    /// Copy a file or a whole directory tree to a new path.
+    ///
+    /// The destination must not exist — conflict policy (auto-rename,
+    /// overwrite) is the caller's decision, and this signature makes
+    /// "silently replaced something" impossible to write by accident.
+    async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
+        let _ = (from, to);
+        Err(crate::VfsError::Unsupported {
+            capability: "copying",
+        })
+    }
+
+    /// Watch a directory for changes. See [`crate::watch`].
+    ///
+    /// Dropping the returned [`Watch`] unregisters it.
+    fn watch(&self, dir: &VfsPath) -> Result<Watch> {
+        let _ = dir;
+        Err(crate::VfsError::Unsupported {
+            capability: "change notification",
+        })
+    }
 
     async fn remove(&self, path: &VfsPath, mode: RemoveMode) -> Result<()>;
 }

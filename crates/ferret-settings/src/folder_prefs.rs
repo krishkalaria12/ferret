@@ -27,32 +27,10 @@ use crate::config::FOLDER_PREFS_CAPACITY;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewMode {
-    #[default]
-    List,
-    Columns,
-    Icons,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortKey {
-    #[default]
-    Name,
-    Modified,
-    Size,
-    Kind,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortOrder {
-    #[default]
-    Ascending,
-    Descending,
-}
+// View/sort enums are the schema's, re-used here so there is exactly one
+// `SortKey` in the crate. The store only records what the settings file
+// already defines.
+pub use crate::schema::{SortKey, SortOrder, ViewMode};
 
 /// What is remembered about one directory.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
