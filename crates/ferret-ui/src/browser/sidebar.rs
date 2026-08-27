@@ -225,7 +225,7 @@ impl Browser {
             .child(
                 Icon::default()
                     .path(icon)
-                    .size_4()
+                    .with_size(px(super::SIDEBAR_ICON_SIZE))
                     .text_color(fg.opacity(0.9)),
             )
             .child(

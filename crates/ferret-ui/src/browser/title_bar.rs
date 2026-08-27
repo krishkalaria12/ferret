@@ -41,7 +41,7 @@ impl Browser {
                 )),
             );
 
-        TitleBar::new().child(
+        TitleBar::new().h(px(super::TITLE_BAR_HEIGHT)).child(
             h_flex()
                 .w_full()
                 .items_center()

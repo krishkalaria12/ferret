@@ -46,17 +46,28 @@ impl Browser {
         let selected = folder.selection_count();
         let size = folder.selection_size();
 
-        let mut left = format!("{items} items");
+        // One line, in the shape §3 and §9 both show:
+        // "9 items · 3 selected — 210 KB", and the count alone when nothing
+        // is selected — no empty selection clause.
+        let mut text = format!("{items} items");
         if loading {
-            left.push_str(" · loading…");
+            text.push_str(" · loading…");
         }
-        let right = if selected > 0 {
-            format!("{selected} selected — {}", crate::format::format_size(size))
-        } else {
-            String::new()
-        };
+        if selected > 0 {
+            text.push_str(&format!(
+                " · {selected} selected — {}",
+                crate::format::format_size(size)
+            ));
+        }
 
-        StatusBar::new().left(left).right(right)
+        StatusBar::new()
+            .left(text)
+            // §4: h24, 11.5 px, muted. The library defaults to an auto height
+            // and `text_xs`, so the row would drift a pixel or two off spec.
+            .h(px(STATUS_BAR_HEIGHT))
+            .text_size(px(CHROME_FONT_SIZE))
+            // The counts stack against the rows above them (§7).
+            .font_features(crate::theme::tabular_numerals())
     }
 
     /// The pane of the active tab, focused when switched to.

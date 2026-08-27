@@ -147,6 +147,8 @@ pub(super) const ROW_HEIGHT: f32 = 26.;
 /// Column header height (§4), and where the loading hint sits.
 pub(super) const COLUMN_HEADER_HEIGHT: f32 = 26.;
 pub(super) const ROW_FONT_SIZE: f32 = 13.;
+/// Column header type size (§4): chrome, one step down from the rows.
+pub(super) const HEADER_FONT_SIZE: f32 = 11.5;
 
 impl FilePane {
     pub fn new(

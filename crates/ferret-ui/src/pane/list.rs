@@ -228,6 +228,8 @@ impl TableDelegate for ListDelegate {
                 .id(("th", col_ix))
                 .relative()
                 .size_full()
+                // §4: the header is chrome, one size down from the rows.
+                .text_size(px(HEADER_FONT_SIZE))
                 .on_prepaint(move |b, _, _| {
                     *probe.lock().unwrap() = b;
                 })

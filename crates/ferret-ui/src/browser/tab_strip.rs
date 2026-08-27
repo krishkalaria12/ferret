@@ -107,6 +107,7 @@ impl Browser {
             }))
             .child(
                 TabBar::new("browser-tabs")
+                    .max_width(px(super::TAB_MAX_WIDTH))
                     .selected_index(self.active)
                     .text_size(px(12.5))
                     .on_click(cx.listener(|this, ix: &usize, _window, cx| {

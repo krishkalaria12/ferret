@@ -49,6 +49,21 @@ mod title_bar;
 /// How long the volumes list stays cached before the sidebar re-probes.
 const VOLUMES_TTL: Duration = Duration::from_secs(15);
 
+// Shell geometry from `docs/ui-base.html` §4, in logical pixels. These are
+// spec values rather than tunables, so they live with the views that draw
+// them rather than in `config.rs`.
+
+/// Title bar height. The library's own default is 34.
+const TITLE_BAR_HEIGHT: f32 = 46.;
+/// Widest a tab may grow before its label truncates.
+const TAB_MAX_WIDTH: f32 = 190.;
+/// Status bar height.
+const STATUS_BAR_HEIGHT: f32 = 24.;
+/// Chrome type size: the column header, the status bar.
+const CHROME_FONT_SIZE: f32 = 11.5;
+/// Sidebar row icon.
+const SIDEBAR_ICON_SIZE: f32 = 15.;
+
 /// Toolbar icon asset paths (bundled under `assets/icons/ui/`).
 mod toolbar_icon {
     pub const SIDEBAR: &str = "icons/ui/sidebar.svg";
