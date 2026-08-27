@@ -227,7 +227,27 @@ impl Render for Browser {
                             .child(self.render_tab_strip(window, cx))
                             .child(self.render_path_bar(window, cx))
                             .when(folder_gone, |el| el.child(self.render_gone_banner(cx)))
-                            .child(self.render_active_pane(window, cx))
+                            // The listing floats as a card inset from the
+                            // window edges, the way the reference does it —
+                            // rather than bleeding into the chrome above and
+                            // below it.
+                            .child(
+                                // `v_flex`, not `div`: the pane inside is
+                                // `flex_1`, and a plain div is display:block,
+                                // so its child would measure at zero height
+                                // and the virtualised list would paint no
+                                // rows at all — silently, and only at runtime.
+                                v_flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .mx(px(10.))
+                                    .mb(px(8.))
+                                    .overflow_hidden()
+                                    .rounded(px(9.))
+                                    .border_1()
+                                    .border_color(cx.theme().border.opacity(0.7))
+                                    .child(self.render_active_pane(window, cx)),
+                            )
                             .child(self.render_status_bar(cx)),
                     ),
             )

@@ -140,10 +140,13 @@ impl Focusable for FilePane {
     }
 }
 
-/// File row height (§4). Fixed on purpose: it is what lets both the list
-/// and the column view virtualise cheaply, and what makes a row's
-/// on-screen position computable for the rename overlay.
-pub(super) const ROW_HEIGHT: f32 = 26.;
+/// File row height. Fixed on purpose: it is what lets both the list and the
+/// column view virtualise cheaply, and what makes a row's on-screen position
+/// computable for the rename overlay.
+///
+/// §4 says 26. The reference UI gives its rows more room, and at 26 with a
+/// 15 px icon the text has almost no leading — so this follows the reference.
+pub(super) const ROW_HEIGHT: f32 = 30.;
 /// Column header height (§4), and where the loading hint sits.
 pub(super) const COLUMN_HEADER_HEIGHT: f32 = 26.;
 pub(super) const ROW_FONT_SIZE: f32 = 13.;

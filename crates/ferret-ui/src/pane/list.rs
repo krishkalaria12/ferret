@@ -341,11 +341,11 @@ impl TableDelegate for ListDelegate {
                 palette.selected_idle
             };
             row = row.child(div().absolute().inset_0().bg(fill));
-        } else if row_ix % 2 == 1 {
-            // The stripe paints as an overlay so the table's own hover style
-            // cannot wash it out mid-hover.
-            row = row.child(div().absolute().inset_0().bg(palette.row_alt));
         }
+        // No alternating stripe. §7 asks for one at 2–3% off the ground, but
+        // against this palette even that reads as banding rather than as an
+        // aid, and the reference UI uses uniform rows. The row height and the
+        // hover fill do the work of separating rows instead.
 
         if !dragged.is_empty() {
             let (payload, label) = drag_payload(dragged);
