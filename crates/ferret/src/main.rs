@@ -239,11 +239,26 @@ fn open_main_window(cx: &mut App) {
     // `TitleBar::window_options()` is the required base for a window that
     // draws its own title bar: it makes the title bar own dragging and
     // double-click instead of the OS.
+    let mut base = gpui_component::TitleBar::window_options();
+
+    // The traffic lights are placed once, at window creation, from a fixed
+    // offset the library tunes for its own 34 px title bar. Ferret's bar is
+    // taller, so left alone the lights sit high against everything drawn in
+    // it. Centre them against the height actually used.
+    let titlebar = gpui::TitlebarOptions {
+        traffic_light_position: Some(gpui::point(
+            px(9.),
+            px((ferret_ui::TITLE_BAR_HEIGHT - ferret_ui::TRAFFIC_LIGHT_DIAMETER) / 2.),
+        )),
+        ..base.titlebar.take().unwrap_or_default()
+    };
+
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
         window_min_size: Some(size(px(760.), px(480.))),
         app_id: Some("dev.ferret.Ferret".into()),
-        ..gpui_component::TitleBar::window_options()
+        titlebar: Some(titlebar),
+        ..base
     };
 
     // Opening from a spawned task lets gpui-component finish loading its

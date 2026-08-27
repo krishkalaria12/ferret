@@ -161,11 +161,8 @@ impl Browser {
                 .child(
                     Button::new("more-menu")
                         .ghost()
-                        .small()
-                        .icon(
-                            Icon::new(gpui_component::IconName::EllipsisVertical)
-                                .with_size(px(TOOLBAR_ICON_SIZE)),
-                        )
+                        .with_size(px(TOOLBAR_BUTTON_SIZE))
+                        .icon(Icon::new(gpui_component::IconName::EllipsisVertical))
                         .dropdown_menu(|menu, _, _| {
                             menu.menu("Select All", Box::new(actions::SelectAll))
                                 .menu("Paste", Box::new(actions::Paste))
@@ -187,12 +184,8 @@ impl Browser {
 /// variant is swapped outright instead.
 fn segment_button(id: &'static str, icon_path: &str, tooltip: &str, active: bool) -> Button {
     let button = Button::new(id)
-        .small()
-        .icon(
-            Icon::default()
-                .path(icon_path)
-                .with_size(px(TOOLBAR_ICON_SIZE)),
-        )
+        .with_size(px(TOOLBAR_BUTTON_SIZE))
+        .icon(Icon::default().path(icon_path))
         .tooltip(tooltip);
     if active {
         button.primary()
@@ -204,11 +197,7 @@ fn segment_button(id: &'static str, icon_path: &str, tooltip: &str, active: bool
 fn tool_button(id: &'static str, icon_path: &str, tooltip: &str) -> Button {
     Button::new(id)
         .ghost()
-        .small()
-        .icon(
-            Icon::default()
-                .path(icon_path)
-                .with_size(px(TOOLBAR_ICON_SIZE)),
-        )
+        .with_size(px(TOOLBAR_BUTTON_SIZE))
+        .icon(Icon::default().path(icon_path))
         .tooltip(tooltip)
 }

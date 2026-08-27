@@ -54,7 +54,12 @@ const VOLUMES_TTL: Duration = Duration::from_secs(15);
 // them rather than in `config.rs`.
 
 /// Title bar height. The library's own default is 34.
-const TITLE_BAR_HEIGHT: f32 = 52.;
+///
+/// Public because the window's traffic lights are positioned at creation time
+/// from a fixed offset, so `main` has to centre them against this.
+pub const TITLE_BAR_HEIGHT: f32 = 52.;
+/// Diameter of a macOS window control, for centring them in the title bar.
+pub const TRAFFIC_LIGHT_DIAMETER: f32 = 12.;
 /// The grab strip between the sidebar and the pane.
 const SIDEBAR_DIVIDER_WIDTH: f32 = 5.;
 /// What `gpui_component::TitleBar` insets its content by to clear the window
@@ -65,9 +70,17 @@ const SIDEBAR_DIVIDER_WIDTH: f32 = 5.;
 const TITLE_BAR_LEFT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
 const TITLE_BAR_LEFT_INSET: f32 = 12.;
-/// Toolbar icon size. §4 gives no figure; at the library's default the glyphs
+/// Toolbar glyph size. §4 gives no figure; at the library's default the glyphs
 /// read as undersized against the reference.
-const TOOLBAR_ICON_SIZE: f32 = 17.;
+const TOOLBAR_ICON_SIZE: f32 = 20.;
+/// What to set a toolbar `Button`'s size to in order to get a
+/// [`TOOLBAR_ICON_SIZE`] glyph out of it.
+///
+/// `Button::render` overwrites whatever size the icon was given with one
+/// derived from the button's own — `Size::Size(v) => v * 0.75` — so sizing the
+/// `Icon` directly is silently discarded and the button has to be driven
+/// instead. Undo that factor here.
+const TOOLBAR_BUTTON_SIZE: f32 = TOOLBAR_ICON_SIZE / 0.75;
 /// Widest a tab may grow before its label truncates.
 const TAB_MAX_WIDTH: f32 = 190.;
 /// Status bar height.

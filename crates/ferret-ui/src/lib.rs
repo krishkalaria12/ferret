@@ -17,7 +17,7 @@ mod state;
 mod theme;
 
 pub use assets::Assets;
-pub use browser::Browser;
+pub use browser::{Browser, TITLE_BAR_HEIGHT, TRAFFIC_LIGHT_DIAMETER};
 pub use format::{format_date, format_size, natural_compare};
 pub use state::{FerretState, load_state};
 pub use theme::{BrowserPalette, TerminalPalette};
