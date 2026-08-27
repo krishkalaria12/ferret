@@ -21,7 +21,11 @@ pub struct FerretState {
     pub prefs: FolderPrefs,
     pub fs: LocalFs,
     pub platform: Arc<dyn Platform>,
+    /// The bundled fallback set: always answers, never blocks (D-18).
     pub icons: &'static FileIcons,
+    /// Real Finder/Explorer icons, when the platform can supply them. Layers
+    /// over `icons` and wins once resolved.
+    pub os_icons: Arc<dyn ferret_platform::IconProvider>,
 }
 
 impl gpui::Global for FerretState {}
@@ -58,6 +62,7 @@ pub fn load_state() -> FerretState {
         fs: LocalFs::new(),
         platform: ferret_platform::platform(),
         icons: FileIcons::embedded(),
+        os_icons: ferret_platform::icon_provider(),
     }
 }
 

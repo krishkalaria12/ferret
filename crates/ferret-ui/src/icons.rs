@@ -109,6 +109,67 @@ impl FileIcons {
     }
 }
 
+/// The OS icon for an entry, if one is already cached (D-18).
+///
+/// Synchronous and cache-only, exactly as §6 requires: a miss returns `None`
+/// and the caller draws the bundled SVG, so a row never waits on the OS.
+pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
+    let state = cx.global::<crate::state::FerretState>();
+    let local = entry.path.as_local()?;
+    let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+    let bitmap = state.os_icons.lookup(&key)?;
+
+    // Guarded rather than trusted: the bytes crossed an `unsafe` boundary,
+    // and a wrong stride here would be painted as pixels.
+    if !bitmap.is_well_formed() {
+        return None;
+    }
+    let frame = image::Frame::new(image::RgbaImage::from_raw(
+        bitmap.width,
+        bitmap.height,
+        bitmap.bgra,
+    )?);
+    Some(gpui::ImageSource::Render(std::sync::Arc::new(
+        gpui::RenderImage::new(vec![frame]),
+    )))
+}
+
+/// Ask the platform to resolve the icons for the types on screen.
+///
+/// Off the render path, and deduplicated by key: a 200,000-entry directory
+/// of `.rs` files costs one OS call, not 200,000.
+pub fn resolve_os_icons(entries: &[Entry], cx: &mut gpui::App) {
+    let state = cx.global::<crate::state::FerretState>();
+    if !state.os_icons.is_available() {
+        return;
+    }
+    let provider = state.os_icons.clone();
+
+    let mut wanted: Vec<(ferret_platform::IconKey, std::path::PathBuf)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in entries {
+        let Some(local) = entry.path.as_local() else {
+            continue;
+        };
+        let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+        if provider.lookup(&key).is_some() || !seen.insert(key.clone()) {
+            continue;
+        }
+        wanted.push((key, local.to_path_buf()));
+    }
+    if wanted.is_empty() {
+        return;
+    }
+
+    cx.background_executor()
+        .spawn(async move {
+            for (key, sample) in wanted {
+                provider.resolve(&key, &sample);
+            }
+        })
+        .detach();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +181,7 @@ mod tests {
             name: name.to_string(),
             kind: EntryKind::File,
             metadata: None,
+            link_target: None,
         }
     }
 
@@ -189,6 +251,7 @@ mod tests {
             name: "dir".into(),
             kind: EntryKind::Dir,
             metadata: None,
+            link_target: None,
         };
         assert!(icons.asset_path(&dir).ends_with("folder-base.svg"));
 
@@ -197,6 +260,7 @@ mod tests {
             name: "loop".into(),
             kind: EntryKind::Symlink { target_kind: None },
             metadata: None,
+            link_target: None,
         };
         assert!(icons.asset_path(&broken).ends_with("url.svg"));
     }
