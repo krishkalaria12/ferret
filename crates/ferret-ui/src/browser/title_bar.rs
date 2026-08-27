@@ -3,6 +3,15 @@
 
 use super::*;
 
+/// The rounded housing both segmented groups sit in.
+fn segmented_group(theme: &gpui_component::Theme) -> gpui::Div {
+    h_flex()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(px(8.))
+        .bg(theme.secondary.opacity(0.7))
+}
+
 impl Browser {
     pub(super) fn render_title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -11,34 +20,63 @@ impl Browser {
         let back_enabled = !tab.back.is_empty();
         let forward_enabled = !tab.forward.is_empty();
         let show_hidden = cx.global::<FerretState>().settings.browser.show_hidden;
-        let _mode = tab.pane.read(cx).view_mode();
+        let mode = tab.pane.read(cx).view_mode();
         let dark = gpui_component::Theme::global(cx).mode.is_dark();
 
-        let view_group = h_flex()
-            .p(px(2.))
-            .gap(px(2.))
-            .rounded(theme.radius)
-            .bg(theme.secondary)
+        // Which view you are in was never shown — the mode was read and
+        // discarded. The reference fills the active segment in the accent
+        // colour, which is the only thing making the group a control rather
+        // than three loose buttons.
+        let view_group = segmented_group(theme)
             .child(
-                tool_button("view-list", toolbar_icon::VIEW_LIST, "List").on_click(cx.listener(
-                    |_, _, _, cx| {
-                        cx.dispatch_action(&actions::ViewAsList);
-                    },
-                )),
+                segment_button(
+                    "view-list",
+                    toolbar_icon::VIEW_LIST,
+                    "List",
+                    mode == ViewMode::List,
+                )
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.dispatch_action(&actions::ViewAsList);
+                })),
             )
             .child(
-                tool_button("view-columns", toolbar_icon::VIEW_COLUMNS, "Columns").on_click(
-                    cx.listener(|_, _, _, cx| {
-                        cx.dispatch_action(&actions::ViewAsColumns);
-                    }),
-                ),
+                segment_button(
+                    "view-columns",
+                    toolbar_icon::VIEW_COLUMNS,
+                    "Columns",
+                    mode == ViewMode::Columns,
+                )
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.dispatch_action(&actions::ViewAsColumns);
+                })),
             )
             .child(
-                tool_button("view-icons", toolbar_icon::VIEW_GRID, "Icons").on_click(cx.listener(
-                    |_, _, _, cx| {
-                        cx.dispatch_action(&actions::ViewAsIcons);
-                    },
-                )),
+                segment_button(
+                    "view-icons",
+                    toolbar_icon::VIEW_GRID,
+                    "Icons",
+                    mode == ViewMode::Icons,
+                )
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.dispatch_action(&actions::ViewAsIcons);
+                })),
+            );
+
+        // Back / forward / up read as one control, so they are housed as one.
+        let nav_group = segmented_group(theme)
+            .child(
+                tool_button("nav-back", toolbar_icon::BACK, "Back")
+                    .disabled(!back_enabled)
+                    .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
+            )
+            .child(
+                tool_button("nav-forward", toolbar_icon::FORWARD, "Forward")
+                    .disabled(!forward_enabled)
+                    .on_click(cx.listener(|this, _, window, cx| this.go_forward(window, cx))),
+            )
+            .child(
+                tool_button("nav-up", toolbar_icon::UP, "Enclosing Folder")
+                    .on_click(cx.listener(|this, _, window, cx| this.go_up(window, cx))),
             );
 
         TitleBar::new().h(px(super::TITLE_BAR_HEIGHT)).child(
@@ -52,20 +90,7 @@ impl Browser {
                         .selected(self.sidebar_visible)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
-                .child(
-                    tool_button("nav-back", toolbar_icon::BACK, "Back")
-                        .disabled(!back_enabled)
-                        .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
-                )
-                .child(
-                    tool_button("nav-forward", toolbar_icon::FORWARD, "Forward")
-                        .disabled(!forward_enabled)
-                        .on_click(cx.listener(|this, _, window, cx| this.go_forward(window, cx))),
-                )
-                .child(
-                    tool_button("nav-up", toolbar_icon::UP, "Enclosing Folder")
-                        .on_click(cx.listener(|this, _, window, cx| this.go_up(window, cx))),
-                )
+                .child(nav_group)
                 .child(
                     div()
                         .ml_2()
@@ -134,6 +159,24 @@ impl Browser {
                         }),
                 ),
         )
+    }
+}
+
+/// One segment of a segmented group.
+///
+/// The active one is filled in the accent colour, the way the reference does
+/// it. `.selected()` on a ghost button is the library's own idea of active,
+/// but against the group's housing it paints nothing you can see — so the
+/// variant is swapped outright instead.
+fn segment_button(id: &'static str, icon_path: &str, tooltip: &str, active: bool) -> Button {
+    let button = Button::new(id)
+        .xsmall()
+        .icon(Icon::default().path(icon_path))
+        .tooltip(tooltip);
+    if active {
+        button.primary()
+    } else {
+        button.ghost()
     }
 }
 
