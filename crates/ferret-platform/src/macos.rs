@@ -186,3 +186,111 @@ impl Platform for MacOs {
         out
     }
 }
+
+// ---------------------------------------------------------------------------
+// Icons (D-18)
+
+use crate::icon::{IconBitmap, IconKey, IconProvider};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Icon size to ask the OS for, in points.
+///
+/// Larger than any row draws it: one cached bitmap serves the 15 px list
+/// glyph and the 48 px icon-view tile, and downscaling a sharp icon beats
+/// upscaling a blurry one.
+const ICON_POINTS: f64 = 64.0;
+
+/// Finder's own icons, via `NSWorkspace`.
+#[derive(Default)]
+pub struct MacIcons {
+    /// Resolved icons, keyed by type. Bounded by the number of *types* the
+    /// user has looked at, not by the number of files.
+    cache: Mutex<HashMap<IconKey, Option<IconBitmap>>>,
+}
+
+impl IconProvider for MacIcons {
+    fn lookup(&self, key: &IconKey) -> Option<IconBitmap> {
+        // Cache only — never the OS. This runs once per visible row while a
+        // frame is being built.
+        self.cache.lock().ok()?.get(key)?.clone()
+    }
+
+    fn resolve(&self, key: &IconKey, sample: &std::path::Path) -> bool {
+        if self.cache.lock().is_ok_and(|c| c.contains_key(key)) {
+            return false; // Already answered, including a cached failure.
+        }
+        let bitmap = icon_for_path(sample).filter(IconBitmap::is_well_formed);
+        let cached_something = bitmap.is_some();
+        // A failure is cached too: a type whose icon cannot be read must not
+        // be retried once per frame forever.
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key.clone(), bitmap);
+        }
+        cached_something
+    }
+}
+
+/// Ask `NSWorkspace` for a path's icon and draw it into a BGRA buffer.
+fn icon_for_path(path: &std::path::Path) -> Option<IconBitmap> {
+    use objc2::ClassType as _;
+    use objc2_app_kit::{NSBitmapImageRep, NSGraphicsContext, NSWorkspace};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    let side = ICON_POINTS as usize;
+
+    // SAFETY: every call below is an ordinary AppKit message on objects this
+    // function owns, made on whatever thread the caller is on. `NSWorkspace`
+    // icon lookup and `NSBitmapImageRep` drawing are both thread-safe; the
+    // graphics context is saved and restored around the draw so no other
+    // drawing is disturbed.
+    unsafe {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let ns_path = NSString::from_str(&path.to_string_lossy());
+        let image = workspace.iconForFile(&ns_path);
+        image.setSize(NSSize::new(ICON_POINTS, ICON_POINTS));
+
+        // A 32-bit RGBA bitmap we can draw the icon into and then read back.
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            side as isize,
+            side as isize,
+            8,
+            4,
+            true,
+            false,
+            objc2_app_kit::NSDeviceRGBColorSpace,
+            (side * 4) as isize,
+            32,
+        )?;
+
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        NSGraphicsContext::saveGraphicsState_class();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        image.drawInRect(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(ICON_POINTS, ICON_POINTS),
+        ));
+        NSGraphicsContext::restoreGraphicsState_class();
+
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        let len = side * side * 4;
+        let rgba = std::slice::from_raw_parts(data, len);
+
+        // AppKit hands back RGBA; GPUI's RenderImage wants BGRA.
+        let mut bgra = Vec::with_capacity(len);
+        for px in rgba.chunks_exact(4) {
+            bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+
+        Some(IconBitmap {
+            width: side as u32,
+            height: side as u32,
+            bgra,
+        })
+    }
+}

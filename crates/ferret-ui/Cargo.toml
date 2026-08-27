@@ -13,6 +13,7 @@ ferret-settings.workspace = true
 ferret-vfs.workspace = true
 futures.workspace = true
 gpui.workspace = true
+image.workspace = true
 
 gpui-component.workspace = true
 gpui-component-assets.workspace = true

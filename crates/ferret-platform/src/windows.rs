@@ -165,3 +165,155 @@ impl Platform for Windows {
         out
     }
 }
+
+// ---------------------------------------------------------------------------
+// Icons (D-18)
+
+use crate::icon::{IconBitmap, IconKey, IconProvider};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Icon size to ask the shell for, in pixels.
+///
+/// `SHGetFileInfo` returns the shell's large icon, which is 32×32 on the
+/// default DPI. One cached bitmap serves both the 15 px list glyph and the
+/// 48 px tile: downscaling a sharp icon beats upscaling a blurry one, and
+/// `IShellItemImageFactory` (which would give arbitrary sizes) needs COM
+/// initialised on the calling thread, which this backend does not own.
+const ICON_PIXELS: i32 = 32;
+
+/// Explorer's own icons, via `SHGetFileInfo`.
+#[derive(Default)]
+pub struct WindowsIcons {
+    /// Resolved icons, keyed by type — bounded by the number of *types* seen,
+    /// never by the number of files.
+    cache: Mutex<HashMap<IconKey, Option<IconBitmap>>>,
+}
+
+impl IconProvider for WindowsIcons {
+    fn lookup(&self, key: &IconKey) -> Option<IconBitmap> {
+        // Cache only: this runs once per visible row while a frame is built.
+        self.cache.lock().ok()?.get(key)?.clone()
+    }
+
+    fn resolve(&self, key: &IconKey, sample: &std::path::Path) -> bool {
+        if self.cache.lock().is_ok_and(|c| c.contains_key(key)) {
+            return false;
+        }
+        let bitmap = icon_for_path(sample, matches!(key, IconKey::Directory))
+            .filter(IconBitmap::is_well_formed);
+        let cached_something = bitmap.is_some();
+        // Failures are cached too, so an unreadable type is not retried once
+        // per frame forever.
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key.clone(), bitmap);
+        }
+        cached_something
+    }
+}
+
+/// Ask the shell for a path's icon and copy it into a BGRA buffer.
+fn icon_for_path(path: &std::path::Path, is_dir: bool) -> Option<IconBitmap> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
+        ReleaseDC,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: every call below is a documented Win32 call on handles this
+    // function creates and destroys. `SHGFI_USEFILEATTRIBUTES` keeps the
+    // shell from touching the disk, so a slow or offline path answers from
+    // the type association alone rather than blocking.
+    unsafe {
+        let mut info: SHFILEINFOW = std::mem::zeroed();
+        let attributes = if is_dir {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            FILE_ATTRIBUTE_NORMAL
+        };
+        let ok = SHGetFileInfoW(
+            wide.as_ptr(),
+            attributes,
+            &mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
+        );
+        if ok == 0 || info.hIcon.is_null() {
+            return None;
+        }
+        // The icon is ours from here; every early return must free it.
+        let icon = info.hIcon;
+
+        let mut icon_info: ICONINFO = std::mem::zeroed();
+        if GetIconInfo(icon, &mut icon_info) == 0 {
+            DestroyIcon(icon);
+            return None;
+        }
+        let colour_bitmap = icon_info.hbmColor;
+        let mask_bitmap = icon_info.hbmMask;
+
+        let side = ICON_PIXELS;
+        let mut header: BITMAPINFO = std::mem::zeroed();
+        header.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        header.bmiHeader.biWidth = side;
+        // Negative height asks for a top-down buffer, which is the row order
+        // the rest of the pipeline expects.
+        header.bmiHeader.biHeight = -side;
+        header.bmiHeader.biPlanes = 1;
+        header.bmiHeader.biBitCount = 32;
+        header.bmiHeader.biCompression = BI_RGB;
+
+        let len = (side * side * 4) as usize;
+        let mut bgra = vec![0u8; len];
+        let dc = GetDC(std::ptr::null_mut());
+        let copied = GetDIBits(
+            dc,
+            colour_bitmap,
+            0,
+            side as u32,
+            bgra.as_mut_ptr().cast(),
+            &mut header,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(std::ptr::null_mut(), dc);
+
+        if !colour_bitmap.is_null() {
+            DeleteObject(colour_bitmap.cast());
+        }
+        if !mask_bitmap.is_null() {
+            DeleteObject(mask_bitmap.cast());
+        }
+        DestroyIcon(icon);
+
+        if copied == 0 {
+            return None;
+        }
+
+        // A 32-bit icon whose alpha channel is entirely zero is opaque with
+        // the alpha left unset — drawn as-is it would be invisible.
+        if bgra.iter().skip(3).step_by(4).all(|a| *a == 0) {
+            for alpha in bgra.iter_mut().skip(3).step_by(4) {
+                *alpha = 0xFF;
+            }
+        }
+
+        Some(IconBitmap {
+            width: side as u32,
+            height: side as u32,
+            bgra,
+        })
+    }
+}

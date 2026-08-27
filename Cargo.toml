@@ -56,6 +56,33 @@ rust-embed = "8"
 smol = "2"
 thiserror = "2"
 trash = "5"
+
+# Windows icon lookup (D-18). Already in the tree via gpui's dependencies.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
+] }
+
+# `RenderImage` is built from `image::Frame`, so the OS icon path needs the
+# same `image` version gpui itself uses. No codecs: only the buffer types.
+image = { version = "0.25", default-features = false }
+
+# macOS icon lookup (D-18). All three crates are already in the tree via gpui,
+# so these are direct edges to something already compiled rather than a new
+# dependency stack.
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSGeometry"] }
+objc2-app-kit = { version = "0.2", features = [
+    "NSWorkspace",
+    "NSImage",
+    "NSImageRep",
+    "NSGraphics",
+    "NSBitmapImageRep",
+    "NSGraphicsContext",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
