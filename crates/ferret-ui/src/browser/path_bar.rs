@@ -173,6 +173,12 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let (ground, foreground, accent, border) = (
+            theme.background,
+            theme.foreground,
+            theme.primary,
+            theme.border,
+        );
 
         // The filter rides the path bar in both states (§2: "inline filter"),
         // so narrowing a listing never costs you the breadcrumb.
@@ -181,14 +187,36 @@ impl Browser {
             .flex_shrink_0()
             .child(Input::new(&self.filter_input).small().cleanable(true));
 
+        // The strip the field floats in — ground, not a bordered band. The
+        // field itself carries the edges.
         let bar = h_flex()
-            .h(px(30.))
-            .px(px(8.))
-            .gap_2()
+            .h(px(PATH_BAR_HEIGHT))
+            .px(px(10.))
+            .gap(px(8.))
             .items_center()
-            .border_b_1()
-            .border_color(theme.border)
             .bg(theme.background);
+
+        // A real field: rounded, bordered, filled a shade off the ground so
+        // it reads as somewhere you can type rather than as a label. This is
+        // the biggest single thing separating the shell from the reference.
+        let field = |editing: bool| {
+            h_flex()
+                .h(px(PATH_FIELD_HEIGHT))
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .rounded(px(7.))
+                .border_1()
+                .bg(ground.blend(foreground.opacity(0.04)))
+                // Focused, it takes the accent ring the reference gives it.
+                .when(editing, |el| {
+                    el.border_color(accent)
+                        .bg(ground.blend(accent.opacity(0.06)))
+                })
+                .when(!editing, |el| el.border_color(border))
+        };
 
         if self.path_editing.is_some() {
             let completions = self.render_completions(cx);
@@ -197,10 +225,15 @@ impl Browser {
                 .key_context(actions::context::PATH_BAR)
                 .when_some(input, |bar, input| {
                     bar.child(
-                        div()
+                        field(true)
                             .relative()
-                            .flex_1()
-                            .child(Input::new(&input).small())
+                            .child(
+                                Icon::default()
+                                    .path("icons/file/folder-base.svg")
+                                    .with_size(px(15.))
+                                    .text_color(BrowserTint::folder(cx)),
+                            )
+                            .child(Input::new(&input).small().appearance(false))
                             // Deferred so it paints above the file pane below
                             // it: an absolutely-positioned sibling would still
                             // be covered by elements that come later.
@@ -239,20 +272,17 @@ impl Browser {
         // §4: the bar itself becomes a text input on click — the pencil is one
         // hit target for that, not the only one. The filter and the pencil sit
         // outside this region so clicking them does not start a path edit.
-        let crumbs = h_flex()
+        let crumbs = field(false)
             .id("path-bar-crumbs")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .items_center()
-            .gap_2()
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(move |el| el.border_color(border.blend(foreground.opacity(0.25))))
             .on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.begin_path_edit(window, cx)),
             )
             .child(
                 Icon::default()
                     .path("icons/file/folder-base.svg")
-                    .size_4()
+                    .with_size(px(15.))
                     .text_color(BrowserTint::folder(cx)),
             )
             .child(Breadcrumb::new().children(items).flex_1().truncate());

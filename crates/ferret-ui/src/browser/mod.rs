@@ -63,6 +63,17 @@ const STATUS_BAR_HEIGHT: f32 = 24.;
 const CHROME_FONT_SIZE: f32 = 11.5;
 /// Sidebar row icon.
 const SIDEBAR_ICON_SIZE: f32 = 15.;
+/// Sidebar row height. The spec's §4 says 22; the reference UI this is now
+/// being matched against gives its rows noticeably more room, and at 22 the
+/// list reads as a cramped stack rather than a set of targets.
+const SIDEBAR_ROW_HEIGHT: f32 = 30.;
+/// Sidebar group heading height.
+const SIDEBAR_SECTION_HEIGHT: f32 = 18.;
+/// The strip the path field sits in, and the field's own height. Taller than
+/// §4's h30 because the field needs padding inside the strip to read as a
+/// control rather than a band of text.
+const PATH_BAR_HEIGHT: f32 = 42.;
+const PATH_FIELD_HEIGHT: f32 = 30.;
 
 /// Toolbar icon asset paths (bundled under `assets/icons/ui/`).
 mod toolbar_icon {

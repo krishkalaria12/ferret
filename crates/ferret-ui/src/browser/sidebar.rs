@@ -88,13 +88,16 @@ impl Browser {
             .w_full()
             .h_full()
             .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.border)
-            // Which region has focus has to be visible, or Tab moves
-            // something the user cannot see.
-            .when(focused, |el| el.border_r_2().border_color(theme.primary))
-            .pt(px(6.))
-            .pb(px(8.));
+            // No hairline against the pane: the sidebar already reads as a
+            // separate surface, and a 1 px rule on top of that just adds a
+            // hard edge to look at.
+            .when(focused, |el| {
+                // Focus still has to be visible (§8), so it borrows the
+                // accent rather than a border that is always there.
+                el.border_r_2().border_color(theme.primary)
+            })
+            .pt(px(4.))
+            .pb(px(10.));
 
         side = side.child(section_label("Places", cx));
         for (i, place) in self.places(cx).into_iter().enumerate() {
@@ -110,8 +113,14 @@ impl Browser {
             ));
         }
 
-        side = side.child(section_label("Favorites", cx));
-        for (i, fav) in self.favorites(cx).into_iter().enumerate() {
+        // A heading over nothing advertises an empty room. Favourites and
+        // Volumes appear only once they have something in them; Places is
+        // always populated, so it always shows.
+        let favorites = self.favorites(cx);
+        if !favorites.is_empty() {
+            side = side.child(section_label("Favorites", cx));
+        }
+        for (i, fav) in favorites.into_iter().enumerate() {
             let name = fav
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -128,8 +137,11 @@ impl Browser {
             ));
         }
 
-        side = side.child(section_label("Volumes", cx));
-        for (i, volume) in self.volumes(cx).into_iter().enumerate() {
+        let volumes = self.volumes(cx);
+        if !volumes.is_empty() {
+            side = side.child(section_label("Volumes", cx));
+        }
+        for (i, volume) in volumes.into_iter().enumerate() {
             let active = place_is_current(&dir, &volume.path);
             side = side.child(self.sidebar_place_row(
                 SharedString::from(format!("volume-{i}")),
@@ -173,11 +185,11 @@ impl Browser {
         let row = h_flex()
             .id(id)
             .w_full()
-            .h(px(22.))
-            .mx(px(6.))
-            .rounded(px(5.))
-            .px(px(8.))
-            .gap(px(8.))
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .mx(px(8.))
+            .rounded(px(6.))
+            .px(px(10.))
+            .gap(px(10.))
             .items_center()
             .flex_shrink_0()
             .when(active, |el| el.bg(theme.selection))
@@ -302,12 +314,18 @@ impl Browser {
 /// `--app-fg-faint` — muted foreground at 70% (§7).
 fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .h(px(20.))
-        .mt(px(8.))
+        .h(px(SIDEBAR_SECTION_HEIGHT))
+        // Air above each group, and none below: the label belongs to the
+        // rows under it, so it should sit closer to them than to the group
+        // it follows.
+        .mt(px(14.))
+        .mb(px(2.))
         .px(px(14.))
-        .text_size(px(10.5))
-        .line_height(px(20.))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(cx.theme().muted_foreground.opacity(0.7))
-        .child(label.to_uppercase())
+        .text_size(px(11.))
+        .line_height(px(SIDEBAR_SECTION_HEIGHT))
+        // Sentence case at medium weight. Bold uppercase shouts a heading
+        // that is only there to be scanned past.
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(cx.theme().muted_foreground.opacity(0.8))
+        .child(label)
 }
