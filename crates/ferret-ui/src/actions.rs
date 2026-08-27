@@ -13,6 +13,12 @@ pub mod context {
     pub const FILE_PANE: &str = "FilePane";
     /// The path bar is in edit mode.
     pub const PATH_BAR: &str = "PathBar";
+    /// The sidebar has focus.
+    pub const SIDEBAR: &str = "Sidebar";
+    /// `gpui-component`'s table installs this inside the file pane. Ferret
+    /// rebinds Tab here so focus can leave the pane instead of walking the
+    /// table's columns (§8).
+    pub const DATA_TABLE: &str = "DataTable";
 }
 
 actions!(
@@ -31,7 +37,15 @@ actions!(
         ViewAsColumns,
         ViewAsIcons,
         ToggleTheme,
-        AddToFavorites
+        AddToFavorites,
+        FocusFilter,
+        ClearFilter,
+        NewWindow,
+        CompletionNext,
+        CompletionPrev,
+        AcceptCompletion,
+        FocusNextRegion,
+        FocusPrevRegion
     ]
 );
 
@@ -48,6 +62,20 @@ actions!(
         SelectAll,
         NewFolder,
         NewFile,
-        CancelEdit
+        CancelEdit,
+        SortByName,
+        SortByModified,
+        SortBySize,
+        SortAscending,
+        SortDescending,
+        CursorUp,
+        CursorDown,
+        CursorLeft,
+        CursorRight,
+        ExtendUp,
+        ExtendDown,
+        EnterDirectory,
+        ToggleColumnModified,
+        ToggleColumnSize
     ]
 );

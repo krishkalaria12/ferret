@@ -34,6 +34,8 @@ fn ferret_ui_state() -> FerretState {
 
 fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
+    // Window lifecycle belongs to the binary, not to a view.
+    cx.on_action(|_: &browser_actions::NewWindow, cx| open_main_window(cx));
 }
 
 fn bind_keys(cx: &mut App) {
@@ -50,6 +52,17 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-right", browser_actions::Forward, None),
         KeyBinding::new("cmd-up", browser_actions::Up, None),
         KeyBinding::new("alt-up", browser_actions::Up, None),
+        // The mirror of Up: descend into the cursor row.
+        KeyBinding::new(
+            "cmd-down",
+            browser_actions::EnterDirectory,
+            Some(context::FILE_PANE),
+        ),
+        KeyBinding::new(
+            "alt-down",
+            browser_actions::EnterDirectory,
+            Some(context::FILE_PANE),
+        ),
         // Refresh.
         KeyBinding::new("cmd-r", browser_actions::Refresh, None),
         KeyBinding::new("f5", browser_actions::Refresh, None),
@@ -63,6 +76,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-2", browser_actions::ViewAsColumns, None),
         KeyBinding::new("cmd-3", browser_actions::ViewAsIcons, None),
         KeyBinding::new("ctrl-3", browser_actions::ViewAsIcons, None),
+        // Windows.
+        KeyBinding::new("cmd-n", browser_actions::NewWindow, None),
+        KeyBinding::new("ctrl-n", browser_actions::NewWindow, None),
         // Tabs.
         KeyBinding::new("cmd-t", browser_actions::NewTab, None),
         KeyBinding::new("ctrl-t", browser_actions::NewTab, None),
@@ -71,9 +87,55 @@ fn bind_keys(cx: &mut App) {
         // Path bar.
         KeyBinding::new("cmd-l", browser_actions::FocusPathBar, None),
         KeyBinding::new("ctrl-l", browser_actions::FocusPathBar, None),
+        // Tab moves between sidebar, path bar and file pane (§8). Bound in
+        // each region's own context — including the table's, which otherwise
+        // claims Tab to walk its columns and would trap focus in the pane.
+        KeyBinding::new("tab", browser_actions::FocusNextRegion, None),
+        KeyBinding::new("shift-tab", browser_actions::FocusPrevRegion, None),
+        KeyBinding::new(
+            "tab",
+            browser_actions::FocusNextRegion,
+            Some(context::DATA_TABLE),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            browser_actions::FocusPrevRegion,
+            Some(context::DATA_TABLE),
+        ),
+        KeyBinding::new(
+            "tab",
+            browser_actions::FocusNextRegion,
+            Some(context::SIDEBAR),
+        ),
+        KeyBinding::new(
+            "shift-tab",
+            browser_actions::FocusPrevRegion,
+            Some(context::SIDEBAR),
+        ),
+        // Inline filter.
+        KeyBinding::new("cmd-f", browser_actions::FocusFilter, None),
+        KeyBinding::new("ctrl-f", browser_actions::FocusFilter, None),
         KeyBinding::new(
             "escape",
             browser_actions::CancelEdit,
+            Some(context::PATH_BAR),
+        ),
+        // Path completion: Tab accepts, arrows move through the list. Enter
+        // stays reserved for "go to what I typed", which is what a path bar
+        // is for.
+        KeyBinding::new(
+            "tab",
+            browser_actions::AcceptCompletion,
+            Some(context::PATH_BAR),
+        ),
+        KeyBinding::new(
+            "down",
+            browser_actions::CompletionNext,
+            Some(context::PATH_BAR),
+        ),
+        KeyBinding::new(
+            "up",
+            browser_actions::CompletionPrev,
             Some(context::PATH_BAR),
         ),
         // File pane: open, rename, delete.
@@ -110,6 +172,37 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(
             "ctrl-a",
             browser_actions::SelectAll,
+            Some(context::FILE_PANE),
+        ),
+        // Arrow-key selection in icon/column view (the list view's table
+        // context binds its own, deeper, and wins there).
+        KeyBinding::new("up", browser_actions::CursorUp, Some(context::FILE_PANE)),
+        KeyBinding::new(
+            "down",
+            browser_actions::CursorDown,
+            Some(context::FILE_PANE),
+        ),
+        // Shift extends the range from the anchor. The table binds plain
+        // arrows in its own deeper context but not these, so they reach the
+        // pane in every view.
+        KeyBinding::new(
+            "shift-up",
+            browser_actions::ExtendUp,
+            Some(context::FILE_PANE),
+        ),
+        KeyBinding::new(
+            "shift-down",
+            browser_actions::ExtendDown,
+            Some(context::FILE_PANE),
+        ),
+        KeyBinding::new(
+            "left",
+            browser_actions::CursorLeft,
+            Some(context::FILE_PANE),
+        ),
+        KeyBinding::new(
+            "right",
+            browser_actions::CursorRight,
             Some(context::FILE_PANE),
         ),
         // Create.
