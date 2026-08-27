@@ -66,6 +66,18 @@ pub trait Vfs: Send + Sync + 'static {
     /// Skip entirely when [`Capabilities::metadata_in_listing`] is set.
     async fn metadata(&self, path: &VfsPath) -> Result<Metadata>;
 
+    /// Stat one path into a full [`Entry`]: kind resolved (including symlink
+    /// targets) plus metadata in one call.
+    ///
+    /// This is the incremental-update primitive — the watcher hands back
+    /// paths, and this turns each into a row without re-listing anything.
+    async fn probe(&self, path: &VfsPath) -> Result<Entry> {
+        let _ = path;
+        Err(crate::VfsError::Unsupported {
+            capability: "probing entries",
+        })
+    }
+
     /// Resolve symlinks and relative segments to a stable identity.
     ///
     /// Used for the per-folder preference key, so two routes to one directory

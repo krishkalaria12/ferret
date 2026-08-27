@@ -66,6 +66,13 @@ pub struct Entry {
     /// follow-up [`crate::Vfs::metadata`] call. Never block a frame on `None`;
     /// render the row and let the value arrive.
     pub metadata: Option<Metadata>,
+    /// Where a **broken** symlink points, for the file list to show alongside
+    /// the name.
+    ///
+    /// Only filled for links that resolve to nothing: a working link's target
+    /// is not worth a `readlink` per row, and a dead one is useless without
+    /// it — "broken link" that will not say to *what* is not a diagnosis.
+    pub link_target: Option<std::path::PathBuf>,
 }
 
 impl Entry {
@@ -103,6 +110,7 @@ mod tests {
                 len,
                 ..Default::default()
             }),
+            link_target: None,
         }
     }
 
@@ -135,6 +143,7 @@ mod tests {
             name: ".ssh".into(),
             kind: EntryKind::Dir,
             metadata: None,
+            link_target: None,
         };
         assert!(pending.is_hidden());
     }

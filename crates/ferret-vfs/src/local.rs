@@ -103,6 +103,48 @@ impl Vfs for LocalFs {
         .await
     }
 
+    async fn probe(&self, path: &VfsPath) -> Result<Entry> {
+        let local = Self::require_local(path)?;
+        let owned = path.clone();
+        smol::unblock(move || {
+            let md = fs::symlink_metadata(&local)
+                .map_err(|source| VfsError::from_io("read", &owned, source))?;
+
+            let kind = if md.is_symlink() {
+                EntryKind::Symlink {
+                    target_kind: fs::metadata(&local).ok().map(|target| {
+                        if target.is_dir() {
+                            SymlinkTarget::Dir
+                        } else {
+                            SymlinkTarget::File
+                        }
+                    }),
+                }
+            } else if md.is_dir() {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            };
+
+            let link_target = kind
+                .is_broken_symlink()
+                .then(|| fs::read_link(&local).ok())
+                .flatten();
+
+            Ok(Entry {
+                path: owned.clone(),
+                name: local
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                kind,
+                metadata: Some(to_metadata(&md, &owned)),
+                link_target,
+            })
+        })
+        .await
+    }
+
     async fn canonicalize(&self, path: &VfsPath) -> Result<VfsPath> {
         let local = Self::require_local(path)?;
         let owned = path.clone();
@@ -242,11 +284,19 @@ fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
         None
     };
 
+    // One `readlink`, and only for links that resolve to nothing — the row
+    // has to name what it is pointing at.
+    let link_target = kind
+        .is_broken_symlink()
+        .then(|| fs::read_link(entry.path()).ok())
+        .flatten();
+
     Entry {
         path,
         name,
         kind,
         metadata,
+        link_target,
     }
 }
 
@@ -496,6 +546,62 @@ mod tests {
         };
         assert!(paths.iter().any(|p| p.ends_with("x")), "{paths:?}");
 
+        fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod link_target_tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn only_broken_links_carry_their_target() {
+        let root = std::env::temp_dir().join(format!(
+            "ferret-vfs-links-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("real.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink("real.txt", root.join("works")).unwrap();
+        std::os::unix::fs::symlink("/nowhere/at/all", root.join("dead")).unwrap();
+
+        let fs_impl = LocalFs::new();
+        let entries: Vec<Entry> = smol::block_on(async {
+            fs_impl
+                .read_dir(&VfsPath::local(root.clone()))
+                .filter_map(|r| async move { r.ok() })
+                .collect()
+                .await
+        });
+        let by_name = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .clone()
+        };
+
+        // The dead one names what it points at — a broken link that will not
+        // say to what is not something a person can act on.
+        let dead = by_name("dead");
+        assert!(dead.kind.is_broken_symlink());
+        assert_eq!(
+            dead.link_target.as_deref(),
+            Some(std::path::Path::new("/nowhere/at/all"))
+        );
+
+        // A working link costs no `readlink` at all.
+        let works = by_name("works");
+        assert!(!works.kind.is_broken_symlink());
+        assert_eq!(works.link_target, None);
+
+        // And a plain file is untouched by any of this.
+        assert_eq!(by_name("real.txt").link_target, None);
 
         fs::remove_dir_all(&root).ok();
     }
