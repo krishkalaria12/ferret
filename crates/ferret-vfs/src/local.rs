@@ -491,7 +491,11 @@ mod tests {
         fs::write(root.join("x"), b"").unwrap();
 
         let event = smol::block_on(watch.events.recv()).unwrap();
-        assert_eq!(event, WatchEvent::Changed);
+        let WatchEvent::Changed(paths) = event else {
+            panic!("expected Changed, got {event:?}");
+        };
+        assert!(paths.iter().any(|p| p.ends_with("x")), "{paths:?}");
+
 
         fs::remove_dir_all(&root).ok();
     }

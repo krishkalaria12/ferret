@@ -21,10 +21,13 @@ use std::time::Duration;
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// What happened to the watched directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
-    /// Contents changed: entries were created, removed, renamed or rewritten.
-    Changed,
+    /// Contents changed. Carries the paths the backend reported, already
+    /// coalesced by the consumer's debounce; consumers re-`stat` each one,
+    /// because by the time the event lands the truth lives on disk, not in
+    /// the event kind.
+    Changed(Vec<std::path::PathBuf>),
     /// The watched directory itself was deleted (or became unreachable).
     Gone,
 }
@@ -47,14 +50,24 @@ impl Watch {
     /// while a blocked watcher thread would cost the whole backend.
     pub fn start(dir: PathBuf) -> std::io::Result<Watch> {
         let (tx, rx) = async_channel::bounded::<WatchEvent>(64);
+        let watched = dir.clone();
 
         let to_io = |err: notify::Error| std::io::Error::other(err.to_string());
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let kind = match res {
-                Ok(event) => match event.kind {
-                    notify::EventKind::Remove(_) => WatchEvent::Gone,
-                    _ => WatchEvent::Changed,
-                },
+                Ok(event) => {
+                    // Removing the watched directory itself ends the
+                    // story; removing something *inside* it is just a
+                    // change the consumer re-stats.
+                    let removed_self = matches!(event.kind, notify::EventKind::Remove(_))
+                        && event.paths.len() == 1
+                        && event.paths.first().is_some_and(|p| p == &*watched);
+                    if removed_self {
+                        WatchEvent::Gone
+                    } else {
+                        WatchEvent::Changed(event.paths)
+                    }
+                }
                 // A path-level error usually means the subject vanished.
                 Err(_) => WatchEvent::Gone,
             };
@@ -105,7 +118,13 @@ mod tests {
                 .recv()
                 .await
                 .expect("watcher must report the write");
-            assert_eq!(event, WatchEvent::Changed);
+            let WatchEvent::Changed(paths) = event else {
+                panic!("expected Changed, got {event:?}");
+            };
+            assert!(
+                paths.iter().any(|p| p.ends_with("new.txt")),
+                "the write's path must be reported: {paths:?}"
+            );
         });
 
         fs::remove_dir_all(&root).ok();
