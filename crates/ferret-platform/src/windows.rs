@@ -68,12 +68,12 @@ impl Platform for Windows {
         smol::unblock(move || trash::delete(&owned))
             .await
             .map_err(|source| match source {
-                trash::Error::CouldNotAccess { .. } => {
-                    PlatformError::PermissionDenied { path: owned }
-                }
+                trash::Error::CouldNotAccess { .. } => PlatformError::PermissionDenied {
+                    path: path.to_path_buf(),
+                },
                 other => PlatformError::Io {
                     action: "move to the Recycle Bin",
-                    path: owned,
+                    path: path.to_path_buf(),
                     source: std::io::Error::other(other.to_string()),
                 },
             })
