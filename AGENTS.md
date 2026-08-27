@@ -85,6 +85,9 @@ base shippable.
 │   │   └── src/main.rs   # Application, menu, keybindings, window setup
 │   ├── ferret-ui/        # Views and Ferret-specific theme tokens
 │   │   ├── src/lib.rs    # Public API and RootView
+│   │   ├── src/browser/  # The shell: tabs, sidebar, title bar, path bar
+│   │   ├── src/pane/     # The file pane: list, icon and column views
+│   │   ├── src/folder/   # One browsed directory: listing, sort, selection
 │   │   ├── src/theme.rs  # Terminal ANSI palette (interface colours come from gpui-component)
 │   │   ├── assets/icons/ # Bundled file icons (Material Icon Theme, MIT) + mapping
 │   │   └── themes/groknight.json
@@ -196,6 +199,12 @@ Follow standard Rust and `rustfmt` conventions:
 - `SCREAMING_SNAKE_CASE` for constants.
 - Prefer explicit, domain-specific names over abbreviations.
 - Keep functions focused and place helpers near the behavior they support.
+- **Keep a file under 1000 lines** (1100 hard ceiling). Past that, split it into
+  a directory module — `pane/`, `browser/`, `folder/` are the pattern: `mod.rs`
+  holds the type, its constructor and the surface other crates call; each
+  sibling file owns one concern and opens with `use super::*`. Sub-modules can
+  see the parent's private items, so only what a *sibling* calls needs
+  `pub(super)`. Tests move with the code they cover.
 - Use comments to explain constraints or intent, not to restate the code.
 - Avoid `unwrap()` in recoverable application paths. At process boundaries, use an error message that explains the failed operation.
 - Put the error type in `errors.rs` and tunables in `config.rs` — see below.
