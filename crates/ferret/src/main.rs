@@ -67,6 +67,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-r", browser_actions::Refresh, None),
         KeyBinding::new("f5", browser_actions::Refresh, None),
         // Hidden files.
+        // The action was declared and handled but never bound, so the sidebar
+        // could only be toggled from the toolbar button.
+        KeyBinding::new("cmd-b", browser_actions::ToggleSidebar, None),
+        KeyBinding::new("ctrl-b", browser_actions::ToggleSidebar, None),
         KeyBinding::new("cmd-shift-.", browser_actions::ToggleHidden, None),
         KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, None),
         // View modes.
