@@ -496,6 +496,9 @@ impl TableDelegate for ListDelegate {
                 div()
                     .w_full()
                     .text_size(px(ROW_FONT_SIZE))
+                    // §7: dates stack down a column, so their digits must
+                    // not shift width from row to row.
+                    .font_features(crate::theme::tabular_numerals())
                     .text_color(if selected {
                         selected_text
                     } else {
@@ -516,6 +519,9 @@ impl TableDelegate for ListDelegate {
                     .justify_end()
                     .pr(px(10.))
                     .text_size(px(ROW_FONT_SIZE))
+                    // §7 names this one specifically: right-aligned sizes
+                    // jitter worst without fixed-advance digits.
+                    .font_features(crate::theme::tabular_numerals())
                     .text_color(if selected {
                         selected_text
                     } else {

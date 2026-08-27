@@ -379,7 +379,13 @@ impl FilePane {
                     .text_color(theme.foreground)
                     .child(entry.name.clone()),
             )
-            .child(div().text_size(px(11.5)).text_center().child(detail))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .font_features(crate::theme::tabular_numerals())
+                    .text_center()
+                    .child(detail),
+            )
             .into_any_element()
     }
 }

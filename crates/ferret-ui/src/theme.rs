@@ -111,6 +111,19 @@ impl BrowserPalette {
     }
 }
 
+/// Fixed-advance digits, for any column where numbers stack (§7).
+///
+/// The interface face ships proportional figures by default, so a `1` is
+/// narrower than a `0`. Down a column of sizes or dates that makes the text
+/// shift left and right as rows scroll past — §7 calls it out as visible
+/// jitter in the Size column, which is exactly where it is worst.
+///
+/// `tnum` is the OpenType tag for tabular figures; a face without it simply
+/// ignores the feature, so this is safe to apply unconditionally.
+pub fn tabular_numerals() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
+}
+
 /// Text that stays legible on `fill`.
 ///
 /// The selection fill comes from `gpui-component`, and it is a saturated
