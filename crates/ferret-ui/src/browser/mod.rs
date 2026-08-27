@@ -54,7 +54,20 @@ const VOLUMES_TTL: Duration = Duration::from_secs(15);
 // them rather than in `config.rs`.
 
 /// Title bar height. The library's own default is 34.
-const TITLE_BAR_HEIGHT: f32 = 46.;
+const TITLE_BAR_HEIGHT: f32 = 52.;
+/// The grab strip between the sidebar and the pane.
+const SIDEBAR_DIVIDER_WIDTH: f32 = 5.;
+/// What `gpui_component::TitleBar` insets its content by to clear the window
+/// controls. Mirrored here because the library does not export it, and the
+/// title bar's left zone has to be measured from the window edge to line the
+/// nav group up with the content column below it.
+#[cfg(target_os = "macos")]
+const TITLE_BAR_LEFT_INSET: f32 = 80.;
+#[cfg(not(target_os = "macos"))]
+const TITLE_BAR_LEFT_INSET: f32 = 12.;
+/// Toolbar icon size. §4 gives no figure; at the library's default the glyphs
+/// read as undersized against the reference.
+const TOOLBAR_ICON_SIZE: f32 = 17.;
 /// Widest a tab may grow before its label truncates.
 const TAB_MAX_WIDTH: f32 = 190.;
 /// Status bar height.

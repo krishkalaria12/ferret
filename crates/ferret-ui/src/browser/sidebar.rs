@@ -26,7 +26,7 @@ impl Browser {
     pub(super) fn render_sidebar_divider(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("sidebar-divider")
-            .w(px(5.))
+            .w(px(SIDEBAR_DIVIDER_WIDTH))
             .h_full()
             .flex_shrink_0()
             .cursor(gpui::CursorStyle::ResizeLeftRight)

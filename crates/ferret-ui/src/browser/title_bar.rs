@@ -85,10 +85,24 @@ impl Browser {
                 .items_center()
                 .gap_1()
                 .px_1()
+                // The sidebar toggle governs the sidebar, so it sits over it —
+                // and takes up exactly that column, so the nav group after it
+                // starts on the content's left edge rather than floating
+                // somewhere inside the sidebar. `TitleBar` has already inset
+                // us past the window controls, so that much comes off.
                 .child(
-                    tool_button("sidebar-toggle", toolbar_icon::SIDEBAR, "Toggle Sidebar")
-                        .selected(self.sidebar_visible)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                    h_flex()
+                        .flex_shrink_0()
+                        .when(self.sidebar_visible, |el| {
+                            el.w(px((self.sidebar_width + SIDEBAR_DIVIDER_WIDTH
+                                - TITLE_BAR_LEFT_INSET)
+                                .max(0.)))
+                        })
+                        .child(
+                            tool_button("sidebar-toggle", toolbar_icon::SIDEBAR, "Toggle Sidebar")
+                                .selected(self.sidebar_visible)
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                        ),
                 )
                 .child(nav_group)
                 .child(
@@ -147,8 +161,11 @@ impl Browser {
                 .child(
                     Button::new("more-menu")
                         .ghost()
-                        .xsmall()
-                        .icon(gpui_component::IconName::EllipsisVertical)
+                        .small()
+                        .icon(
+                            Icon::new(gpui_component::IconName::EllipsisVertical)
+                                .with_size(px(TOOLBAR_ICON_SIZE)),
+                        )
                         .dropdown_menu(|menu, _, _| {
                             menu.menu("Select All", Box::new(actions::SelectAll))
                                 .menu("Paste", Box::new(actions::Paste))
@@ -170,8 +187,12 @@ impl Browser {
 /// variant is swapped outright instead.
 fn segment_button(id: &'static str, icon_path: &str, tooltip: &str, active: bool) -> Button {
     let button = Button::new(id)
-        .xsmall()
-        .icon(Icon::default().path(icon_path))
+        .small()
+        .icon(
+            Icon::default()
+                .path(icon_path)
+                .with_size(px(TOOLBAR_ICON_SIZE)),
+        )
         .tooltip(tooltip);
     if active {
         button.primary()
@@ -183,7 +204,11 @@ fn segment_button(id: &'static str, icon_path: &str, tooltip: &str, active: bool
 fn tool_button(id: &'static str, icon_path: &str, tooltip: &str) -> Button {
     Button::new(id)
         .ghost()
-        .xsmall()
-        .icon(Icon::default().path(icon_path))
+        .small()
+        .icon(
+            Icon::default()
+                .path(icon_path)
+                .with_size(px(TOOLBAR_ICON_SIZE)),
+        )
         .tooltip(tooltip)
 }
