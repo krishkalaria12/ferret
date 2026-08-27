@@ -70,6 +70,36 @@ impl VfsPath {
         }
     }
 
+    /// Whether `self` is `ancestor` or lies beneath it.
+    ///
+    /// Component-wise, never string-wise: `/foo/barn` starts with the *text*
+    /// `/foo/bar` but is not inside it, and a move that believed otherwise
+    /// would refuse a legitimate drop — or worse, allow one into itself.
+    pub fn starts_with(&self, ancestor: &VfsPath) -> bool {
+        match (self, ancestor) {
+            (VfsPath::Local(a), VfsPath::Local(b)) => a.starts_with(b),
+            (
+                VfsPath::Remote {
+                    mount: m1,
+                    path: p1,
+                },
+                VfsPath::Remote {
+                    mount: m2,
+                    path: p2,
+                },
+            ) => {
+                if m1 != m2 {
+                    return false;
+                }
+                let (a, b) = (p1.trim_end_matches('/'), p2.trim_end_matches('/'));
+                b.is_empty()
+                    || a == b
+                    || (a.starts_with(b) && a.as_bytes().get(b.len()) == Some(&b'/'))
+            }
+            _ => false,
+        }
+    }
+
     pub fn join(&self, name: &str) -> VfsPath {
         match self {
             VfsPath::Local(p) => VfsPath::Local(p.join(name)),
@@ -138,6 +168,36 @@ impl From<&Path> for VfsPath {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn containment_is_component_wise_not_textual() {
+        let bar = VfsPath::local("/foo/bar");
+
+        assert!(VfsPath::local("/foo/bar").starts_with(&bar), "itself");
+        assert!(VfsPath::local("/foo/bar/baz").starts_with(&bar), "beneath");
+
+        // The case that makes a string comparison wrong: a sibling whose name
+        // merely begins with the same text is not inside it.
+        assert!(!VfsPath::local("/foo/barn").starts_with(&bar));
+        assert!(!VfsPath::local("/foo").starts_with(&bar), "the parent");
+        assert!(!VfsPath::local("/other").starts_with(&bar));
+    }
+
+    #[test]
+    fn remote_containment_needs_the_same_mount() {
+        let a = remote("/data");
+        let same_mount = remote("/data/inner");
+        let other_mount = VfsPath::Remote {
+            mount: MountId(2),
+            path: "/data/inner".into(),
+        };
+
+        assert!(same_mount.starts_with(&a));
+        // Two servers can both have /data; one is not inside the other.
+        assert!(!other_mount.starts_with(&a));
+        // And a local path is never inside a remote one.
+        assert!(!VfsPath::local("/data/inner").starts_with(&a));
+    }
+
     use super::*;
 
     fn remote(path: &str) -> VfsPath {
