@@ -111,9 +111,41 @@ impl BrowserPalette {
     }
 }
 
+/// Text that stays legible on `fill`.
+///
+/// The selection fill comes from `gpui-component`, and it is a saturated
+/// accent in the dark theme but a pale tint in the light one. Hard-coding
+/// white text is therefore wrong in exactly one of the two themes — which is
+/// the failure the "both themes" gate exists to catch — so the colour is
+/// chosen from the fill's luminance instead.
+pub fn text_on(fill: Hsla, dark_text: Hsla) -> Hsla {
+    if relative_luminance(fill) > 0.5 {
+        dark_text
+    } else {
+        gpui::white()
+    }
+}
+
+/// Rec. 709 luma, which is close enough to perceived brightness for a
+/// two-way choice and far cheaper than a full contrast-ratio computation.
+fn relative_luminance(color: Hsla) -> f32 {
+    let Rgba { r, g, b, .. } = color.into();
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_flips_with_the_fill_it_sits_on() {
+        let dark_text = hex(0x1a1a1a);
+
+        // A saturated accent (the dark theme's selection) takes white text.
+        assert_eq!(text_on(hex(0x2563eb), dark_text), gpui::white());
+        // A pale tint (the light theme's selection) must not.
+        assert_eq!(text_on(hex(0xdbeafe), dark_text), dark_text);
+    }
 
     #[test]
     fn hex_preserves_channels_and_is_opaque() {
