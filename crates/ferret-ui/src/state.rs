@@ -70,10 +70,7 @@ impl FerretState {
         let Ok(path) = ferret_settings::settings_path() else {
             return;
         };
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, self.settings.to_json()).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
+        write_atomically(&path, &self.settings.to_json());
     }
 
     /// Persist folder view preferences (debounced by the caller).
@@ -81,9 +78,7 @@ impl FerretState {
         let Ok(path) = ferret_settings::folder_prefs_path() else {
             return;
         };
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, self.prefs.to_json()).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        if write_atomically(&path, &self.prefs.to_json()) {
             self.prefs.mark_saved();
         }
     }
@@ -110,11 +105,70 @@ impl FerretState {
     }
 }
 
+/// Write `contents` to `path` via a temp file in the same directory.
+///
+/// The config directory is created first: on a fresh machine nothing else
+/// makes it, and without it every save fails — silently, because the write
+/// goes to a path whose parent does not exist. Returns whether it landed.
+fn write_atomically(path: &std::path::Path, contents: &str) -> bool {
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("settings: can't create {}: {err}", parent.display());
+        return false;
+    }
+
+    // Same directory as the target, so the rename stays on one filesystem
+    // and is therefore atomic.
+    let tmp = path.with_extension("json.tmp");
+    if let Err(err) = std::fs::write(&tmp, contents) {
+        eprintln!("settings: can't write {}: {err}", tmp.display());
+        return false;
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        eprintln!("settings: can't replace {}: {err}", path.display());
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    true
+}
+
 fn default_folder_view(settings: &Settings) -> FolderView {
     FolderView {
         mode: settings.browser.default_view,
         sort_key: settings.browser.sort_key,
         sort_order: settings.browser.sort_order,
         hidden_columns: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_creates_the_config_directory_it_needs() {
+        let root = std::env::temp_dir().join(format!(
+            "ferret-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Two levels deep and absent: the fresh-machine case, where a plain
+        // write would fail and take the setting with it.
+        let path = root.join("Ferret").join("settings.json");
+        assert!(!path.exists());
+
+        assert!(write_atomically(&path, "{\"a\":1}"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+
+        // Rewriting replaces the contents and leaves no temp file behind.
+        assert!(write_atomically(&path, "{\"a\":2}"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":2}");
+        assert!(!path.with_extension("json.tmp").exists());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
