@@ -562,6 +562,7 @@ footer {
       <li><a href="#blocking">blocking the ui thread</a></li>
       <li><a href="#jwalk">jwalk: where it belongs</a></li>
       <li><a href="#architecture">architectural changes</a></li>
+      <li><a href="#libraries">libraries worth adopting</a></li>
       <li><a href="#hygiene">hygiene &amp; build</a></li>
       <li><a href="#measuring">measuring it</a></li>
       <li><a href="#order">the order to do this in</a></li>
@@ -586,9 +587,9 @@ footer {
     <div><dt>Reviewed</dt><dd class="mono">13,278 lines · 6 crates</dd></div>
     <div><dt>Findings</dt><dd>26 (A-01 … A-26)</dd></div>
     <div><dt>Correctness bugs</dt><dd>3</dd></div>
-    <div><dt>New decisions</dt><dd>D-33 … D-37</dd></div>
+    <div><dt>New decisions</dt><dd>D-33 … D-38</dd></div>
     <div><dt>Method</dt><dd>Static reading</dd></div>
-    <div><dt>Blocks</dt><dd>Nothing — Phase 2 can proceed</dd></div>
+    <div><dt>New dependencies</dt><dd>One (<code>jwalk</code>)</dd></div>
   </dl>
 </header>
 
@@ -609,15 +610,15 @@ footer {
     <strong>Read this first</strong>
     <p>Every finding below comes from <em>reading</em> the code, not from a profiler. The
     complexity claims are structural and I stand behind them; the wall-clock numbers are
-    arithmetic from the sizes involved and are illustrations, not measurements. §10 says what
+    arithmetic from the sizes involved and are illustrations, not measurements. §11 says what
     to add to <code>xtask</code> so the important ones become numbers the repository owns
     rather than assertions in a document.</p>
   </div>
 
   <h3>How the findings are numbered</h3>
   <p><code>A-nn</code> for audit findings, so nothing collides with <code>plan.html</code>'s
-  <code>F-nn</code> features, <code>D-nn</code> decisions or <code>R-nn</code> risks. Five new
-  decisions are proposed as <code>D-33</code> … <code>D-37</code>, continuing where
+  <code>F-nn</code> features, <code>D-nn</code> decisions or <code>R-nn</code> risks. Six new
+  decisions are proposed as <code>D-33</code> … <code>D-38</code>, continuing where
   <a href="terminal.html">terminal.html</a> left off. Severity is a pill on each finding:</p>
   <ul>
     <li><span class="pill p-risky">critical</span> — breaks a stated gate, or is wrong rather than slow.</li>
@@ -704,7 +705,8 @@ footer {
     <div class="fix"><b>Fix</b>
     Cache the <em>decoded, shared</em> handle, not the bytes. Have <code>IconProvider::lookup</code>
     return something cheap to clone and stable in identity — an <code>Arc&lt;RenderImage&gt;</code>
-    built once at <code>resolve</code> time. The <code>is_well_formed</code> guard (icon.rs:33–38)
+    built once at <code>resolve</code> time, behind an <code>ArcSwap</code> so the read path
+    takes no lock at all (<a href="#libraries">§9</a>). The <code>is_well_formed</code> guard (icon.rs:33–38)
     then runs once per type instead of once per row per frame, which is also where it belongs.
     This is a small, contained change with the largest single payoff in the document.</div>
   </div>
@@ -812,8 +814,9 @@ footer {
     five allocations and five lock acquisitions per row per frame, to answer a question with at
     most four possible answers.</p>
     <div class="fix"><b>Fix</b>
-    Cache the resolved order on the delegate and invalidate it in <code>toggle_column</code>,
-    which already calls <code>table.refresh</code> for exactly this reason (pane/mod.rs:310–316).
+    Cache the resolved order on the delegate — a <code>SmallVec&lt;[FileColumn; 4]&gt;</code>
+    never allocates at all — and invalidate it in <code>toggle_column</code>, which already
+    calls <code>table.refresh</code> for exactly this reason (pane/mod.rs:310–316).
     The unit tests at list.rs:704–736 test <code>visible_columns</code> as a pure function and
     stay valid.</div>
   </div>
@@ -843,7 +846,7 @@ footer {
     round trips</b> through the blocking pool: 200,000 task spawns, 200,000 thread wakeups, and
     a stat that never overlaps with the next one. One core busy, the rest idle, and the Size and
     Date columns stay blank the whole time.</p>
-    <p>It is also the one hot path <code>xtask bench</code> does not measure (§10), which is
+    <p>It is also the one hot path <code>xtask bench</code> does not measure (§11), which is
     presumably why it survived.</p>
     <div class="fix"><b>Fix</b>
     Two levels. <b>Cheap and immediate:</b> move the inner loop <em>inside</em> a single
@@ -1020,7 +1023,9 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     <b>(1)</b> <code>Arc&lt;Path&gt;</code> keys (D-35) turn every clone into a refcount bump.
     <b>(2)</b> Key the top-level maps by <em>name</em>, not by full path — every entry in
     <code>entries</code> shares one parent, so the name is already unique within the map and is
-    an order of magnitude shorter to hash.
+    an order of magnitude shorter to hash. Swap the hasher too: SipHash on 60-byte paths is
+    ~36 MB hashed per rebuild, for a threat model Ferret does not have
+    (<a href="#libraries">§9</a>).
     <b>(3)</b> Don't rebuild when nothing structural changed: a probe batch that only refreshed
     metadata in place needs no reindex at all, and <code>apply_probes</code> already tracks
     <code>metadata_changed</code> separately from <code>changed</code> (expansion.rs:118–169) —
@@ -1055,11 +1060,10 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     every keystroke (browser/mod.rs:222–226). <code>select_by_prefix</code> has the same shape
     per row per type-ahead character.</p>
     <div class="fix"><b>Fix</b>
-    Lowercase the needle once — either store it pre-folded on <code>Folder</code> or hoist it
-    out of the loop — and match with an allocation-free case-insensitive scan
-    (<code>char::to_lowercase</code> over the two iterators, or an ASCII fast path with a
-    Unicode fallback). Keep the behaviour identical; the existing filter tests should not
-    change.</div>
+    Build one case-insensitive matcher per keystroke and run it over the names without
+    allocating either side — <code>aho-corasick</code> is already in the lock and does exactly
+    this with SIMD (<a href="#libraries">§9</a>). Keep the behaviour identical; the existing
+    filter tests should not change.</div>
   </div>
 
   <div class="find sev2">
@@ -1140,7 +1144,10 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     A debounced save task on <code>FerretState</code>: <code>record_current_view</code> marks
     dirty and (re)arms a <code>SAVE_DEBOUNCE</code> timer; the timer checks
     <code>is_dirty()</code> and writes on the background executor. Flush synchronously once, on
-    window close. This is the finding with the best effort-to-relief ratio in the document —
+    window close. While there: <code>to_json</code> uses
+    <code>serde_json::to_string_pretty</code> (folder_prefs.rs:118) on a file the module header
+    explicitly says is "written by the app rather than by hand" — pretty-printing it is roughly
+    double the bytes and a slower serialiser, for nobody. This is the finding with the best effort-to-relief ratio in the document —
     everything it needs is already written.</div>
   </div>
 
@@ -1305,15 +1312,19 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
 <pre><code>pub struct Entry {
     <span class="del">pub path: VfsPath,          // PathBuf inside — heap alloc per clone</span>
     <span class="del">pub name: String,           // second heap alloc per clone</span>
-    <span class="add">pub path: VfsPath,          // Arc&lt;Path&gt; / Arc&lt;str&gt; inside</span>
-    <span class="add">pub name: SharedString,     // Arc&lt;str&gt;</span>
+    <span class="add">pub path: VfsPath,          // Arc&lt;Path&gt; inside</span>
+    <span class="add">pub name: SharedString,     // SmolStr: inline to 22 bytes, then Arc&lt;str&gt;</span>
     pub kind: EntryKind,
     pub metadata: Option&lt;Metadata&gt;,
     pub link_target: Option&lt;Arc&lt;Path&gt;&gt;,
 }</code></pre>
     <p>Mechanical, wide, and it does not change a single call site's shape — every
-    <code>.cloned()</code> in the render path stays exactly as written and becomes two refcount
-    bumps. It is the precondition for A-02, A-05, A-08, A-11 and A-22.</p>
+    <code>.cloned()</code> in the render path stays exactly as written and becomes a refcount
+    bump and a short memcpy. It is the precondition for A-02, A-05, A-08, A-11 and A-22.</p>
+    <p><code>SharedString</code> specifically, not <code>Arc&lt;str&gt;</code>: it is built on
+    <code>smol_str</code>, which stores up to 22 bytes inline, so most filenames cost
+    <em>no allocation and no atomic at all</em>. <a href="#libraries">§9</a> has the detail and
+    the even-cheaper variant that derives the name from an offset into the path.</p>
     <div class="because"><b>Because</b>
     Do it <em>before</em> Phase 2, not after. <code>ferret-terminal</code> will hold paths for
     cwd sync, and <code>ferret-ops</code> will hold them for the operation queue; converting two
@@ -1387,8 +1398,201 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
 </section>
 
 <!-- ==================================================================== -->
-<section id="hygiene">
+<section id="libraries">
   <span class="sec-tag">§9</span>
+  <h2>Libraries worth adopting</h2>
+  <p class="sec-intro">Almost every crate that would help is <em>already compiled into this workspace</em> as a transitive dependency of GPUI. Using them is not adding a dependency — it is declaring an edge to something already in <code>Cargo.lock</code> and already in the build.</p>
+
+  <p>That changes the calculus completely. The dependency policy in <code>AGENTS.md</code> is
+  rightly conservative, but its concern is supply-chain weight and build time, and neither
+  applies to a crate the linker is already pulling in. Of everything below, exactly one —
+  <code>jwalk</code> — is genuinely new.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Verified against Cargo.lock · 870 packages</caption>
+    <thead>
+      <tr><th class="key">Crate</th><th class="key">In lock</th><th class="key">Pulled by</th><th>What it fixes here</th><th>Verdict</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="key">parking_lot</td><td class="key">0.12.5</td><td class="key">gpui</td><td>Every <code>Mutex</code> in the workspace; removes the poison-swallowing paths</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">rustc-hash</td><td class="key">1.1.0</td><td class="key">collections (Zed's)</td><td>A-05 — SipHash on 60-byte path keys, 3n times per watcher burst</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">foldhash</td><td class="key">0.2.0</td><td class="key">hashbrown</td><td>Same, with a random seed — the choice if remote mounts worry you</td><td><span class="pill p-core">consider</span></td></tr>
+      <tr><td class="key">smol_str</td><td class="key">0.3.6</td><td class="key">gpui_shared_string</td><td>D-35 — this is what <code>gpui::SharedString</code> is made of, and it is better than <code>Arc&lt;str&gt;</code> here</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">smallvec</td><td class="key">1.15.2</td><td class="key">gpui</td><td>A-21, <code>ancestor_chain</code>, <code>WatchEvent::Changed</code>, drag payloads</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">arc-swap</td><td class="key">1.9.2</td><td class="key">triomphe</td><td>A-01 — a lock-free read path for the icon cache</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">aho-corasick</td><td class="key">1.1.5</td><td class="key">regex</td><td>A-13 — allocation-free, SIMD, case-insensitive filtering</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">memchr</td><td class="key">2.8.3</td><td class="key">regex, aho-corasick</td><td>The substring primitive under the same</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">rayon</td><td class="key">1.12.0</td><td class="key">image, sum_tree</td><td>A-12 parallel sort; and it is jwalk's engine anyway (D-33)</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="key">slotmap</td><td class="key">1.1.1</td><td class="key">gpui, taffy</td><td>D-36 — generational <code>EntryId</code>s, if you want the safety belt</td><td><span class="pill p-later">optional</span></td></tr>
+      <tr><td class="key">bytemuck</td><td class="key">1.25.2</td><td class="key">wgpu, image</td><td>The per-byte BGRA swizzle in <code>icon_for_path</code></td><td><span class="pill p-later">optional</span></td></tr>
+      <tr><td class="key">indexmap</td><td class="key">2.14.0</td><td class="key">many</td><td>Nothing that a <code>Vec</code> plus a map does not already do here</td><td><span class="pill p-later">skip</span></td></tr>
+      <tr><td class="key">triomphe</td><td class="key">0.1.16</td><td class="key">rust-i18n-support</td><td>A one-word-smaller <code>Arc</code>. Marginal, and it does not interoperate with the <code>std::sync::Arc</code> everything else speaks</td><td><span class="pill p-later">skip</span></td></tr>
+      <tr><td class="key">ignore</td><td class="key">0.4.33</td><td class="key">globwalk</td><td>Already here. Reserved for search (D-34), not for listing</td><td><span class="pill p-later">later</span></td></tr>
+      <tr><td class="key">jwalk</td><td class="key"><span class="no">absent</span></td><td class="key">—</td><td>A-03 — the metadata tier (D-33)</td><td><span class="pill p-warn">the one new dep</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>parking_lot — for correctness first, speed second</h3>
+  <p>Ferret holds <code>std::sync::Mutex</code> in eleven places, every one of them guarding a
+  critical section of a few nanoseconds: read a <code>Vec</code> of at most four columns
+  (list.rs:123), read a <code>Point</code> (icon_view.rs:270), take an
+  <code>Option</code> (pane/render.rs:15–22), look up an icon (macos.rs:216). Short critical
+  sections are exactly where <code>parking_lot</code>'s adaptive spin-then-park wins, and where
+  its one-byte lock word matters against std's larger inner state.</p>
+  <p>But the better argument is that poisoning is doing active harm here:</p>
+<pre><code><span class="c">// icons.rs:130 — a poisoned cache silently becomes "no icons, forever"</span>
+self.cache.lock().ok()?.get(key)?.clone()
+
+<span class="c">// pane/list.rs:130 — same shape: a poisoned width map silently reverts to defaults</span>
+self.widths.lock().ok().and_then(|w| w.get(&amp;column).copied())</code></pre>
+  <p>Both swallow a poisoned lock into an indistinguishable "no value". <code>parking_lot</code>
+  has no poisoning, so <code>lock()</code> returns the guard directly — the <code>.ok()?</code>
+  disappears along with the failure mode it was hiding, and the twenty-odd
+  <code>.lock().unwrap()</code> calls elsewhere lose their panic path.</p>
+  <div class="note warn">
+    <strong>Do not let this substitute for the real fix</strong>
+    <p><code>parking_lot</code> makes A-01's per-row lock cheaper. It does not make it correct
+    to take a lock once per row per frame. Do the <code>ArcSwap</code> change below; adopt
+    <code>parking_lot</code> for the locks that remain.</p>
+  </div>
+
+  <h3>Hashing — the largest library-level win in the document</h3>
+  <p>Rust's default hasher is SipHash-1-3, chosen to be HashDoS-resistant against
+  attacker-supplied keys. Ferret's index keys are paths from the user's own local disk. It is
+  paying a cryptographic-ish hash for a threat model it does not have.</p>
+  <p>The arithmetic on A-05: <code>rebuild_index_and_order</code> fills three maps of
+  <em>n</em> entries keyed by full <code>VfsPath</code>. On <code>flat/</code> with ~60-byte
+  paths that is 3 × 200,000 × 60 ≈ <b>36 MB hashed per rebuild</b> — and it rebuilds on every
+  watcher burst. At SipHash's ~1.5 GB/s that is roughly 24 ms of pure hashing to react to one
+  file being saved. Fx or foldhash on short keys runs several times faster, and A-05's
+  name-keying (~15-byte keys) cuts the input by four again.</p>
+  <div class="note">
+    <strong>Two caveats, both real</strong>
+    <p><b>Version split.</b> The lock has <code>rustc-hash 1.1.0</code>. Declaring
+    <code>rustc-hash = "2"</code> would compile a <em>second</em> copy rather than unify —
+    pin <code>"1"</code> to reuse what is there, or accept the duplicate deliberately.
+    <b>Adversarial keys.</b> Local paths are the user's own, but Phase 7's S3 and WebDAV mounts
+    return keys chosen by a remote server. Use Fx for the local indices and keep a seeded
+    hasher (<code>foldhash</code>, already in the lock) for anything keyed on remote-derived
+    names — or just use <code>foldhash</code> everywhere and take a smaller win with no
+    caveat at all. That is the option I would pick.</p>
+  </div>
+
+  <h3><code>SharedString</code> is better than the <code>Arc&lt;str&gt;</code> D-35 asked for</h3>
+  <p>Worth stating precisely, because it upgrades <a href="#architecture">D-35</a>:
+  <code>gpui::SharedString</code> is backed by <code>gpui_shared_string</code>, which is backed
+  by <code>smol_str</code>. <code>SmolStr</code> stores strings of up to 22 bytes
+  <em>inline</em> and falls back to <code>Arc&lt;str&gt;</code> above that.</p>
+  <p>Most filenames are under 22 bytes. So for the common case <code>Entry.name</code> becomes
+  <b>zero heap allocation and zero atomic refcount</b> — a 24-byte memcpy on clone, which is
+  strictly better than <code>Arc&lt;str&gt;</code>, and it degrades gracefully to shared
+  ownership for the long ones. D-35 should say <code>SharedString</code>, not
+  <code>Arc&lt;str&gt;</code>, and it costs nothing to say so.</p>
+  <p>The path still wants <code>Arc&lt;Path&gt;</code> — paths are long and genuinely shared.
+  The best version stores only the path and derives the name from a byte offset into it:</p>
+<pre><code>pub struct Entry {
+    path: Arc&lt;Path&gt;,
+    name_at: u16,            <span class="c">// byte offset of the final component</span>
+    ...
+}
+impl Entry {
+    <span class="c">// O(1) slice, no parse, no allocation — which is what the</span>
+    <span class="c">// comment at vfs/entry.rs:61–63 was actually asking for.</span>
+    pub fn name(&amp;self) -&gt; &amp;str { &amp;self.path_str()[self.name_at as usize..] }
+}</code></pre>
+  <p>That removes the duplicate storage A-22 notes without giving up the property the existing
+  comment defends. If the borrow lifetimes make it awkward at the call sites,
+  <code>SharedString</code> is the pragmatic answer and is still a large improvement.</p>
+
+  <h3>arc-swap — the right shape for the icon cache</h3>
+  <p>A-01's access pattern is read-mostly to an extreme degree: read once per row per frame,
+  written a few dozen times in the life of a directory. That is what <code>ArcSwap</code> is
+  for.</p>
+<pre><code>pub struct MacIcons {
+    <span class="del">cache: Mutex&lt;HashMap&lt;IconKey, Option&lt;IconBitmap&gt;&gt;&gt;,</span>
+    <span class="add">cache: ArcSwap&lt;FxHashMap&lt;IconKey, Option&lt;Arc&lt;RenderImage&gt;&gt;&gt;&gt;,</span>
+}</code></pre>
+  <p>The render path becomes a lock-free atomic load plus a map lookup plus an
+  <code>Arc</code> clone — no mutex, no 16 KB memcpy, no <code>RenderImage</code>
+  reconstruction, and a stable image identity so GPUI reuses the texture. The resolver clones
+  the map, inserts, and swaps; with a few dozen entries that copy is irrelevant and happens off
+  the render path.</p>
+  <p>One wrinkle worth planning for: <code>RenderImage</code> lives in <code>gpui</code>, and
+  <code>ferret-platform</code> is a service crate. <code>plan.html</code>'s layering rule
+  permits service crates to depend on <code>gpui</code> itself (only <code>gpui-component</code>
+  is restricted to <code>ferret-ui</code>), so this is allowed. If you would rather not, keep
+  the provider returning bitmaps and put the <code>ArcSwap&lt;…, Arc&lt;RenderImage&gt;&gt;</code>
+  cache in <code>ferret-ui</code> in front of it — the render path ends up identical.</p>
+
+  <h3>aho-corasick for filtering</h3>
+  <p>A-13's fix has an obvious hand-rolled form (lowercase the needle once, ASCII fast path).
+  But <code>aho-corasick</code> is already in the tree and does it better:</p>
+<pre><code><span class="c">// built once per keystroke, not once per entry</span>
+let matcher = AhoCorasick::builder()
+    .ascii_case_insensitive(true)
+    .build([needle])?;
+<span class="c">// then, per entry: SIMD, no allocation, no lowercasing of either side</span>
+matcher.is_match(entry.name())</code></pre>
+  <p>200,000 allocation-free SIMD searches instead of 400,000 <code>String</code>
+  allocations, and it is the same engine that will do the work when search lands.</p>
+
+  <h3>rayon — already here, and A-12 wants it</h3>
+  <p>Sorting 200,000 entries on a Kind or Size header click is <em>embarrassingly</em>
+  parallel. <code>rayon::slice::ParallelSliceMut::par_sort_unstable_by</code> is a one-line
+  swap for <code>sort_by</code> once A-12's comparator stops allocating (a comparator that
+  allocates is a comparator you must not run on eight threads). Use the same Ferret-owned pool
+  D-33 constructs, so the sort and the walker share one set of workers rather than each
+  sizing itself to the core count.</p>
+
+  <h3>What not to add</h3>
+  <div class="scroller">
+  <table>
+    <caption>Rejected, with the reason</caption>
+    <thead><tr><th class="key">Crate</th><th>Why not</th></tr></thead>
+    <tbody>
+      <tr><td class="key">dashmap</td><td>Sharded concurrent maps solve write contention. Ferret has none — the model is single-writer on the UI thread, and the icon cache has one background writer. <code>ArcSwap</code> is the correct tool and is already in the lock.</td></tr>
+      <tr><td class="key">mimalloc / jemalloc</td><td>Genuinely faster than macOS's system allocator under multithreaded churn, and a one-line change. But it is a <em>multiplier on a problem you should be deleting</em>: swapping the allocator before step 2 of §12 would mask A-01, A-02 and A-08 rather than reveal them. Revisit after the allocation counter is flat, and only if it measures.</td></tr>
+      <tr><td class="key">simd-json / sonic-rs</td><td>The settings file is tiny and the prefs file is written once per navigation — which is A-09, a scheduling bug, not a parsing one. Fix the scheduling and the parse cost disappears with it.</td></tr>
+      <tr><td class="key">compact_str</td><td>Solves exactly what <code>smol_str</code> already solves, and <code>smol_str</code> is what <code>SharedString</code> is built on. Two small-string types would be worse than one.</td></tr>
+      <tr><td class="key">crossbeam-channel</td><td>Not in the lock today; <code>jwalk</code> will bring it. <code>async-channel</code> is the right choice for the listing stream because the consumer is async — A-10 is about batching, not about the channel.</td></tr>
+      <tr><td class="key">notify-debouncer-full</td><td>Would replace the hand-rolled debounce, which is not the problem. A-06 (silent overflow) and D-37 (one watcher, many subscribers) are, and neither is what that crate offers.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+    <strong>One free byte-level win while you are in there</strong>
+    <p><code>icon_for_path</code> converts AppKit's RGBA to GPUI's BGRA one pixel at a time
+    (macos.rs:284–288) — 4,096 iterations of <code>extend_from_slice</code> per icon. It runs
+    once per file type, not per frame, so it is not urgent. But the real fix is not a faster
+    loop: ask <code>NSBitmapImageRep</code> for the byte order you want via its
+    <code>bitmapFormat</code> and do no conversion at all. Failing that, a <code>u32</code>
+    swizzle over <code>bytemuck::cast_slice</code> is four times fewer iterations and three
+    lines.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-38</span> Prefer the performance crates GPUI already brings. Justify anything that is not already in the lock.</h4>
+    <p><code>parking_lot</code> for locks, <code>rustc-hash</code> or <code>foldhash</code> for
+    internal indices, <code>SharedString</code> for names, <code>smallvec</code> for bounded
+    collections, <code>arc-swap</code> for read-mostly caches, <code>aho-corasick</code> for
+    text matching, <code>rayon</code> for data parallelism. None of these adds a package to the
+    build. Adding a crate that is <em>not</em> already in <code>Cargo.lock</code> — as
+    <code>jwalk</code> is not — needs the same justification the existing dependency policy
+    demands, stated in the commit that adds it.</p>
+    <div class="because"><b>Because</b>
+    The workspace already compiles 870 packages. The marginal cost of an edge to one of them is
+    a line in a manifest; the marginal cost of a new one is a new maintainer to trust, a new
+    audit surface and a slower cold build. Those are different decisions and should not be made
+    with the same shrug.</div>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="hygiene">
+  <span class="sec-tag">§10</span>
   <h2>Hygiene &amp; build</h2>
   <p class="sec-intro">Small things. Grouped as A-26 in the table because none of them is worth its own row, and all of them are worth ten minutes.</p>
 
@@ -1443,7 +1647,7 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
 
 <!-- ==================================================================== -->
 <section id="measuring">
-  <span class="sec-tag">§10</span>
+  <span class="sec-tag">§11</span>
   <h2>Measuring it</h2>
   <p class="sec-intro">The bench is good and it guards the wrong thing — or rather, it guards the one thing that is already fine.</p>
 
@@ -1489,7 +1693,7 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
 
 <!-- ==================================================================== -->
 <section id="order">
-  <span class="sec-tag">§11</span>
+  <span class="sec-tag">§12</span>
   <h2>The order to do this in</h2>
   <p class="sec-intro">Sequenced so each step is independently shippable and the app runs at the end of every one. Steps 1 and 2 are worth doing before Phase 2 starts; the rest can interleave with it.</p>
 
@@ -1511,14 +1715,15 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     <span class="pn">2</span>
     <div>
       <h3>The render path, without changing any representation</h3>
-      <p class="dep">A-01 · A-02(a) · A-07 · A-19 · A-21 · independent of everything else · small</p>
+      <p class="dep">A-01 · A-02(a) · A-07 · A-19 · A-21 · <span class="mono">arc-swap · parking_lot · smallvec</span> · independent of everything else · small</p>
       <ul>
-        <li>Cache <code>Arc&lt;RenderImage&gt;</code> in the icon provider (A-01) — the biggest single win, and contained to two files.</li>
+        <li>Cache <code>Arc&lt;RenderImage&gt;</code> behind an <code>ArcSwap</code> in the icon provider (A-01) — the biggest single win, and contained to two files.</li>
         <li>Move drag-payload construction into the <code>on_drag</code> closure (A-02a).</li>
         <li>Incremental selection counters (A-07).</li>
-        <li><code>OnceLock</code> the font features (A-19); cache the column list (A-21).</li>
+        <li><code>OnceLock</code> the font features (A-19); cache the column list as a <code>SmallVec</code> (A-21).</li>
+        <li>Sweep the remaining <code>std::sync::Mutex</code> to <code>parking_lot</code>, which removes the two <code>.lock().ok()</code> paths that silently swallow poisoning (§9).</li>
       </ul>
-      <p class="accept"><b>Done when</b> the allocation-per-frame counter from §10 is flat while scrolling <code>flat/</code> with everything selected.</p>
+      <p class="accept"><b>Done when</b> the allocation-per-frame counter from §11 is flat while scrolling <code>flat/</code> with everything selected.</p>
     </div>
   </div>
 
@@ -1540,11 +1745,12 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     <span class="pn">4</span>
     <div>
       <h3>The representation change</h3>
-      <p class="dep">D-35 + D-36 · wide and mechanical · do it in one go, with green tests</p>
+      <p class="dep">D-35 + D-36 · <span class="mono">smol_str · foldhash</span> · wide and mechanical · do it in one go, with green tests</p>
       <ul>
         <li><code>Arc&lt;Path&gt;</code> / <code>SharedString</code> in <code>Entry</code> and <code>VfsPath</code>.</li>
         <li><code>EntryId</code> for selection, cursor, anchor, expansion and the row index.</li>
         <li>Fold in A-05's name-keyed index and A-23's predicate-based <code>unique_name</code>.</li>
+        <li>Swap the internal maps off SipHash while you are rewriting their keys anyway — doing it in the same change means measuring the reindex once, not twice.</li>
         <li>If <code>ferret-core</code> is being extracted for Phase 2, do it in the same change.</li>
       </ul>
       <p class="accept"><b>Done when</b> <code>rebuild_index_and_order</code> performs no heap allocation, and the full test suite passes unchanged.</p>
@@ -1555,13 +1761,13 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     <span class="pn">5</span>
     <div>
       <h3>jwalk, and the end of the second metadata tier</h3>
-      <p class="dep">D-33 · D-34 · depends on step 4 for the <code>Entry</code> shape · medium</p>
+      <p class="dep">D-33 · D-34 · <span class="mono">jwalk (new) · rayon</span> · depends on step 4 for the <code>Entry</code> shape · medium</p>
       <ul>
-        <li>One Ferret-owned rayon pool at startup.</li>
+        <li>One Ferret-owned rayon pool at startup — shared with A-12's parallel sort, not a second pool.</li>
         <li>Batched <code>read_dir</code> (A-10) with metadata resolved during the walk.</li>
         <li><code>metadata_in_listing = true</code> on both platforms; delete <code>start_metadata_backfill</code>.</li>
         <li>Parallel <code>copy_tree</code> and recursive delete.</li>
-        <li>Add the "fully populated listing" budget from §10 <em>first</em>, so the improvement is a number.</li>
+        <li>Add the "fully populated listing" budget from §11 <em>first</em>, so the improvement is a number.</li>
       </ul>
       <p class="accept"><b>Done when</b> every row in <code>flat/</code> shows its size and date the moment it first appears, and the hidden-file and cyclic-symlink tests are still green.</p>
     </div>
@@ -1575,8 +1781,8 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
       <ul>
         <li>Watcher registry (A-17), with A-06's overflow signal moved into it.</li>
         <li><code>ListingProfile</code> for ancestor columns and path completion (A-14, A-15).</li>
-        <li>Cached lowercase extension (A-12); allocation-free filtering (A-13); icon-key derivation in place (A-11).</li>
-        <li>Hygiene sweep (§9).</li>
+        <li>Cached lowercase extension plus <code>par_sort_unstable_by</code> (A-12); <code>aho-corasick</code> filtering (A-13); icon-key derivation in place (A-11).</li>
+        <li>Hygiene sweep (§10).</li>
       </ul>
       <p class="accept"><b>Done when</b> entering column view in a deep path attaches no new watchers and starts no metadata work.</p>
     </div>
@@ -1585,14 +1791,14 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
 
 <!-- ==================================================================== -->
 <section id="limits">
-  <span class="sec-tag">§12</span>
+  <span class="sec-tag">§13</span>
   <h2>What this did not check</h2>
   <p class="sec-intro">Stated plainly, so nothing here is mistaken for a clean bill of health it did not earn.</p>
 
   <ul>
     <li><b>Nothing was profiled.</b> No build was run, no instrument was attached. Every
     complexity claim comes from reading the call graph; every wall-clock figure is arithmetic
-    from the sizes involved. §10 exists to convert the important ones into measurements the
+    from the sizes involved. §11 exists to convert the important ones into measurements the
     repository owns.</li>
     <li><b>Windows was read, not run.</b> <code>ferret-platform/src/windows.rs</code> was read
     for shape and for the <code>metadata_in_listing</code> claim. The <code>unsafe</code> icon
@@ -1606,9 +1812,14 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
     <li><b>No security review.</b> The <code>unsafe</code> AppKit block in <code>macos.rs</code>
     has a well-written safety comment and a well-formedness guard at the boundary; it was read,
     not verified against the AppKit threading rules it claims.</li>
+    <li><b>The library claims were verified against <code>Cargo.lock</code>, not against a
+    build.</b> Every version and every "pulled by" in §9 was read out of the lockfile, so the
+    crates are certainly present — but no benchmark compared SipHash to foldhash on Ferret's
+    own keys, and the 36 MB figure is arithmetic. Do the swap behind the §11 counter, not on
+    my say-so.</li>
     <li><b>The tests were not run.</b> <code>terminal.html</code> reports 122 passing; this
     audit takes that at face value. Several findings above propose new tests, and three of them
-    (A-04, A-06, the §10 allocation counter) would likely fail today.</li>
+    (A-04, A-06, the §11 allocation counter) would likely fail today.</li>
   </ul>
 
   <div class="note ok">
