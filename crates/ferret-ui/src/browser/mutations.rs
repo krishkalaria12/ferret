@@ -301,6 +301,7 @@ impl Browser {
 
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        self.animate_sidebar(cx);
         let state = cx.global_mut::<FerretState>();
         state.settings.sidebar.visible = self.sidebar_visible;
         state.save_settings();

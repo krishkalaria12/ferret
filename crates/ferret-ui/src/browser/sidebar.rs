@@ -9,37 +9,120 @@ use super::*;
 const MIN_SIDEBAR_WIDTH: f32 = ferret_settings::config::MIN_SIDEBAR_WIDTH;
 const MAX_SIDEBAR_WIDTH: f32 = ferret_settings::config::MAX_SIDEBAR_WIDTH;
 
-/// Whether a sidebar place is the directory being browsed (or an ancestor of
-/// it for volumes and drives, which stay lit while you descend into them).
-fn place_is_current(current: &VfsPath, place: &Path) -> bool {
-    let Some(cur) = current.as_local() else {
-        return false;
-    };
-    if cur == place {
-        return true;
-    }
-    cur.starts_with(place) && place.parent().is_some()
+/// The one sidebar entry that describes where you are.
+///
+/// Every ancestor of the browsed directory matches some row — in
+/// `~/Desktop/Coding`, Home, Desktop and a Coding favourite are all prefixes
+/// of it — so lighting each prefix lights three rows at once and none of them
+/// tells you anything. The deepest match is the only one that names the place
+/// you are actually in, so it is the only one drawn as selected. Volumes and
+/// drives still stay lit while you descend into them, because nothing deeper
+/// claims the row.
+fn current_place<'a>(
+    current: &VfsPath,
+    candidates: impl Iterator<Item = &'a Path>,
+) -> Option<PathBuf> {
+    let cur = current.as_local()?;
+    candidates
+        .filter(|place| cur.starts_with(place))
+        .max_by_key(|place| place.components().count())
+        .map(Path::to_path_buf)
+}
+
+/// Decelerating curve for the slide: fastest at the start, easing into place.
+///
+/// A linear slide of this length reads as mechanical; front-loading the motion
+/// is what makes a 170 ms panel feel like it was already on its way when you
+/// pressed the key.
+fn ease_out_cubic(t: f32) -> f32 {
+    let inverse = 1. - t.clamp(0., 1.);
+    1. - inverse * inverse * inverse
 }
 
 impl Browser {
-    /// The drag handle on the sidebar's right edge.
+    /// How wide the sidebar column is right now, rather than how wide it is
+    /// heading for. Zero once it is fully shut.
+    ///
+    /// The title bar lines its nav group up against this, so the toolbar
+    /// moves with the panel instead of snapping to its final place on the
+    /// first frame of the slide.
+    pub(super) fn sidebar_reveal_width(&self) -> f32 {
+        self.sidebar_width * self.sidebar_reveal
+    }
+
+    /// Slide the sidebar towards whatever `sidebar_visible` now says.
+    ///
+    /// Driven from a task rather than GPUI's `with_animation` because the
+    /// title bar has to read the same live width: an element animation hands
+    /// its progress to one element's closure and nothing else can see it.
+    pub(super) fn animate_sidebar(&mut self, cx: &mut Context<Self>) {
+        let target = if self.sidebar_visible { 1. } else { 0. };
+        let from = self.sidebar_reveal;
+        if (target - from).abs() < f32::EPSILON {
+            self.sidebar_animation = None;
+            return;
+        }
+        // A toggle mid-slide starts from where the panel actually is, so the
+        // remaining distance is covered in the remaining time rather than
+        // replaying the whole sweep.
+        let span = SIDEBAR_ANIMATION.mul_f32((target - from).abs());
+        let started = Instant::now();
+
+        // Assigning the new task drops the old one, which cancels it.
+        self.sidebar_animation = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SIDEBAR_ANIMATION_TICK).await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        let t = (started.elapsed().as_secs_f32() / span.as_secs_f32()).min(1.);
+                        this.sidebar_reveal = from + (target - from) * ease_out_cubic(t);
+                        cx.notify();
+                        t >= 1.
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// The hairline on the sidebar's right edge, and the handle that resizes
+    /// it.
+    ///
+    /// The line is what separates the two regions and the grab area is drawn
+    /// over it, spilling either side without taking any layout width — so the
+    /// pane still begins one pixel after the sidebar ends while the divider
+    /// stays something a pointer can actually catch.
     pub(super) fn render_sidebar_divider(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let line = cx.theme().border;
+        let grabbed = cx.theme().primary.opacity(0.35);
         div()
-            .id("sidebar-divider")
+            .relative()
             .w(px(SIDEBAR_DIVIDER_WIDTH))
             .h_full()
             .flex_shrink_0()
-            .cursor(gpui::CursorStyle::ResizeLeftRight)
-            .hover(|el| el.bg(cx.theme().primary.opacity(0.35)))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    this.sidebar_drag = Some(SidebarDrag {
-                        start_x: event.position.x,
-                        start_width: this.sidebar_width,
-                    });
-                    cx.notify();
-                }),
+            .bg(line)
+            .child(
+                div()
+                    .id("sidebar-divider")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-SIDEBAR_GRAB_SLOP))
+                    .right(px(-SIDEBAR_GRAB_SLOP))
+                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+                    .hover(|el| el.bg(grabbed))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                            this.sidebar_drag = Some(SidebarDrag {
+                                start_x: event.position.x,
+                                start_width: this.sidebar_width,
+                            });
+                            cx.notify();
+                        }),
+                    ),
             )
     }
 
@@ -76,9 +159,24 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
         let dir = self.active().folder.read(cx).dir.clone();
 
+        // Gathered up front so the selected row can be picked against every
+        // candidate at once rather than section by section.
+        let places = self.places(cx);
+        let favorites = self.favorites(cx);
+        let volumes = self.volumes(cx);
+        let current = current_place(
+            &dir,
+            places
+                .iter()
+                .map(|p| p.path.as_path())
+                .chain(favorites.iter().map(PathBuf::as_path))
+                .chain(volumes.iter().map(|v| v.path.as_path())),
+        );
+        let is_current = |path: &Path| current.as_deref() == Some(path);
+
+        let theme = cx.theme();
         let focused = self.sidebar_focus.is_focused(window);
         let mut side = v_flex()
             .id("sidebar")
@@ -88,9 +186,8 @@ impl Browser {
             .w_full()
             .h_full()
             .bg(theme.sidebar)
-            // No hairline against the pane: the sidebar already reads as a
-            // separate surface, and a 1 px rule on top of that just adds a
-            // hard edge to look at.
+            // The edge against the pane belongs to the divider, not here —
+            // drawing it on both would double the line.
             .when(focused, |el| {
                 // Focus still has to be visible (§8), so it borrows the
                 // accent rather than a border that is always there.
@@ -100,8 +197,8 @@ impl Browser {
             .pb(px(10.));
 
         side = side.child(section_label("Places", cx));
-        for (i, place) in self.places(cx).into_iter().enumerate() {
-            let active = place_is_current(&dir, &place.path);
+        for (i, place) in places.into_iter().enumerate() {
+            let active = is_current(&place.path);
             side = side.child(self.sidebar_place_row(
                 SharedString::from(format!("place-{i}")),
                 &place.name,
@@ -116,7 +213,6 @@ impl Browser {
         // A heading over nothing advertises an empty room. Favourites and
         // Volumes appear only once they have something in them; Places is
         // always populated, so it always shows.
-        let favorites = self.favorites(cx);
         if !favorites.is_empty() {
             side = side.child(section_label("Favorites", cx));
         }
@@ -125,7 +221,7 @@ impl Browser {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| fav.to_string_lossy().into_owned());
-            let active = place_is_current(&dir, &fav);
+            let active = is_current(&fav);
             side = side.child(self.sidebar_place_row(
                 SharedString::from(format!("favorite-{i}")),
                 &name,
@@ -137,12 +233,11 @@ impl Browser {
             ));
         }
 
-        let volumes = self.volumes(cx);
         if !volumes.is_empty() {
             side = side.child(section_label("Volumes", cx));
         }
         for (i, volume) in volumes.into_iter().enumerate() {
-            let active = place_is_current(&dir, &volume.path);
+            let active = is_current(&volume.path);
             side = side.child(self.sidebar_place_row(
                 SharedString::from(format!("volume-{i}")),
                 &volume.name,
@@ -328,4 +423,51 @@ fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground.opacity(0.8))
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn winner(current: &str, candidates: &[&str]) -> Option<String> {
+        current_place(&VfsPath::local(current), candidates.iter().map(Path::new))
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn only_the_deepest_matching_row_is_selected() {
+        // Home, Desktop and the Coding favourite are all prefixes of the
+        // browsed directory; lighting all three is the bug this guards.
+        assert_eq!(
+            winner(
+                "/Users/krish/Desktop/Coding",
+                &[
+                    "/Users/krish",
+                    "/Users/krish/Desktop",
+                    "/Users/krish/Desktop/Coding"
+                ],
+            )
+            .as_deref(),
+            Some("/Users/krish/Desktop/Coding")
+        );
+    }
+
+    #[test]
+    fn an_ancestor_wins_when_nothing_deeper_matches() {
+        // A volume stays lit while you descend into it, because no row
+        // describes where you are more precisely.
+        assert_eq!(
+            winner(
+                "/Volumes/Backup/2026/June",
+                &["/Users/krish", "/Volumes/Backup"]
+            )
+            .as_deref(),
+            Some("/Volumes/Backup")
+        );
+    }
+
+    #[test]
+    fn nothing_is_selected_outside_every_place() {
+        assert_eq!(winner("/etc/ssh", &["/Users/krish"]), None);
+    }
 }

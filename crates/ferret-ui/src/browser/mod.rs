@@ -60,8 +60,29 @@ const VOLUMES_TTL: Duration = Duration::from_secs(15);
 pub const TITLE_BAR_HEIGHT: f32 = 52.;
 /// Diameter of a macOS window control, for centring them in the title bar.
 pub const TRAFFIC_LIGHT_DIAMETER: f32 = 12.;
-/// The grab strip between the sidebar and the pane.
-const SIDEBAR_DIVIDER_WIDTH: f32 = 5.;
+/// The hairline between the sidebar and the pane.
+///
+/// One pixel, so the content column starts where the sidebar ends: a wider
+/// strip separates the two regions with a band of background, which reads as
+/// a gap rather than as an edge.
+const SIDEBAR_DIVIDER_WIDTH: f32 = 1.;
+/// How far either side of the hairline still counts as grabbing it.
+///
+/// The line is the whole separation, so the target has to be drawn outside
+/// it — one pixel is the right width to look at and the wrong width to aim
+/// at. Matches the slop a macOS split view gives its own dividers.
+const SIDEBAR_GRAB_SLOP: f32 = 3.;
+/// How long the sidebar takes to slide open or shut.
+///
+/// Short on purpose: the toggle is a keystroke people repeat, so the slide has
+/// to read as one motion and be over before the next one lands. Past roughly
+/// 200 ms it stops feeling like the panel moved and starts feeling like the
+/// app waited.
+const SIDEBAR_ANIMATION: Duration = Duration::from_millis(170);
+/// How often the sidebar slide re-renders. 120 Hz: fine enough that the
+/// motion has no visible steps on a 120 Hz display, and cheap enough that a
+/// 170 ms slide is twenty frames.
+const SIDEBAR_ANIMATION_TICK: Duration = Duration::from_millis(8);
 /// What `gpui_component::TitleBar` insets its content by to clear the window
 /// controls. Mirrored here because the library does not export it, and the
 /// title bar's left zone has to be measured from the window edge to line the
@@ -127,6 +148,12 @@ pub struct Browser {
     sidebar_visible: bool,
     /// Logical pixels, clamped to `settings::MIN/MAX_SIDEBAR_WIDTH`.
     sidebar_width: f32,
+    /// How much of the sidebar is on screen: 0 shut, 1 open. Distinct from
+    /// `sidebar_visible`, which is the target the slide is heading for.
+    sidebar_reveal: f32,
+    /// Drives `sidebar_reveal`. Held so a second toggle mid-slide cancels the
+    /// first rather than racing it.
+    sidebar_animation: Option<gpui::Task<()>>,
     /// Live drag state for the sidebar divider.
     sidebar_drag: Option<SidebarDrag>,
     /// Index of the tab currently being dragged, if any.
@@ -210,11 +237,17 @@ impl Browser {
             },
         );
 
+        let sidebar_visible = cx.global::<FerretState>().settings.sidebar.visible;
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
-            sidebar_visible: cx.global::<FerretState>().settings.sidebar.visible,
+            sidebar_visible,
             sidebar_width: cx.global::<FerretState>().settings.sidebar.width,
+            // The first frame shows the remembered state outright: a session
+            // that opens by sliding its own sidebar in looks like it is still
+            // loading.
+            sidebar_reveal: if sidebar_visible { 1. } else { 0. },
+            sidebar_animation: None,
             sidebar_drag: None,
             tab_drag: None,
             favorite_drag: None,

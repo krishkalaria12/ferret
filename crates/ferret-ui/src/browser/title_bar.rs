@@ -183,14 +183,20 @@ impl Browser {
                 // starts on the content's left edge rather than floating
                 // somewhere inside the sidebar. `TitleBar` has already inset
                 // us past the window controls, so that much comes off.
+                //
+                // The column tracks the sidebar's live width, not its target,
+                // so the nav group slides with the panel instead of jumping to
+                // its final place on the first frame of the animation. It
+                // never shrinks below the button, though: a narrow sidebar —
+                // or a shut one — otherwise gives the column less room than
+                // the toggle needs, and the nav group is laid out on top of
+                // it, where it swallows the presses meant for the toggle.
                 .child(
-                    h_flex()
+                    holds_pointer(h_flex())
                         .flex_shrink_0()
-                        .when(self.sidebar_visible, |el| {
-                            el.w(px((self.sidebar_width + SIDEBAR_DIVIDER_WIDTH
-                                - TITLE_BAR_LEFT_INSET)
-                                .max(0.)))
-                        })
+                        .w(px((self.sidebar_reveal_width() + SIDEBAR_DIVIDER_WIDTH
+                            - TITLE_BAR_LEFT_INSET)
+                            .max(TOOLBAR_BUTTON_SIZE)))
                         .child(
                             tool_button("sidebar-toggle", toolbar_icon::SIDEBAR, "Toggle Sidebar")
                                 .selected(self.sidebar_visible)

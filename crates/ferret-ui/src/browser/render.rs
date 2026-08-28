@@ -208,13 +208,25 @@ impl Render for Browser {
                     .flex_1()
                     .min_h_0()
                     .size_full()
-                    .when(self.sidebar_visible, |el| {
+                    // Mid-slide the column is narrower than the panel: the
+                    // sidebar keeps its full width inside a clipping box, so
+                    // it slides out from under the edge rather than having
+                    // its rows reflow narrower on every frame.
+                    .when(self.sidebar_reveal_width() > 0., |el| {
+                        let panel = px(self.sidebar_width);
                         el.child(
                             div()
-                                .w(px(self.sidebar_width))
+                                .w(px(self.sidebar_reveal_width()))
                                 .h_full()
                                 .flex_shrink_0()
-                                .child(self.render_sidebar(window, cx)),
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .w(panel)
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .child(self.render_sidebar(window, cx)),
+                                ),
                         )
                         .child(self.render_sidebar_divider(cx))
                     })
