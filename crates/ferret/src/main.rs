@@ -228,11 +228,37 @@ fn apply_startup_theme(cx: &mut App) {
     use ferret_settings::ThemeChoice;
     use gpui_component::{Theme, ThemeMode};
 
+    // Ferret's palette first: `sync_system_appearance` and `change` both
+    // re-apply whichever theme config is registered, so registering after
+    // them would leave the library's colours on screen until the next toggle.
+    ferret_ui::register_theme(vibrancy(cx), cx);
+
     match cx.global::<FerretState>().settings.appearance.theme {
         ThemeChoice::System => Theme::sync_system_appearance(None, cx),
         ThemeChoice::Light => Theme::change(ThemeMode::Light, None, cx),
         ThemeChoice::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
+}
+
+/// Whether to draw the window translucent over a blurred desktop.
+///
+/// Requested in settings *and* supported by the platform. Blur is a macOS
+/// enhancement (D-19): Linux leaves it to the compositor and Windows gates it
+/// on the release, and on both a window that asked for it and did not get it
+/// composites its translucent palette against nothing.
+///
+/// **This currently produces nothing on macOS**, measured against the pinned
+/// GPUI revision: the appearance reaches `WindowOptions`, and re-applying it
+/// after the window opens changes nothing, and `Transparent` behaves the same
+/// as `Blurred` — a surface drawn at 55% alpha over a bright backdrop comes
+/// out at exactly the value it would have composited against black. So the
+/// window layer stays opaque somewhere below us. `gpui-component` sets
+/// `Transparent` only under `cfg(target_os = "linux")`, so the macOS path is
+/// not one the stack exercises. Left wired because the call sites are the
+/// ones the platform documents; until it works, turning the setting on only
+/// darkens the palette, which is why it is off by default.
+fn vibrancy(cx: &App) -> bool {
+    cfg!(target_os = "macos") && cx.global::<FerretState>().settings.appearance.vibrancy
 }
 
 fn open_main_window(cx: &mut App) {
@@ -253,18 +279,28 @@ fn open_main_window(cx: &mut App) {
         ..base.titlebar.take().unwrap_or_default()
     };
 
+    // The palette carries the alpha; this is what puts something behind it to
+    // show through. Opaque unless both the setting and the platform agree, so
+    // the two can never disagree about which palette is live.
+    let background = if vibrancy(cx) {
+        gpui::WindowBackgroundAppearance::Blurred
+    } else {
+        gpui::WindowBackgroundAppearance::Opaque
+    };
+
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
         window_min_size: Some(size(px(760.), px(480.))),
         app_id: Some("dev.ferret.Ferret".into()),
         titlebar: Some(titlebar),
+        window_background: background,
         ..base
     };
 
     // Opening from a spawned task lets gpui-component finish loading its
     // theme and assets before the first frame is built.
     cx.spawn(async move |cx| {
-        let _window = cx
+        let window = cx
             .open_window(options, |window, cx| {
                 let view = cx.new(|cx| RootView::new(window, cx));
                 // The first entity in the window must be a `Root`; it hosts
@@ -273,6 +309,13 @@ fn open_main_window(cx: &mut App) {
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open the Ferret window");
+
+        // Asked for a second time, after the renderer exists. This does not
+        // currently change anything — see `vibrancy` — but it is the call the
+        // platform documents, and it is where a fix would land.
+        let _ = window.update(cx, |_, window, _| {
+            window.set_background_appearance(background);
+        });
 
         // Must follow `open_window`: activating before the window exists
         // brings a windowless app to the front and leaves Ferret behind

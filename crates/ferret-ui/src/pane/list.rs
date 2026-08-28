@@ -336,7 +336,7 @@ impl TableDelegate for ListDelegate {
 
         if selected {
             let fill = if focused {
-                cx.theme().selection
+                palette.selected
             } else {
                 palette.selected_idle
             };
@@ -399,7 +399,7 @@ impl TableDelegate for ListDelegate {
         // The focused fill is an accent whose lightness differs per theme, so
         // the text colour is chosen against it rather than assumed.
         let selected_text = if focused {
-            crate::theme::text_on(theme.selection, theme.foreground)
+            crate::theme::text_on(palette.selected, theme.foreground)
         } else {
             theme.foreground
         };

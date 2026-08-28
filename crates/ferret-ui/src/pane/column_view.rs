@@ -269,12 +269,12 @@ impl FilePane {
         let broken = entry.kind.is_broken_symlink();
 
         let fill = match (selected, focused) {
-            (true, true) => theme.selection,
+            (true, true) => palette.selected,
             (true, false) => palette.selected_idle,
             (false, _) => gpui::transparent_black(),
         };
         let text = if selected && focused {
-            crate::theme::text_on(theme.selection, theme.foreground)
+            crate::theme::text_on(palette.selected, theme.foreground)
         } else {
             theme.foreground
         };
@@ -312,7 +312,7 @@ impl FilePane {
                     gpui_component::Icon::new(gpui_component::IconName::ChevronRight)
                         .with_size(px(12.))
                         .text_color(if selected && focused {
-                            crate::theme::text_on(theme.selection, theme.foreground)
+                            crate::theme::text_on(palette.selected, theme.foreground)
                         } else {
                             theme.muted_foreground.opacity(0.7)
                         }),

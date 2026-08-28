@@ -74,6 +74,18 @@ pub struct Appearance {
     pub row_density: RowDensity,
     /// Alternating row shading in list view.
     pub alternate_row_colors: bool,
+    /// Draw the window translucent over a blurred desktop.
+    ///
+    /// Off by default, and deliberately: blur is a macOS enhancement (D-19),
+    /// unreliable on Linux compositors and version-gated on Windows, so the
+    /// opaque palette stays the one the design is legible in. Turning this on
+    /// swaps in the translucent palette as well — the two go together, since
+    /// alpha over an opaque window composites against nothing.
+    ///
+    /// Known limitation: the pinned GPUI revision does not actually make the
+    /// macOS window layer transparent, so today this only darkens the palette.
+    /// See `vibrancy` in `crates/ferret/src/main.rs` for what was measured.
+    pub vibrancy: bool,
     #[serde(flatten, skip_serializing_if = "Map::is_empty")]
     pub unknown: Map<String, Value>,
 }
@@ -85,6 +97,7 @@ impl Default for Appearance {
             ui_font_size: 13.0,
             row_density: RowDensity::Comfortable,
             alternate_row_colors: true,
+            vibrancy: false,
             unknown: Map::new(),
         }
     }

@@ -101,13 +101,13 @@ impl FilePane {
             theme.muted_foreground
         };
         let label_color = if selected && focused {
-            crate::theme::text_on(theme.selection, theme.foreground)
+            crate::theme::text_on(palette.selected, theme.foreground)
         } else {
             theme.foreground
         };
         let fill = if selected {
             if focused {
-                theme.selection
+                palette.selected
             } else {
                 palette.selected_idle
             }

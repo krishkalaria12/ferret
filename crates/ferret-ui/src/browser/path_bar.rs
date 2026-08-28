@@ -296,6 +296,7 @@ impl Browser {
     /// The completion list under the path field (§6). Empty until a query
     /// lands, so it never flashes an empty box while the listing runs.
     fn render_completions(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected = crate::theme::BrowserPalette::resolve(cx).selected;
         let theme = cx.theme();
         let Some(edit) = &self.path_editing else {
             return div().into_any_element();
@@ -320,7 +321,7 @@ impl Browser {
                     .gap_2()
                     .items_center()
                     .rounded(px(4.))
-                    .when(ix == highlighted, |row| row.bg(theme.selection))
+                    .when(ix == highlighted, |row| row.bg(selected))
                     .when(ix != highlighted, |row| {
                         row.hover(|row| row.bg(theme.secondary))
                     })
@@ -335,7 +336,7 @@ impl Browser {
                             .truncate()
                             .text_size(px(12.))
                             .text_color(if ix == highlighted {
-                                crate::theme::text_on(theme.selection, theme.foreground)
+                                crate::theme::text_on(selected, theme.foreground)
                             } else {
                                 theme.foreground
                             })

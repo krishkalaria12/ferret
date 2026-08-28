@@ -3,7 +3,8 @@
     "theme": "system",
     "ui_font_size": 13.0,
     "row_density": "comfortable",
-    "alternate_row_colors": true
+    "alternate_row_colors": true,
+    "vibrancy": false
   },
   "browser": {
     "default_view": "list",

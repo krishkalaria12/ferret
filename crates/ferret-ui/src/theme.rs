@@ -5,7 +5,68 @@
 //! `gpui-component` has no concept of: the sixteen ANSI slots the terminal panel
 //! needs, and the colours that encode file and git state in the browser.
 
-use gpui::{Hsla, Rgba, rgb};
+use gpui::{App, Hsla, Rgba, rgb};
+
+/// Ferret's interface palette, in `gpui-component`'s theme format.
+///
+/// The library ships a stock dark theme built on `neutral-950` (`#0a0a0a`),
+/// which is near enough to pure black that every surface in the window reads
+/// as one flat sheet — no separation between sidebar, chrome and listing.
+/// These are the values `docs/ui-base.html` §7 specifies instead.
+const THEMES: &str = include_str!("../themes/ferret.json");
+
+/// The two Ferret ships with, opaque.
+const LIGHT: &str = "Ferret Light";
+const DARK: &str = "Ferret Dark";
+/// The translucent pair, used only when the window is drawing blurred (D-19
+/// keeps blur optional, so these are never the fallback).
+const LIGHT_GLASS: &str = "Ferret Light Glass";
+const DARK_GLASS: &str = "Ferret Dark Glass";
+
+/// Load Ferret's palette and make it the active theme.
+///
+/// Must run after `gpui_component::init` — that is what creates the registry
+/// this writes into — and before the first window opens, or the first frame
+/// paints in the library's colours and then swaps.
+///
+/// `glass` selects the translucent variants, which only make sense behind a
+/// blurred window: on an opaque one their alpha composites against whatever
+/// GPUI clears to rather than against the desktop.
+pub fn register(glass: bool, cx: &mut App) {
+    use gpui_component::{Theme, ThemeMode, ThemeRegistry};
+
+    if let Err(err) = ThemeRegistry::global_mut(cx).load_themes_from_str(THEMES) {
+        // A broken palette is not worth failing to start over: the library's
+        // own theme still renders a usable window, so say what happened and
+        // keep going.
+        eprintln!("theme: can't load Ferret's palette, using the default: {err}");
+        return;
+    }
+
+    let (light, dark) = if glass {
+        (LIGHT_GLASS, DARK_GLASS)
+    } else {
+        (LIGHT, DARK)
+    };
+    let registry = ThemeRegistry::global(cx);
+    let light = registry.themes().get(light).cloned();
+    let dark = registry.themes().get(dark).cloned();
+
+    // `Theme::change` re-applies whichever of the two the current mode names,
+    // so both are swapped before it runs.
+    if !cx.has_global::<Theme>() {
+        Theme::change(ThemeMode::default(), None, cx);
+    }
+    let theme = Theme::global_mut(cx);
+    let mode = theme.mode;
+    if let Some(light) = light {
+        theme.light_theme = light;
+    }
+    if let Some(dark) = dark {
+        theme.dark_theme = dark;
+    }
+    Theme::change(mode, None, cx);
+}
 
 /// The sixteen ANSI colours plus foreground, background and cursor, as a terminal
 /// emulator needs them. Loaded from the JSON files in `themes/`.
@@ -74,14 +135,21 @@ fn hex(value: u32) -> Hsla {
     Rgba { r, g, b, a }.into()
 }
 
-/// The three tokens `gpui-component` has no concept of (`docs/ui-base.html`
-/// §7): the unfocused selection, the row stripe, and the folder tint.
+/// The tokens `gpui-component` has no concept of (`docs/ui-base.html` §7):
+/// the two selection fills and the folder tint.
 ///
 /// Every token is defined for both themes — a token defined for only one is a
-/// bug. Values mirror `docs/ui-base.html`'s `--app-selected-idle`,
-/// `--app-row-alt` and `--app-folder`.
+/// bug. Values mirror `docs/ui-base.html`'s `--app-selected`,
+/// `--app-selected-idle` and `--app-folder`.
 #[derive(Clone, Copy, Debug)]
 pub struct BrowserPalette {
+    /// Selected row fill while the pane has focus.
+    ///
+    /// Not `cx.theme().selection`: that token is the *text* highlight, and
+    /// the library clamps it to 30% alpha on the way in — so a row filled
+    /// with it comes out a wash of whatever is behind it, and the focused
+    /// selection ends up weaker than the idle one it is supposed to outrank.
+    pub selected: Hsla,
     /// Selected row fill when the file pane has lost focus.
     pub selected_idle: Hsla,
     /// Folder glyph tint; the one place colour carries meaning in the listing.
@@ -95,11 +163,13 @@ impl BrowserPalette {
         use gpui_component::Theme;
         if Theme::global(cx).mode.is_dark() {
             Self {
+                selected: hex(0x2f6bd4),
                 selected_idle: hex(0x33333c),
                 folder: hex(0x5aa6ff),
             }
         } else {
             Self {
+                selected: hex(0x0a6cff),
                 selected_idle: hex(0xe2e2e9),
                 folder: hex(0x4a9eff),
             }

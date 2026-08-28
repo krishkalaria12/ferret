@@ -265,14 +265,15 @@ impl Browser {
         favorite: Option<(usize, PathBuf)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let selected = crate::theme::BrowserPalette::resolve(cx).selected;
         let theme = cx.theme();
         let fg = if active {
-            crate::theme::text_on(theme.selection, theme.sidebar_foreground)
+            crate::theme::text_on(selected, theme.sidebar_foreground)
         } else {
             theme.sidebar_foreground
         };
 
-        let drop_tint = theme.selection.opacity(0.5);
+        let drop_tint = selected.opacity(0.5);
         let this = cx.weak_entity();
         let dragging = favorite
             .as_ref()
@@ -287,7 +288,7 @@ impl Browser {
             .gap(px(10.))
             .items_center()
             .flex_shrink_0()
-            .when(active, |el| el.bg(theme.selection))
+            .when(active, |el| el.bg(selected))
             .when(!active, |el| el.hover(|el| el.bg(theme.secondary)))
             .when(dragging, |el| el.opacity(0.6))
             // Every sidebar row is a folder, so every one is a drop target
