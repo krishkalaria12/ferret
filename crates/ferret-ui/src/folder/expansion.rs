@@ -98,7 +98,7 @@ impl Folder {
                     Err(_) => break,
                 }
             }
-            entries.sort_by(|a, b| cmp_entries(a, b, key, order));
+            entries.sort_unstable_by(|a, b| cmp_entries(a, b, key, order));
 
             let _ = this.update(cx, |folder, cx| {
                 if folder.generation != generation || !folder.expanded.contains(&parent) {

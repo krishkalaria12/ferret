@@ -188,6 +188,45 @@ fn filter_narrows_and_reports_misses() {
 }
 
 #[test]
+fn the_filter_reports_its_needle_back_verbatim() {
+    // The empty state names it — "No items match «PDF»" — so the compiled
+    // matcher must not be the only thing kept.
+    let mut f = populated();
+    f.set_filter(Some("PDF".into()));
+    assert_eq!(f.filter(), Some("PDF"));
+    f.set_filter(None);
+    assert_eq!(f.filter(), None);
+}
+
+#[test]
+fn a_non_ascii_needle_still_folds_case() {
+    // The aho-corasick fast path folds ASCII only, so anything else has to
+    // fall back rather than silently stop matching.
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortKey::Name,
+        SortOrder::Ascending,
+        true,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("Ärger.txt", EntryKind::File, 1, None),
+            entry("plain.txt", EntryKind::File, 1, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+
+    f.set_filter(Some("ärg".into()));
+    assert_eq!(row_names(&f), ["Ärger.txt"]);
+
+    // And an ASCII needle still reaches into a non-ASCII name.
+    f.set_filter(Some("TXT".into()));
+    assert_eq!(f.row_count(), 2);
+}
+
+#[test]
 fn shift_arrow_grows_and_shrinks_against_a_fixed_anchor() {
     let mut f = populated();
     f.set_show_hidden(true); // src, .hidden, report.pdf, zebra.txt
@@ -735,4 +774,53 @@ fn reindex_cost_on_a_large_listing() {
         f.rebuild_index_and_order();
     }
     println!("reindex: {:?} per pass", start.elapsed() / 10);
+}
+
+/// How long a Kind-header click and a filter keystroke cost on a large
+/// listing. A measurement, not an assertion — same role as
+/// [`reindex_cost_on_a_large_listing`].
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn sort_and_filter_cost_on_a_large_listing() {
+    const EXTS: [&str; 8] = ["txt", "rs", "png", "md", "toml", "json", "zip", "log"];
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortKey::Name,
+        SortOrder::Ascending,
+        true,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| {
+                entry(
+                    &format!("file-{i:06}.{}", EXTS[i as usize % EXTS.len()]),
+                    EntryKind::File,
+                    i,
+                    t(i),
+                )
+            })
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+
+    let start = std::time::Instant::now();
+    for i in 0..6 {
+        let order = if i % 2 == 0 {
+            SortOrder::Ascending
+        } else {
+            SortOrder::Descending
+        };
+        f.sort_order = order;
+        f.sort_key = SortKey::Kind;
+        f.resort();
+    }
+    println!("kind sort: {:?} per click", start.elapsed() / 6);
+
+    let start = std::time::Instant::now();
+    for needle in ["f", "fi", "fil", "file", "file-1", "file-12"] {
+        f.set_filter(Some(needle.to_string()));
+    }
+    println!("filter: {:?} per keystroke", start.elapsed() / 6);
 }

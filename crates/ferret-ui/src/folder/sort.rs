@@ -4,7 +4,58 @@
 //! Both re-derive the display order rather than moving rows, which is what
 //! lets an id-keyed selection survive them (see the module header).
 
+use aho_corasick::AhoCorasick;
+use rayon::slice::ParallelSliceMut as _;
+
 use super::*;
+
+/// Above this many entries, sorting goes parallel.
+///
+/// A 200,000-entry directory is ~3.4 million comparisons and is embarrassingly
+/// parallel; a few thousand is not worth waking a pool for. The threshold is a
+/// guess at where the hand-off stops costing more than the sort — it is safe
+/// to be wrong by a factor of two in either direction.
+const PARALLEL_SORT_THRESHOLD: usize = 20_000;
+
+/// The inline name filter, compiled once per keystroke.
+///
+/// The needle is kept because the empty state names it back ("No items match
+/// «x»"); the matcher is what runs. Filtering used to lowercase the needle
+/// *and* every name into fresh `String`s once per entry — roughly 400,000
+/// allocations for one keystroke on a large directory, and the field fires on
+/// every keystroke (A-13).
+pub(super) struct NameFilter {
+    needle: String,
+    /// `None` when the needle is not ASCII. `ascii_case_insensitive` folds
+    /// only ASCII, so a needle containing `Ä` would silently stop matching
+    /// `ärger`, which is a behaviour change and not a speed-up. Those fall
+    /// back to the old lowercase-both-sides path, which is correct and rare.
+    matcher: Option<AhoCorasick>,
+}
+
+impl NameFilter {
+    pub(super) fn new(needle: String) -> Self {
+        let matcher = needle.is_ascii().then(|| {
+            AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build([needle.as_bytes()])
+                .expect("a single pattern always builds")
+        });
+        Self { needle, matcher }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match &self.matcher {
+            // SIMD, over the name's bytes, with no allocation on either side.
+            Some(matcher) => matcher.is_match(name),
+            None => name.to_lowercase().contains(&self.needle.to_lowercase()),
+        }
+    }
+
+    pub(super) fn needle(&self) -> &str {
+        &self.needle
+    }
+}
 
 impl Folder {
     // ------------------------------------------------------------------
@@ -41,7 +92,8 @@ impl Folder {
     }
 
     pub fn set_filter(&mut self, filter: Option<String>) {
-        self.filter = filter;
+        // Built once here, not once per entry: this is the whole of A-13.
+        self.filter = filter.map(NameFilter::new);
         if !self.loading {
             self.rebuild_order();
         }
@@ -97,12 +149,11 @@ impl Folder {
         if n == 0 || prefix.is_empty() {
             return false;
         }
-        let prefix = prefix.to_lowercase();
         for step in 0..n {
             let row = (from + step) % n;
             let matches = self
                 .entry_at(row)
-                .is_some_and(|e| e.name().to_lowercase().starts_with(&prefix));
+                .is_some_and(|e| crate::format::starts_with_ignore_case(e.name(), prefix));
             if matches {
                 self.select_only(row);
                 return true;
@@ -116,7 +167,17 @@ impl Folder {
         // Taken out so the comparator can read the slab while the id vector is
         // mutable. Sorting now permutes `u32`s, not `Entry`s.
         let mut ids = std::mem::take(&mut self.entries);
-        ids.sort_by(|a, b| self.cmp_ids(*a, *b, key, order));
+        // The comparator closes over the slab rather than over `self`: a
+        // `Folder` holds GPUI tasks and is not `Sync`, but a slice of entries
+        // is. Unstable, because the comparator ends in a name tiebreak and
+        // names are unique within one directory — so the order is total and
+        // stability buys nothing but an n/2 scratch buffer.
+        let slab: &[Option<Entry>] = &self.slab;
+        if ids.len() >= PARALLEL_SORT_THRESHOLD {
+            ids.par_sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order));
+        } else {
+            ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order));
+        }
         self.entries = ids;
         self.rebuild_index_and_order();
     }
@@ -126,11 +187,7 @@ impl Folder {
         self.rebuild_index_and_order();
     }
 
-    /// Compare two loaded entries by id.
-    ///
-    /// A missing slot sorts last. That cannot happen for ids drawn from
-    /// `entries`, but it keeps the ordering total, which a comparator handed
-    /// to `sort_by` has to be.
+    /// [`cmp_slots`] against this folder's own slab.
     pub(super) fn cmp_ids(
         &self,
         a: EntryId,
@@ -138,12 +195,7 @@ impl Folder {
         key: SortKey,
         order: SortOrder,
     ) -> std::cmp::Ordering {
-        match (self.entry(a), self.entry(b)) {
-            (Some(a), Some(b)) => cmp_entries(a, b, key, order),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
+        cmp_slots(&self.slab, a, b, key, order)
     }
 
     /// Where `id` belongs in the sorted top-level listing.
@@ -220,10 +272,31 @@ impl Folder {
         if !self.show_hidden && e.is_hidden() {
             return false;
         }
-        if let Some(f) = &self.filter {
-            return e.name().to_lowercase().contains(&f.to_lowercase());
+        if let Some(filter) = &self.filter {
+            return filter.matches(e.name());
         }
         true
+    }
+}
+
+/// Compare two slab slots by id.
+///
+/// A missing slot sorts last. That cannot happen for ids drawn from `entries`,
+/// but it keeps the ordering total, which a comparator handed to `sort_by`
+/// has to be.
+fn cmp_slots(
+    slab: &[Option<Entry>],
+    a: EntryId,
+    b: EntryId,
+    key: SortKey,
+    order: SortOrder,
+) -> std::cmp::Ordering {
+    let slot = |id: EntryId| slab.get(id.0 as usize).and_then(Option::as_ref);
+    match (slot(a), slot(b)) {
+        (Some(a), Some(b)) => cmp_entries(a, b, key, order),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 

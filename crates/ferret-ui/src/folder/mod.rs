@@ -202,7 +202,7 @@ pub struct Folder {
     sort_key: SortKey,
     sort_order: SortOrder,
     show_hidden: bool,
-    filter: Option<String>,
+    filter: Option<sort::NameFilter>,
 
     selection: FastSet<EntryId>,
     /// Selected paths in display order. This is kept separately from
@@ -390,7 +390,7 @@ impl Folder {
     }
 
     pub fn filter(&self) -> Option<&str> {
-        self.filter.as_deref()
+        self.filter.as_ref().map(sort::NameFilter::needle)
     }
 
     /// Whether the row at `row` is in the selection.

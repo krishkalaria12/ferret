@@ -124,6 +124,34 @@ pub fn natural_compare(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Whether `name` begins with `prefix`, ignoring case, without allocating.
+///
+/// Type-ahead and path completion both ask this once per entry per keystroke,
+/// and both used to answer it by lowercasing both sides into fresh `String`s —
+/// ~400,000 allocations per character typed in a large directory (A-13).
+///
+/// The ASCII path is a byte compare. The general path folds both sides lazily
+/// through `char::to_lowercase`, which is exactly what `to_lowercase()` does
+/// minus the two strings it built to do it — so a name with an ß or an İ in it
+/// still matches what it matched before.
+pub fn starts_with_ignore_case(name: &str, prefix: &str) -> bool {
+    if name.is_ascii() && prefix.is_ascii() {
+        return name.len() >= prefix.len()
+            && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes());
+    }
+
+    let mut wanted = prefix.chars().flat_map(char::to_lowercase);
+    let mut have = name.chars().flat_map(char::to_lowercase);
+    loop {
+        match (wanted.next(), have.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(a), Some(b)) if a == b => {}
+            _ => return false,
+        }
+    }
+}
+
 fn digit_run_end(s: &str, from: usize) -> usize {
     s[from..]
         .find(|c: char| !c.is_ascii_digit())
@@ -230,6 +258,24 @@ mod tests {
         );
         assert_eq!(natural_compare("a1b", "a1b"), std::cmp::Ordering::Equal);
         assert_eq!(natural_compare("2", "10"), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn case_insensitive_prefixes_match_what_lowercasing_did() {
+        assert!(starts_with_ignore_case("Documents", "doc"));
+        assert!(starts_with_ignore_case("documents", "DOC"));
+        assert!(starts_with_ignore_case("Documents", ""));
+        assert!(starts_with_ignore_case("Doc", "Doc"), "the whole name");
+        assert!(!starts_with_ignore_case("Documents", "down"));
+        assert!(!starts_with_ignore_case("Doc", "Documents"), "too short");
+
+        // The non-ASCII path has to fold the same way `to_lowercase` did,
+        // which is why it is a fold rather than a byte compare.
+        assert!(starts_with_ignore_case("Ärger", "är"));
+        assert!(starts_with_ignore_case("Ünicode.txt", "ÜNI"));
+        assert!(!starts_with_ignore_case("Ärger", "arg"));
+        // An ASCII needle against a non-ASCII name still takes the fold path.
+        assert!(starts_with_ignore_case("Ärger", ""));
     }
 
     #[test]

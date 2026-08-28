@@ -107,11 +107,11 @@ impl Browser {
         let fs = cx.global::<FerretState>().fs;
         cx.spawn(async move |this, cx| {
             let mut stream = fs.read_dir(&VfsPath::local(dir));
-            let wanted = prefix.to_lowercase();
+            let wanted = prefix.as_str();
             let mut matches = Vec::with_capacity(MAX_COMPLETIONS);
             'listing: while let Some(Ok(batch)) = futures::StreamExt::next(&mut stream).await {
                 for entry in batch {
-                    if !matches_completion(&entry, &wanted) {
+                    if !matches_completion(&entry, wanted) {
                         continue;
                     }
                     if let Some(path) = entry.path.as_local().map(Path::to_path_buf) {
@@ -411,10 +411,9 @@ fn completion_target(text: &str) -> Option<(PathBuf, String)> {
 /// unless the prefix reaches for them explicitly.
 #[cfg(test)]
 fn matching_directories(entries: &[ferret_vfs::Entry], prefix: &str) -> Vec<PathBuf> {
-    let wanted = prefix.to_lowercase();
     let mut hits: Vec<&ferret_vfs::Entry> = entries
         .iter()
-        .filter(|e| matches_completion(e, &wanted))
+        .filter(|e| matches_completion(e, prefix))
         .collect();
     hits.sort_by(|a, b| crate::format::natural_compare(a.name(), b.name()));
     hits.into_iter()
@@ -426,7 +425,7 @@ fn matching_directories(entries: &[ferret_vfs::Entry], prefix: &str) -> Vec<Path
 fn matches_completion(entry: &ferret_vfs::Entry, wanted: &str) -> bool {
     entry.is_dir_like()
         && (!entry.is_hidden() || wanted.starts_with('.'))
-        && entry.name().to_lowercase().starts_with(wanted)
+        && crate::format::starts_with_ignore_case(entry.name(), wanted)
 }
 
 /// `~` and `~/…` expand against the home directory; everything else is taken
