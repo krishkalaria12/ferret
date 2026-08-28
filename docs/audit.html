@@ -589,7 +589,7 @@ footer {
     <div><dt>Correctness bugs</dt><dd>3</dd></div>
     <div><dt>New decisions</dt><dd>D-33 … D-38</dd></div>
     <div><dt>Method</dt><dd>Static reading</dd></div>
-    <div><dt>New dependencies</dt><dd>One (<code>jwalk</code>)</dd></div>
+    <div><dt>New dependencies</dt><dd>7 free · 4 new</dd></div>
   </dl>
 </header>
 
@@ -1401,12 +1401,15 @@ self.rebuild_index_and_order();   <span class="c">// the index is only repaired 
 <section id="libraries">
   <span class="sec-tag">§9</span>
   <h2>Libraries worth adopting</h2>
-  <p class="sec-intro">Almost every crate that would help is <em>already compiled into this workspace</em> as a transitive dependency of GPUI. Using them is not adding a dependency — it is declaring an edge to something already in <code>Cargo.lock</code> and already in the build.</p>
+  <p class="sec-intro">Adding crates is fine. Some are more than fine — most of what would help here is <em>already compiled into this workspace</em> as a transitive dependency of GPUI, so declaring an edge to it costs nothing at all: no new maintainer to trust, no new audit surface, no extra second of cold build.</p>
 
-  <p>That changes the calculus completely. The dependency policy in <code>AGENTS.md</code> is
-  rightly conservative, but its concern is supply-chain weight and build time, and neither
-  applies to a crate the linker is already pulling in. Of everything below, exactly one —
-  <code>jwalk</code> — is genuinely new.</p>
+  <p>So the section runs in three parts. First <b>seven free ones</b> — already in
+  <code>Cargo.lock</code>, most pulled directly by <code>gpui</code>, where the only question
+  is whether the swap is worth the diff. Then <b>four genuinely new ones</b>:
+  <code>jwalk</code> for the metadata tier, and three measurement crates that make §11's
+  budgets real instead of hand-rolled. Then <b>what to leave alone</b> — those rejections are
+  on merit rather than on dependency cost, so they stand unchanged now that adding is
+  unrestricted.</p>
 
   <div class="scroller">
   <table class="wide">
@@ -1470,14 +1473,18 @@ self.widths.lock().ok().and_then(|w| w.get(&amp;column).copied())</code></pre>
   name-keying (~15-byte keys) cuts the input by four again.</p>
   <div class="note">
     <strong>Two caveats, both real</strong>
-    <p><b>Version split.</b> The lock has <code>rustc-hash 1.1.0</code>. Declaring
-    <code>rustc-hash = "2"</code> would compile a <em>second</em> copy rather than unify —
-    pin <code>"1"</code> to reuse what is there, or accept the duplicate deliberately.
-    <b>Adversarial keys.</b> Local paths are the user's own, but Phase 7's S3 and WebDAV mounts
-    return keys chosen by a remote server. Use Fx for the local indices and keep a seeded
-    hasher (<code>foldhash</code>, already in the lock) for anything keyed on remote-derived
-    names — or just use <code>foldhash</code> everywhere and take a smaller win with no
-    caveat at all. That is the option I would pick.</p>
+    <p><b>Version split.</b> The lock has <code>rustc-hash 1.1.0</code> (via Zed's
+    <code>collections</code>). Declaring <code>rustc-hash = "2"</code> compiles a
+    <em>second</em> copy rather than unifying. That is a real duplicate but a trivial one —
+    the crate is a few hundred lines with no dependencies — and 2.x's <code>FxHasher</code> is
+    meaningfully better than 1.1's on longer keys. Take the duplicate; do not contort the
+    version to avoid it.
+    <b>Adversarial keys.</b> This is the caveat that actually matters. Local paths are the
+    user's own, but Phase 7's S3 and WebDAV mounts return keys chosen by a remote server, and
+    Fx is trivially collidable on purpose. Either use Fx for the local indices only and a
+    seeded hasher for anything keyed on remote-derived names — or use <code>foldhash</code>
+    everywhere and take a slightly smaller win with no caveat and no duplicate at all. That is
+    still the option I would pick.</p>
   </div>
 
   <h3><code>SharedString</code> is better than the <code>Arc&lt;str&gt;</code> D-35 asked for</h3>
@@ -1546,14 +1553,82 @@ matcher.is_match(entry.name())</code></pre>
   D-33 constructs, so the sort and the walker share one set of workers rather than each
   sizing itself to the core count.</p>
 
+  <h3>The four new ones</h3>
+  <p>These are not in the lock. Each is here because it does a job nothing already present
+  does, and three of the four are development-only — feature-gated or
+  <code>[dev-dependencies]</code>, so none of them ships in the binary a user runs.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Genuinely new dependencies</caption>
+    <thead><tr><th class="key">Crate</th><th>Job</th><th>Where it lives</th><th>Brings with it</th></tr></thead>
+    <tbody>
+      <tr><td class="key">jwalk</td><td>Parallel metadata resolution during the walk (D-33), parallel tree copy and delete (D-34)</td><td><code>ferret-vfs</code>, shipped</td><td><code>crossbeam-channel</code> (new), <code>rayon</code> (already here)</td></tr>
+      <tr><td class="key">tracy-client</td><td>Frame-level spans, through GPUI's <em>existing</em> instrumentation</td><td><code>ferret</code>, behind a feature</td><td>Nothing at runtime unless the feature is on</td></tr>
+      <tr><td class="key">dhat</td><td>§11's allocation-per-frame budget, as an assertion rather than an eyeball</td><td><code>[dev-dependencies]</code> + feature</td><td>Nothing shipped</td></tr>
+      <tr><td class="key">divan</td><td>A real harness for the three budgets <code>xtask</code> currently hand-rolls</td><td><code>[dev-dependencies]</code></td><td>Nothing shipped</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h4>tracy-client is nearly free, because the instrumentation already exists</h4>
+  <p>This is the find of the section. <code>profiling 1.0.18</code> is in the lock, pulled
+  <b>directly by <code>gpui</code></b> (and by <code>wgpu</code> beneath it). The
+  <code>profiling</code> crate is a facade: the <code>scope!</code> macros compile to nothing
+  until a backend feature is turned on, and GPUI's render pipeline is <em>already sprinkled
+  with them</em>.</p>
+  <p>So enabling <code>profiling/profile-with-tracy</code> and adding
+  <code>tracy-client</code> gives you GPUI's own frame, layout and paint spans without writing
+  a line of instrumentation — and Ferret's own <code>profiling::scope!</code> calls slot into
+  the same timeline. For a document whose top three findings are all "this runs once per row
+  per frame", that is exactly the instrument required, and it turns §3 from arithmetic into a
+  flame graph.</p>
+  <div class="note">
+    <strong>Pick the backend deliberately</strong>
+    <p><code>tracy-client</code> needs the external Tracy profiler application, which is a
+    superb tool and an extra thing to install. <code>puffin</code> is self-contained and
+    renders in-process, which is friendlier for contributors but far less capable. Either is a
+    one-line feature swap since both sit behind the same <code>profiling</code> facade — so
+    this is not a decision that has to be got right first time, which is the best kind.</p>
+  </div>
+
+  <h4>dhat turns §11's third budget from a number into a test</h4>
+  <p>§11 proposes an allocations-per-frame measurement and suggests hand-rolling a counting
+  global allocator. <code>dhat</code> already is one, with a better story:</p>
+<pre><code><span class="c">// behind a feature, never in a release build</span>
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+let _p = dhat::Profiler::builder().testing().build();
+scripted_scroll_of_flat_with_everything_selected();
+let stats = dhat::HeapStats::get();
+<span class="c">// the budget, as an assertion CI can fail on</span>
+assert!(stats.total_blocks &lt; BUDGET, "{} allocations per frame", ...);</code></pre>
+  <p>The difference between a printed number and a failing assertion is the difference between
+  a regression someone notices and a regression someone ships. A-01, A-02 and A-08 all leave
+  wall-clock timings on a fast machine essentially untouched; none of them survives an
+  allocation assertion.</p>
+
+  <h4>divan for the budgets themselves</h4>
+  <p><code>xtask bench</code> currently times one run and compares against a constant, which is
+  honest but noisy — it is why <code>FIRST_ROW_BUDGET</code> had to be set at 50 ms to catch a
+  0.3 ms operation "in kind rather than machine-to-machine variation" (xtask/config.rs:47–52).
+  A real harness gives distributions instead, which lets the budgets tighten enough to catch a
+  2× regression rather than only a 100× one. <code>divan</code> is the light option;
+  <code>criterion</code> is the thorough one and costs noticeably more build time. Either is
+  fine — <code>divan</code> is the one I would reach for on a workspace that already takes a
+  long time to compile.</p>
+
   <h3>What not to add</h3>
+  <p>These rejections are on merit. None of them was a dependency-budget call, so none of them
+  changes now that adding crates is unrestricted.</p>
   <div class="scroller">
   <table>
     <caption>Rejected, with the reason</caption>
     <thead><tr><th class="key">Crate</th><th>Why not</th></tr></thead>
     <tbody>
       <tr><td class="key">dashmap</td><td>Sharded concurrent maps solve write contention. Ferret has none — the model is single-writer on the UI thread, and the icon cache has one background writer. <code>ArcSwap</code> is the correct tool and is already in the lock.</td></tr>
-      <tr><td class="key">mimalloc / jemalloc</td><td>Genuinely faster than macOS's system allocator under multithreaded churn, and a one-line change. But it is a <em>multiplier on a problem you should be deleting</em>: swapping the allocator before step 2 of §12 would mask A-01, A-02 and A-08 rather than reveal them. Revisit after the allocation counter is flat, and only if it measures.</td></tr>
+      <tr><td class="key">mimalloc / jemalloc</td><td><b>Not yet</b>, rather than no. Genuinely faster than macOS's system allocator under multithreaded churn, and a one-line change — but it is a <em>multiplier on a problem you should be deleting</em>. Adopt it before step 2 of §12 and it masks A-01, A-02 and A-08 instead of revealing them, and the <code>dhat</code> budget above becomes much harder to reason about. Revisit once the allocation count is flat; then it is a free win on what remains.</td></tr>
       <tr><td class="key">simd-json / sonic-rs</td><td>The settings file is tiny and the prefs file is written once per navigation — which is A-09, a scheduling bug, not a parsing one. Fix the scheduling and the parse cost disappears with it.</td></tr>
       <tr><td class="key">compact_str</td><td>Solves exactly what <code>smol_str</code> already solves, and <code>smol_str</code> is what <code>SharedString</code> is built on. Two small-string types would be worse than one.</td></tr>
       <tr><td class="key">crossbeam-channel</td><td>Not in the lock today; <code>jwalk</code> will bring it. <code>async-channel</code> is the right choice for the listing stream because the consumer is async — A-10 is about batching, not about the channel.</td></tr>
@@ -1574,19 +1649,23 @@ matcher.is_match(entry.name())</code></pre>
   </div>
 
   <div class="dec">
-    <h4><span class="did">D-38</span> Prefer the performance crates GPUI already brings. Justify anything that is not already in the lock.</h4>
-    <p><code>parking_lot</code> for locks, <code>rustc-hash</code> or <code>foldhash</code> for
-    internal indices, <code>SharedString</code> for names, <code>smallvec</code> for bounded
-    collections, <code>arc-swap</code> for read-mostly caches, <code>aho-corasick</code> for
-    text matching, <code>rayon</code> for data parallelism. None of these adds a package to the
-    build. Adding a crate that is <em>not</em> already in <code>Cargo.lock</code> — as
-    <code>jwalk</code> is not — needs the same justification the existing dependency policy
-    demands, stated in the commit that adds it.</p>
+    <h4><span class="did">D-38</span> Take the crates that are already in the lock without debate. Give the new ones a stated job and the narrowest scope that does it.</h4>
+    <p><b>Free, adopt now:</b> <code>parking_lot</code> for locks,
+    <code>rustc-hash</code> or <code>foldhash</code> for internal indices,
+    <code>SharedString</code> for names, <code>smallvec</code> for bounded collections,
+    <code>arc-swap</code> for read-mostly caches, <code>aho-corasick</code> for text matching,
+    <code>rayon</code> for data parallelism. Seven crates, zero packages added to the build —
+    there is nothing to weigh.</p>
+    <p><b>New, and worth it:</b> <code>jwalk</code> ships;
+    <code>tracy-client</code> sits behind a feature; <code>dhat</code> and <code>divan</code>
+    are <code>[dev-dependencies]</code>. Scope each so it cannot leak into a release binary,
+    and say in the commit what job it does — not as a gate to pass, but so the next person
+    knows what would justify removing it again.</p>
     <div class="because"><b>Because</b>
-    The workspace already compiles 870 packages. The marginal cost of an edge to one of them is
-    a line in a manifest; the marginal cost of a new one is a new maintainer to trust, a new
-    audit surface and a slower cold build. Those are different decisions and should not be made
-    with the same shrug.</div>
+    The workspace already compiles 870 packages, so the marginal cost of one more is small and
+    the marginal cost of an edge to one already present is zero. What is <em>not</em> free is a
+    dependency nobody can later delete because nobody recorded what it was for. Write the job
+    down; that is the whole discipline.</div>
   </div>
 </section>
 
@@ -1674,12 +1753,21 @@ matcher.is_match(entry.name())</code></pre>
         <td class="id">A-04 · A-05 · A-06</td>
       </tr>
       <tr>
-        <td><b>Allocations per rendered frame</b> — a counting global allocator behind a feature flag, around a scripted scroll of <code>flat/</code> with everything selected.</td>
-        <td>The whole of §3 is invisible to a wall-clock benchmark on a fast machine and glaring in an allocation count. This is the one number that would have caught A-01 and A-02 the day they were written.</td>
+        <td><b>Allocations per rendered frame</b> — <code>dhat</code> behind a feature flag (§9), around a scripted scroll of <code>flat/</code> with everything selected, asserted rather than printed.</td>
+        <td>The whole of §3 is invisible to a wall-clock benchmark on a fast machine and glaring in an allocation count. This is the one number that would have caught A-01 and A-02 the day they were written — and as a <code>dhat</code> assertion it fails CI instead of scrolling past in a log.</td>
         <td class="id">A-01 · A-02 · A-07 · A-08 · A-19 · A-20 · A-21</td>
       </tr>
     </tbody>
   </table>
+  </div>
+
+  <div class="note ok">
+    <strong>And one thing to turn on before any of it</strong>
+    <p><code>gpui</code> is already instrumented with the <code>profiling</code> facade
+    (§9). Enabling a backend costs one feature flag and gives frame, layout and paint spans
+    through GPUI's own pipeline — so §3's findings stop being arithmetic and start being a
+    flame graph you can point at. Do this first; it will change which of the twenty-six you
+    care about most, and it may well disagree with my ordering.</p>
   </div>
 
   <div class="note">
@@ -1696,6 +1784,12 @@ matcher.is_match(entry.name())</code></pre>
   <span class="sec-tag">§12</span>
   <h2>The order to do this in</h2>
   <p class="sec-intro">Sequenced so each step is independently shippable and the app runs at the end of every one. Steps 1 and 2 are worth doing before Phase 2 starts; the rest can interleave with it.</p>
+
+  <p><b>Before step 1:</b> turn on the <code>profiling</code> backend (§9) and stand up the
+  <code>dhat</code> allocation budget (§11). Both are an afternoon, neither changes any
+  behaviour, and together they mean every step below lands with a number attached instead of
+  an argument. It is also the only honest way to check whether my ordering is right — see
+  §13.</p>
 
   <div class="step">
     <span class="pn">1</span>
