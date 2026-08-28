@@ -3,13 +3,29 @@
 
 use super::*;
 
-/// The rounded housing both segmented groups sit in.
+/// The rounded housing every toolbar group sits in.
 fn segmented_group(theme: &gpui_component::Theme) -> gpui::Div {
-    h_flex()
-        .p(px(2.))
-        .gap(px(2.))
-        .rounded(px(8.))
-        .bg(theme.secondary.opacity(0.7))
+    holds_pointer(
+        h_flex()
+            .flex_shrink_0()
+            .p(px(2.))
+            .gap(px(2.))
+            .rounded(px(8.))
+            .bg(theme.secondary.opacity(0.7)),
+    )
+}
+
+/// Swallow the press so the title bar's own window gestures don't fire under
+/// a control.
+///
+/// `TitleBar` puts a window drag and a double-click-to-zoom on its whole
+/// width, and `gpui-component`'s `Button` doesn't stop propagation — so
+/// double-clicking a toolbar button zooms the window, and nudging the pointer
+/// mid-press drags it. Mouse events bubble innermost-first, so the button has
+/// already had the press by the time this runs; only the bar behind it loses
+/// it, which is the point.
+fn holds_pointer(el: gpui::Div) -> gpui::Div {
+    el.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 impl Browser {
@@ -27,6 +43,12 @@ impl Browser {
         // discarded. The reference fills the active segment in the accent
         // colour, which is the only thing making the group a control rather
         // than three loose buttons.
+        //
+        // The segments call `set_view_mode` outright rather than dispatching
+        // the action they mirror: `App::dispatch_action` re-enters the active
+        // window, which is already borrowed inside a click handler, and it
+        // logs that failure instead of surfacing it — so the buttons did
+        // nothing at all. The keybindings still route through the actions.
         let view_group = segmented_group(theme)
             .child(
                 segment_button(
@@ -35,8 +57,8 @@ impl Browser {
                     "List",
                     mode == ViewMode::List,
                 )
-                .on_click(cx.listener(|_, _, _, cx| {
-                    cx.dispatch_action(&actions::ViewAsList);
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_view_mode(ViewMode::List, window, cx);
                 })),
             )
             .child(
@@ -46,8 +68,8 @@ impl Browser {
                     "Columns",
                     mode == ViewMode::Columns,
                 )
-                .on_click(cx.listener(|_, _, _, cx| {
-                    cx.dispatch_action(&actions::ViewAsColumns);
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_view_mode(ViewMode::Columns, window, cx);
                 })),
             )
             .child(
@@ -57,8 +79,8 @@ impl Browser {
                     "Icons",
                     mode == ViewMode::Icons,
                 )
-                .on_click(cx.listener(|_, _, _, cx| {
-                    cx.dispatch_action(&actions::ViewAsIcons);
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_view_mode(ViewMode::Icons, window, cx);
                 })),
             );
 
@@ -77,6 +99,77 @@ impl Browser {
             .child(
                 tool_button("nav-up", toolbar_icon::UP, "Enclosing Folder")
                     .on_click(cx.listener(|this, _, window, cx| this.go_up(window, cx))),
+            );
+
+        // Everything that acts on the open folder, housed the same way the
+        // nav and view groups are — six loose glyphs floating at the right
+        // edge read as debris rather than as a toolbar.
+        let action_group = segmented_group(theme)
+            .child(
+                tool_button("new-file", toolbar_icon::NEW_FILE, "New File")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
+            )
+            .child(
+                tool_button("new-folder", toolbar_icon::NEW_FOLDER, "New Folder")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx))),
+            )
+            .child(
+                tool_button(
+                    "toggle-hidden",
+                    if show_hidden {
+                        toolbar_icon::HIDDEN_ON
+                    } else {
+                        toolbar_icon::HIDDEN_OFF
+                    },
+                    if show_hidden {
+                        "Hide Hidden Files"
+                    } else {
+                        "Show Hidden Files"
+                    },
+                )
+                .selected(show_hidden)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
+            )
+            .child(
+                tool_button("refresh", toolbar_icon::REFRESH, "Refresh")
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+            )
+            .child(
+                tool_button(
+                    "theme",
+                    if dark {
+                        toolbar_icon::SUN
+                    } else {
+                        toolbar_icon::MOON
+                    },
+                    "Toggle Light/Dark",
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
+            )
+            // A hairline before the overflow menu: it opens a list rather
+            // than doing something, so it is the one member of the group
+            // that is not a peer of the rest.
+            .child(
+                div()
+                    .w(px(1.))
+                    .h(px(16.))
+                    .mx(px(3.))
+                    .flex_shrink_0()
+                    .bg(theme.border),
+            )
+            .child(
+                Button::new("more-menu")
+                    .ghost()
+                    .with_size(px(TOOLBAR_BUTTON_SIZE))
+                    .icon(Icon::new(gpui_component::IconName::EllipsisVertical))
+                    .dropdown_menu(|menu, _, _| {
+                        menu.menu("Select All", Box::new(actions::SelectAll))
+                            .menu("Paste", Box::new(actions::Paste))
+                            .separator()
+                            .menu("Show Hidden Files", Box::new(actions::ToggleHidden))
+                            .separator()
+                            .menu("Add Folder to Favorites", Box::new(actions::AddToFavorites))
+                    }),
             );
 
         TitleBar::new().h(px(super::TITLE_BAR_HEIGHT)).child(
@@ -118,60 +211,7 @@ impl Browser {
                 .child(div().flex_1())
                 .child(view_group)
                 .child(div().flex_1())
-                .child(
-                    tool_button("new-file", toolbar_icon::NEW_FILE, "New File")
-                        .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
-                )
-                .child(
-                    tool_button("new-folder", toolbar_icon::NEW_FOLDER, "New Folder")
-                        .on_click(cx.listener(|this, _, window, cx| this.new_folder(window, cx))),
-                )
-                .child(
-                    tool_button(
-                        "toggle-hidden",
-                        if show_hidden {
-                            toolbar_icon::HIDDEN_ON
-                        } else {
-                            toolbar_icon::HIDDEN_OFF
-                        },
-                        if show_hidden {
-                            "Hide Hidden Files"
-                        } else {
-                            "Show Hidden Files"
-                        },
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_hidden(cx))),
-                )
-                .child(
-                    tool_button("refresh", toolbar_icon::REFRESH, "Refresh")
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                )
-                .child(
-                    tool_button(
-                        "theme",
-                        if dark {
-                            toolbar_icon::SUN
-                        } else {
-                            toolbar_icon::MOON
-                        },
-                        "Toggle Light/Dark",
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
-                )
-                .child(
-                    Button::new("more-menu")
-                        .ghost()
-                        .with_size(px(TOOLBAR_BUTTON_SIZE))
-                        .icon(Icon::new(gpui_component::IconName::EllipsisVertical))
-                        .dropdown_menu(|menu, _, _| {
-                            menu.menu("Select All", Box::new(actions::SelectAll))
-                                .menu("Paste", Box::new(actions::Paste))
-                                .separator()
-                                .menu("Show Hidden Files", Box::new(actions::ToggleHidden))
-                                .separator()
-                                .menu("Add Folder to Favorites", Box::new(actions::AddToFavorites))
-                        }),
-                ),
+                .child(action_group),
         )
     }
 }
