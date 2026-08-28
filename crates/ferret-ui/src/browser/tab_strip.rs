@@ -30,14 +30,27 @@ impl Browser {
                 let dragging = self.tab_drag == Some(ix);
                 let lefts = self.tab_lefts.clone();
                 let mut t = Tab::new()
+                    // `Tab` pads its label but not its prefix, so a bare icon
+                    // sits flush against the tab's rounded left edge and gets
+                    // clipped by it. The padding is ours to add, and the
+                    // folder takes the same tint it has in the path bar
+                    // rather than reading as chrome.
                     .prefix(
-                        div()
+                        h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .pl(px(8.))
                             .on_prepaint(move |bounds, _, _| {
                                 if let Some(slot) = lefts.lock().unwrap().get_mut(ix) {
                                     *slot = bounds.origin.x;
                                 }
                             })
-                            .child(Icon::default().path("icons/file/folder-base.svg")),
+                            .child(
+                                Icon::default()
+                                    .path("icons/file/folder-base.svg")
+                                    .size_4()
+                                    .text_color(BrowserTint::folder(cx)),
+                            ),
                     )
                     .label(title.to_string())
                     .when(dragging, |t| t.opacity(0.6));
