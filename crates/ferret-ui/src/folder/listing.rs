@@ -270,6 +270,26 @@ impl Folder {
 
     /// Turn watcher paths into row updates: one `probe` per path, applied in
     /// a single model update.
+    ///
+    /// Paths outside `self.dir` are dropped. That filter used to be dead code
+    /// dressed as a safeguard — the watch is `NonRecursive`, so events for an
+    /// expanded folder's children never arrived to be filtered. It is live
+    /// now: the registry keys on canonicalised paths, so a directory reached
+    /// through a symlink can deliver a sibling's event, and this is what keeps
+    /// that out.
+    ///
+    /// **Expanded subtrees are a snapshot, by design** (A-24). A folder opened
+    /// in place shows what it held when it was opened, and refreshes when it
+    /// is collapsed and reopened, or when the browsed directory reloads. The
+    /// registry made watching each one cheap enough to reconsider — one
+    /// subscription rather than one native stream — but not free: on macOS
+    /// `notify` restarts its whole FSEvents stream on every registration, and
+    /// every restart is a window where *other* watched directories lose
+    /// events (see `ferret_vfs::watch`). Paying that so a casually-opened
+    /// disclosure triangle stays live is the wrong trade. If expanded
+    /// subtrees ever need to be live, the fix is a recursive watch on
+    /// `self.dir` bounded by the expanded set — one registration, not one per
+    /// open row.
     fn start_watch_apply(&mut self, mut paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         let fs = cx.global::<crate::state::FerretState>().fs;
         let generation = self.generation;

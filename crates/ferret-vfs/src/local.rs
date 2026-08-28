@@ -596,6 +596,13 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// `LocalFs::watch` reaches a real backend watch.
+    ///
+    /// Polled with a deadline and retried rather than awaited: the registry
+    /// shares one backend stream, and registering a directory restarts it, so
+    /// a write landing inside another test's restart is genuinely lost (see
+    /// `watch.rs`). Blocking on `recv()` would report that as a hung test
+    /// suite rather than as the rare miss it is.
     #[cfg(unix)]
     #[test]
     fn watch_reports_changes() {
@@ -603,15 +610,26 @@ mod tests {
         let root = tempdir("watch");
         let watch = LocalFs::new().watch(&VfsPath::local(root.clone())).unwrap();
 
-        fs::write(root.join("x"), b"").unwrap();
+        for attempt in 0..20 {
+            let name = format!("x{attempt}");
+            fs::write(root.join(&name), b"").unwrap();
 
-        let event = smol::block_on(watch.events.recv()).unwrap();
-        let WatchEvent::Changed(paths) = event else {
-            panic!("expected Changed, got {event:?}");
-        };
-        assert!(paths.iter().any(|p| p.ends_with("x")), "{paths:?}");
-
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                while let Ok(event) = watch.events.try_recv() {
+                    let WatchEvent::Changed(paths) = event else {
+                        continue;
+                    };
+                    if paths.iter().any(|p| p.ends_with(&name)) {
+                        fs::remove_dir_all(&root).ok();
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         fs::remove_dir_all(&root).ok();
+        panic!("LocalFs::watch never reported a write");
     }
 }
 
