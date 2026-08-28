@@ -163,18 +163,13 @@ impl Vfs for LocalFs {
             let link_target = kind
                 .is_broken_symlink()
                 .then(|| fs::read_link(&local).ok())
-                .flatten();
+                .flatten()
+                .map(std::sync::Arc::from);
 
-            Ok(Entry {
-                path: owned.clone(),
-                name: local
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                kind,
-                metadata: Some(to_metadata(&md, &owned)),
-                link_target,
-            })
+            let name = local.file_name().unwrap_or_default().to_string_lossy();
+            Ok(Entry::new(owned.clone(), name, kind)
+                .with_metadata(Some(to_metadata(&md, &owned)))
+                .with_link_target(link_target))
         })
         .await
     }
@@ -184,7 +179,7 @@ impl Vfs for LocalFs {
         let owned = path.clone();
         smol::unblock(move || {
             fs::canonicalize(&local)
-                .map(VfsPath::Local)
+                .map(VfsPath::local)
                 .map_err(|source| VfsError::from_io("resolve", &owned, source))
         })
         .await
@@ -292,8 +287,9 @@ fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
     // `DirEntry::path` joins the parent and file name. Keep that allocation
     // alive for every path-dependent operation below rather than rebuilding it
     // for symlink resolution and broken-link reporting.
-    let path = VfsPath::Local(entry.path());
-    let name = entry.file_name().to_string_lossy().into_owned();
+    let path = VfsPath::local(entry.path());
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
     let local = path
         .as_local()
         .expect("a LocalFs directory entry always has a local path");
@@ -329,15 +325,12 @@ fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
     let link_target = kind
         .is_broken_symlink()
         .then(|| fs::read_link(local).ok())
-        .flatten();
+        .flatten()
+        .map(std::sync::Arc::from);
 
-    Entry {
-        path,
-        name,
-        kind,
-        metadata,
-        link_target,
-    }
+    Entry::new(path.clone(), name, kind)
+        .with_metadata(metadata)
+        .with_link_target(link_target)
 }
 
 fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
@@ -356,7 +349,7 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
 /// to contain a link back to `/` must not become a walk of the universe.
 fn copy_tree(src: &PathBuf, dst: &PathBuf) -> Result<()> {
     fn err(action: &'static str, path: &std::path::Path, source: std::io::Error) -> VfsError {
-        VfsError::from_io(action, &VfsPath::Local(path.to_path_buf()), source)
+        VfsError::from_io(action, &VfsPath::local(path), source)
     }
 
     let md = fs::symlink_metadata(src).map_err(|source| err("read", src, source))?;
@@ -426,7 +419,7 @@ mod tests {
             while let Some(item) = stream.next().await {
                 if let Ok(batch) = item {
                     for entry in batch {
-                        entries.insert(entry.name.clone(), entry);
+                        entries.insert(entry.name().to_string(), entry);
                     }
                 }
             }
@@ -453,7 +446,7 @@ mod tests {
         fs::write(root.join("a.txt"), b"hello").unwrap();
         fs::create_dir(root.join("sub")).unwrap();
 
-        let entries = collect(&LocalFs::new(), &VfsPath::Local(root.clone()));
+        let entries = collect(&LocalFs::new(), &VfsPath::local(root.clone()));
         assert_eq!(entries.len(), 2);
         assert_eq!(entries["a.txt"].kind, EntryKind::File);
         assert_eq!(entries["sub"].kind, EntryKind::Dir);
@@ -477,7 +470,7 @@ mod tests {
         let file = root.join("big.bin");
         fs::write(&file, vec![7u8; 10_000]).unwrap();
 
-        let got = smol::block_on(LocalFs::new().read(&VfsPath::Local(file), 128)).unwrap();
+        let got = smol::block_on(LocalFs::new().read(&VfsPath::local(file), 128)).unwrap();
         assert_eq!(got.len(), 128, "read must stop at the budget");
 
         fs::remove_dir_all(&root).ok();
@@ -490,7 +483,7 @@ mod tests {
         fs::write(&file, b"x").unwrap();
 
         let err =
-            smol::block_on(LocalFs::new().remove(&VfsPath::Local(file.clone()), RemoveMode::Trash))
+            smol::block_on(LocalFs::new().remove(&VfsPath::local(file.clone()), RemoveMode::Trash))
                 .unwrap_err();
         assert!(matches!(err, VfsError::Unsupported { .. }));
         assert!(file.exists(), "refusing must not have deleted the file");
@@ -508,7 +501,7 @@ mod tests {
         }
 
         smol::block_on(async {
-            let mut stream = LocalFs::new().read_dir(&VfsPath::Local(root.clone()));
+            let mut stream = LocalFs::new().read_dir(&VfsPath::local(root.clone()));
             assert!(stream.next().await.is_some());
             drop(stream); // the producer's next send fails and it returns
         });
@@ -526,7 +519,7 @@ mod tests {
 
         let batches: Vec<DirEntryBatch> = smol::block_on(async {
             LocalFs::new()
-                .read_dir(&VfsPath::Local(root.clone()))
+                .read_dir(&VfsPath::local(root.clone()))
                 .filter_map(|item| async move { item.ok() })
                 .collect()
                 .await
@@ -547,7 +540,7 @@ mod tests {
         let root = tempdir("symlink");
         std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).unwrap();
 
-        let entries = collect(&LocalFs::new(), &VfsPath::Local(root.clone()));
+        let entries = collect(&LocalFs::new(), &VfsPath::local(root.clone()));
         assert!(
             entries["dangling"].kind.is_broken_symlink(),
             "got {:?}",
@@ -563,7 +556,7 @@ mod tests {
         fs::write(root.join(".secret"), b"").unwrap();
         fs::write(root.join("plain"), b"").unwrap();
 
-        let entries = collect(&LocalFs::new(), &VfsPath::Local(root.clone()));
+        let entries = collect(&LocalFs::new(), &VfsPath::local(root.clone()));
         assert!(entries[".secret"].is_hidden());
         assert!(!entries["plain"].is_hidden());
 
@@ -581,16 +574,16 @@ mod tests {
         let fs_ = LocalFs::new();
         smol::block_on(async {
             fs_.copy(
-                &VfsPath::Local(src.clone()),
-                &VfsPath::Local(root.join("dst")),
+                &VfsPath::local(src.clone()),
+                &VfsPath::local(root.join("dst")),
             )
             .await
             .unwrap();
             // Refuse to overwrite.
             assert!(
                 fs_.copy(
-                    &VfsPath::Local(src.clone()),
-                    &VfsPath::Local(root.join("dst"))
+                    &VfsPath::local(src.clone()),
+                    &VfsPath::local(root.join("dst"))
                 )
                 .await
                 .is_err()
@@ -608,7 +601,7 @@ mod tests {
     fn watch_reports_changes() {
         use super::super::watch::WatchEvent;
         let root = tempdir("watch");
-        let watch = LocalFs::new().watch(&VfsPath::Local(root.clone())).unwrap();
+        let watch = LocalFs::new().watch(&VfsPath::local(root.clone())).unwrap();
 
         fs::write(root.join("x"), b"").unwrap();
 
@@ -654,7 +647,7 @@ mod link_target_tests {
         let by_name = |name: &str| {
             entries
                 .iter()
-                .find(|e| e.name == name)
+                .find(|e| e.name() == name)
                 .unwrap_or_else(|| panic!("{name} missing"))
                 .clone()
         };

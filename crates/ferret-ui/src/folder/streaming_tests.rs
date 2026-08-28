@@ -50,7 +50,7 @@ async fn streams_a_listing_into_rows(cx: &mut gpui::TestAppContext) {
     assert!(!loading, "loading must finish");
 
     // Dirs first, then natural name order.
-    let first = folder.read_with(cx, |f, _| f.entry_at(0).unwrap().name.clone());
+    let first = folder.read_with(cx, |f, _| f.entry_at(0).unwrap().name().to_string());
     assert_eq!(first, "subdir");
 
     fs::remove_dir_all(&root).ok();

@@ -103,7 +103,7 @@ impl Folder {
             let row = (from + step) % n;
             let matches = self
                 .entry_at(row)
-                .is_some_and(|e| e.name.to_lowercase().starts_with(&prefix));
+                .is_some_and(|e| e.name().to_lowercase().starts_with(&prefix));
             if matches {
                 self.select_only(row);
                 return true;
@@ -227,7 +227,7 @@ impl Folder {
             return false;
         }
         if let Some(f) = &self.filter {
-            return e.name.to_lowercase().contains(&f.to_lowercase());
+            return e.name().to_lowercase().contains(&f.to_lowercase());
         }
         true
     }
@@ -250,7 +250,7 @@ pub(super) fn cmp_entries(
     }
 
     let ord = match key {
-        SortKey::Name => crate::format::natural_compare(&a.name, &b.name),
+        SortKey::Name => crate::format::natural_compare(a.name(), b.name()),
         SortKey::Modified => {
             let av = a
                 .metadata
@@ -271,7 +271,7 @@ pub(super) fn cmp_entries(
             .path
             .extension()
             .cmp(&b.path.extension())
-            .then_with(|| crate::format::natural_compare(&a.name, &b.name)),
+            .then_with(|| crate::format::natural_compare(a.name(), b.name())),
     };
 
     let ord = match order {
@@ -280,5 +280,5 @@ pub(super) fn cmp_entries(
     };
 
     // Stable, sensible tiebreak so equal keys keep names findable.
-    ord.then_with(|| crate::format::natural_compare(&a.name, &b.name))
+    ord.then_with(|| crate::format::natural_compare(a.name(), b.name()))
 }

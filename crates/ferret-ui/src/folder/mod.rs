@@ -332,7 +332,7 @@ impl Folder {
     /// Every name in the browsed directory, for conflict-free "new file"
     /// naming. Children of expanded folders live elsewhere and cannot clash.
     pub fn entry_names(&self) -> std::collections::HashSet<String> {
-        self.entries.iter().map(|e| e.name.clone()).collect()
+        self.entries.iter().map(|e| e.name().to_string()).collect()
     }
 
     /// Whether the entry at `path` navigates like a directory.

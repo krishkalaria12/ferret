@@ -467,7 +467,7 @@ impl TableDelegate for ListDelegate {
                     } else {
                         theme.foreground
                     })
-                    .child(entry.name.clone());
+                    .child(gpui::SharedString::new(entry.name()));
 
                 cell = if broken {
                     cell.child(label.line_through())

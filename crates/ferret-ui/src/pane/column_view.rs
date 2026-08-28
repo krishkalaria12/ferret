@@ -305,7 +305,7 @@ impl FilePane {
                     .text_size(px(ROW_FONT_SIZE))
                     .text_color(text)
                     .when(broken, |label| label.line_through())
-                    .child(entry.name.clone()),
+                    .child(gpui::SharedString::new(entry.name())),
             )
             .when(entry.is_dir_like(), |row| {
                 row.child(
@@ -370,7 +370,7 @@ impl FilePane {
                     .text_size(px(12.5))
                     .text_center()
                     .text_color(theme.foreground)
-                    .child(entry.name.clone()),
+                    .child(gpui::SharedString::new(entry.name())),
             )
             .child(
                 div()
@@ -434,20 +434,13 @@ mod tests {
     use ferret_vfs::{Entry, EntryKind, Metadata};
 
     fn entry(name: &str, kind: EntryKind, len: u64) -> Entry {
-        Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind,
-            metadata: Some(Metadata {
-                len,
-                modified: Some(
-                    std::time::SystemTime::UNIX_EPOCH
-                        + std::time::Duration::from_secs(1_756_000_000),
-                ),
-                ..Default::default()
-            }),
-            link_target: None,
-        }
+        Entry::new(VfsPath::local(format!("/x/{name}")), name, kind).with_metadata(Some(Metadata {
+            len,
+            modified: Some(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_756_000_000),
+            ),
+            ..Default::default()
+        }))
     }
 
     #[test]

@@ -56,13 +56,49 @@ fn default_other() -> String {
 }
 
 /// Resolves entries to bundled SVG asset paths.
+///
+/// Values are complete asset paths, formatted once when the table is parsed.
+/// The mapping file stores bare icon names, but the file list asks this
+/// question once per row per frame, and `format!("icons/file/{name}.svg")` on
+/// that path is a heap allocation per row per frame for a string that is the
+/// same every time.
 #[derive(Debug, Default)]
 pub struct FileIcons {
-    by_name: HashMap<String, String>,
-    by_ext: HashMap<String, String>,
-    defaults: Defaults,
-    /// `icons/file/<name>.svg` prefix, materialised per lookup.
-    base: &'static str,
+    by_name: HashMap<String, gpui::SharedString>,
+    by_ext: HashMap<String, gpui::SharedString>,
+    defaults: ResolvedDefaults,
+}
+
+/// The kind fallbacks, as asset paths.
+#[derive(Debug)]
+struct ResolvedDefaults {
+    file: gpui::SharedString,
+    directory: gpui::SharedString,
+    symlink: gpui::SharedString,
+    other: gpui::SharedString,
+}
+
+impl Default for ResolvedDefaults {
+    fn default() -> Self {
+        Self::from(Defaults::default())
+    }
+}
+
+impl From<Defaults> for ResolvedDefaults {
+    fn from(d: Defaults) -> Self {
+        Self {
+            file: asset_path_for(&d.file),
+            directory: asset_path_for(&d.directory),
+            symlink: asset_path_for(&d.symlink),
+            other: asset_path_for(&d.other),
+        }
+    }
+}
+
+/// `icons/file/<name>.svg` — the one place the layout of an icon asset path
+/// is written down.
+fn asset_path_for(name: &str) -> gpui::SharedString {
+    gpui::SharedString::new(format!("icons/file/{name}.svg"))
 }
 
 static ICONS: OnceLock<FileIcons> = OnceLock::new();
@@ -117,11 +153,16 @@ impl FileIcons {
         ICONS.get_or_init(|| {
             let parsed: Mapping =
                 serde_json::from_str(&crate::assets::file_icons_json()).unwrap_or_default();
+            let resolve = |table: HashMap<String, String>| {
+                table
+                    .into_iter()
+                    .map(|(key, icon)| (key, asset_path_for(&icon)))
+                    .collect()
+            };
             FileIcons {
-                by_name: parsed.by_name,
-                by_ext: parsed.by_ext,
-                defaults: parsed.defaults,
-                base: "icons/file",
+                by_name: resolve(parsed.by_name),
+                by_ext: resolve(parsed.by_ext),
+                defaults: parsed.defaults.into(),
             }
         })
     }
@@ -129,34 +170,32 @@ impl FileIcons {
     /// The asset path for an entry's icon.
     ///
     /// The returned string is already a GPUI asset path —
-    /// `Icon::default().path(result)`.
-    pub fn asset_path(&self, entry: &Entry) -> String {
-        let name = match entry.kind {
-            ferret_vfs::EntryKind::Dir => self.defaults.directory.clone(),
-            ferret_vfs::EntryKind::Symlink { .. } => self.defaults.symlink.clone(),
-            ferret_vfs::EntryKind::Other => self.defaults.other.clone(),
+    /// `Icon::default().path(result)` — and cloning it is a refcount bump, so
+    /// this is safe to call once per row per frame, which is what the file
+    /// list does.
+    pub fn asset_path(&self, entry: &Entry) -> gpui::SharedString {
+        let icon = match entry.kind {
+            ferret_vfs::EntryKind::Dir => &self.defaults.directory,
+            ferret_vfs::EntryKind::Symlink { .. } => &self.defaults.symlink,
+            ferret_vfs::EntryKind::Other => &self.defaults.other,
             ferret_vfs::EntryKind::File => {
-                if let Some(icon) = entry.name.strip_prefix('.').and_then(|n| {
-                    self.by_name
-                        .get(n)
-                        .or_else(|| self.by_name.get(entry.name.as_str()))
-                }) {
-                    icon.clone()
-                } else if let Some(icon) = self.by_name.get(entry.name.as_str()) {
-                    icon.clone()
-                } else if let Some(ext) = entry.path.extension() {
-                    self.by_ext.get(&ext).cloned().unwrap_or_else(|| {
-                        self.by_name
-                            .get(entry.name.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| self.defaults.file.clone())
-                    })
-                } else {
-                    self.defaults.file.clone()
+                // By name first, so `Cargo.toml` beats the `toml` extension.
+                // A dotfile tries its stripped name ahead of its literal one,
+                // which is how `.gitignore` reaches the `gitignore` mapping.
+                // Only then the extension the entry resolved at listing time,
+                // rather than one re-derived from the path per row (A-12).
+                let by_name = entry
+                    .name()
+                    .strip_prefix('.')
+                    .and_then(|stem| self.by_name.get(stem))
+                    .or_else(|| self.by_name.get(entry.name()));
+                match by_name.or_else(|| entry.extension().and_then(|ext| self.by_ext.get(ext))) {
+                    Some(icon) => icon,
+                    None => &self.defaults.file,
                 }
             }
         };
-        format!("{}/{}.svg", self.base, name)
+        icon.clone()
     }
 }
 
@@ -241,13 +280,7 @@ mod tests {
     use ferret_vfs::{EntryKind, VfsPath};
 
     fn file_entry(name: &str) -> Entry {
-        Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind: EntryKind::File,
-            metadata: None,
-            link_target: None,
-        }
+        Entry::new(VfsPath::local(format!("/x/{name}")), name, EntryKind::File)
     }
 
     #[test]
@@ -311,41 +344,32 @@ mod tests {
                 .ends_with("document.svg")
         );
 
-        let dir = Entry {
-            path: VfsPath::local("/x/dir"),
-            name: "dir".into(),
-            kind: EntryKind::Dir,
-            metadata: None,
-            link_target: None,
-        };
+        let dir = Entry::new(VfsPath::local("/x/dir"), "dir", EntryKind::Dir);
         assert!(icons.asset_path(&dir).ends_with("folder-base.svg"));
 
-        let broken = Entry {
-            path: VfsPath::local("/x/loop"),
-            name: "loop".into(),
-            kind: EntryKind::Symlink { target_kind: None },
-            metadata: None,
-            link_target: None,
-        };
+        let broken = Entry::new(
+            VfsPath::local("/x/loop"),
+            "loop",
+            EntryKind::Symlink { target_kind: None },
+        );
         assert!(icons.asset_path(&broken).ends_with("url.svg"));
     }
 
     #[test]
     fn every_mapped_icon_exists_as_an_asset() {
         let icons = FileIcons::embedded();
-        let mut names: Vec<&String> = icons.by_name.values().collect();
-        names.extend(icons.by_ext.values());
-        names.extend([
+        let mut paths: Vec<&gpui::SharedString> = icons.by_name.values().collect();
+        paths.extend(icons.by_ext.values());
+        paths.extend([
             &icons.defaults.file,
             &icons.defaults.directory,
             &icons.defaults.symlink,
             &icons.defaults.other,
         ]);
 
-        for name in names {
-            let path = format!("{}/{}.svg", icons.base, name);
+        for path in paths {
             assert!(
-                crate::assets::FerretAssets::get(&path).is_some(),
+                crate::assets::FerretAssets::get(path).is_some(),
                 "mapped icon {path} is missing from assets"
             );
         }

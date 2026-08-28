@@ -416,7 +416,7 @@ fn matching_directories(entries: &[ferret_vfs::Entry], prefix: &str) -> Vec<Path
         .iter()
         .filter(|e| matches_completion(e, &wanted))
         .collect();
-    hits.sort_by(|a, b| crate::format::natural_compare(&a.name, &b.name));
+    hits.sort_by(|a, b| crate::format::natural_compare(a.name(), b.name()));
     hits.into_iter()
         .take(MAX_COMPLETIONS)
         .filter_map(|e| e.path.as_local().map(Path::to_path_buf))
@@ -426,7 +426,7 @@ fn matching_directories(entries: &[ferret_vfs::Entry], prefix: &str) -> Vec<Path
 fn matches_completion(entry: &ferret_vfs::Entry, wanted: &str) -> bool {
     entry.is_dir_like()
         && (!entry.is_hidden() || wanted.starts_with('.'))
-        && entry.name.to_lowercase().starts_with(wanted)
+        && entry.name().to_lowercase().starts_with(wanted)
 }
 
 /// `~` and `~/…` expand against the home directory; everything else is taken
@@ -537,26 +537,24 @@ mod tests {
     }
 
     fn dir_entry(name: &str, hidden: bool) -> ferret_vfs::Entry {
-        ferret_vfs::Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind: ferret_vfs::EntryKind::Dir,
-            metadata: Some(ferret_vfs::Metadata {
-                hidden,
-                ..Default::default()
-            }),
-            link_target: None,
-        }
+        ferret_vfs::Entry::new(
+            VfsPath::local(format!("/x/{name}")),
+            name,
+            ferret_vfs::EntryKind::Dir,
+        )
+        .with_metadata(Some(ferret_vfs::Metadata {
+            hidden,
+            ..Default::default()
+        }))
     }
 
     fn file_entry(name: &str) -> ferret_vfs::Entry {
-        ferret_vfs::Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind: ferret_vfs::EntryKind::File,
-            metadata: Some(ferret_vfs::Metadata::default()),
-            link_target: None,
-        }
+        ferret_vfs::Entry::new(
+            VfsPath::local(format!("/x/{name}")),
+            name,
+            ferret_vfs::EntryKind::File,
+        )
+        .with_metadata(Some(ferret_vfs::Metadata::default()))
     }
 
     #[test]

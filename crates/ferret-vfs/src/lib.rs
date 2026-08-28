@@ -16,7 +16,7 @@
 //!     while let Some(batch) = entries.next().await {
 //!         if let Ok(batch) = batch {
 //!             for entry in batch {
-//!                 println!("{}", entry.name);
+//!                 println!("{}", entry.name());
 //!             }
 //!         }
 //!     }

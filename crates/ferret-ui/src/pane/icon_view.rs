@@ -125,6 +125,11 @@ impl FilePane {
         let tile_drop_dir = entry.is_dir_like().then(|| entry.path.clone());
         let drops = self.drops.clone();
         let accent = theme.primary;
+        // Taken before the listeners below capture `entry`. Cheap: a name
+        // short enough to live inline in a `SmolStr` copies rather than
+        // allocating, which is most of them.
+        let label = gpui::SharedString::new(entry.name());
+        let menu_path = entry.path.clone();
 
         div()
             .id(("tile", ix))
@@ -166,7 +171,7 @@ impl FilePane {
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     // Select under the cursor, then open the target menu.
-                    let path = entry.path.clone();
+                    let path = menu_path.clone();
                     this.folder.update(cx, |f, cx| {
                         f.prepare_context_menu(ix);
                         cx.emit(FolderEvent::SelectionChanged);
@@ -182,8 +187,8 @@ impl FilePane {
                     .line_height(px(14.))
                     .text_center()
                     .text_color(label_color)
-                    .when(broken, |label| label.line_through())
-                    .child(entry.name.clone()),
+                    .when(broken, |text| text.line_through())
+                    .child(label),
             )
             .into_any_element()
     }

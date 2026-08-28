@@ -2,19 +2,13 @@ use super::*;
 use ferret_vfs::{EntryKind, Metadata, SymlinkTarget};
 
 fn entry(name: &str, kind: EntryKind, len: u64, modified: Option<SystemTime>) -> Entry {
-    Entry {
-        path: VfsPath::local(format!("/x/{name}")),
-        name: name.to_string(),
-        kind,
-        metadata: Some(Metadata {
-            len,
-            modified,
-            // Mirror what LocalFs produces: the leading dot is hidden.
-            hidden: name.starts_with('.'),
-            ..Default::default()
-        }),
-        link_target: None,
-    }
+    Entry::new(VfsPath::local(format!("/x/{name}")), name, kind).with_metadata(Some(Metadata {
+        len,
+        modified,
+        // Mirror what LocalFs produces: the leading dot is hidden.
+        hidden: name.starts_with('.'),
+        ..Default::default()
+    }))
 }
 
 fn t(secs: u64) -> Option<SystemTime> {
@@ -44,7 +38,7 @@ fn populated() -> Folder {
 fn hidden_entries_are_filtered_until_shown() {
     let f = populated();
     assert_eq!(f.row_count(), 3);
-    assert_eq!(f.entry_at(0).unwrap().name, "src");
+    assert_eq!(f.entry_at(0).unwrap().name(), "src");
 
     let mut f = populated();
     f.set_show_hidden(true);
@@ -56,7 +50,7 @@ fn folders_come_first_then_natural_name_order() {
     let mut f = populated();
     f.set_show_hidden(true);
     let names: Vec<_> = (0..f.row_count())
-        .map(|r| f.entry_at(r).unwrap().name.clone())
+        .map(|r| f.entry_at(r).unwrap().name().to_string())
         .collect();
     assert_eq!(names, ["src", ".hidden", "report.pdf", "zebra.txt"]);
 }
@@ -66,7 +60,7 @@ fn size_sort_uses_display_len_and_reverses() {
     let mut f = populated();
     f.set_show_hidden(true);
     f.set_sort(SortKey::Size, SortOrder::Ascending);
-    assert_eq!(f.entry_at(0).unwrap().name, "src"); // dirs pinned first
+    assert_eq!(f.entry_at(0).unwrap().name(), "src"); // dirs pinned first
     assert_eq!(
         f.entry_at(1).unwrap().display_len(),
         Some(10),
@@ -82,9 +76,9 @@ fn modified_sort_orders_by_time() {
     let mut f = populated();
     f.set_show_hidden(true);
     f.set_sort(SortKey::Modified, SortOrder::Ascending);
-    assert_eq!(f.entry_at(0).unwrap().name, "src");
-    assert_eq!(f.entry_at(1).unwrap().name, "zebra.txt");
-    assert_eq!(f.entry_at(f.row_count() - 1).unwrap().name, ".hidden");
+    assert_eq!(f.entry_at(0).unwrap().name(), "src");
+    assert_eq!(f.entry_at(1).unwrap().name(), "zebra.txt");
+    assert_eq!(f.entry_at(f.row_count() - 1).unwrap().name(), ".hidden");
 }
 
 #[test]
@@ -130,7 +124,7 @@ fn filter_narrows_and_reports_misses() {
     let mut f = populated();
     f.set_filter(Some("PDF".into()));
     assert_eq!(f.row_count(), 1);
-    assert_eq!(f.entry_at(0).unwrap().name, "report.pdf");
+    assert_eq!(f.entry_at(0).unwrap().name(), "report.pdf");
 
     f.set_filter(Some("zzz".into()));
     assert_eq!(f.row_count(), 0);
@@ -186,7 +180,7 @@ fn expanded_children_are_spliced_in_beneath_their_parent() {
 
     // Children land directly under their parent, not at the end.
     let names: Vec<_> = (0..f.row_count())
-        .map(|r| f.entry_at(r).unwrap().name.clone())
+        .map(|r| f.entry_at(r).unwrap().name().to_string())
         .collect();
     assert_eq!(
         names,
@@ -260,7 +254,7 @@ fn the_filter_reaches_into_expanded_children() {
 
     f.set_filter(Some("rs".into()));
     let names: Vec<_> = (0..f.row_count())
-        .map(|r| f.entry_at(r).unwrap().name.clone())
+        .map(|r| f.entry_at(r).unwrap().name().to_string())
         .collect();
     // "src" does not itself match, but it is kept as the route to a child
     // that does — a filter that hid it would hide the match with it.
@@ -325,8 +319,8 @@ fn a_probe_after_a_reload_edits_the_right_entry() {
     )]);
     assert!(!changed, "a vanished stale path changes nothing");
     assert_eq!(f.row_count(), 2);
-    assert_eq!(f.entry_at(0).unwrap().name, "aaa.txt");
-    assert_eq!(f.entry_at(1).unwrap().name, "bbb.txt");
+    assert_eq!(f.entry_at(0).unwrap().name(), "aaa.txt");
+    assert_eq!(f.entry_at(1).unwrap().name(), "bbb.txt");
 }
 
 #[test]
@@ -407,7 +401,7 @@ fn watcher_probes_insert_and_remove_without_relisting() {
     )]);
     assert!(changed);
     assert_eq!(f.row_count(), 4);
-    assert_eq!(f.entry_at(1).unwrap().name, "aaa.txt"); // after src, before report
+    assert_eq!(f.entry_at(1).unwrap().name(), "aaa.txt"); // after src, before report
 
     // It vanishes: the row goes without a re-list.
     let changed = f.apply_probes(vec![(
@@ -443,7 +437,7 @@ fn watcher_probe_batch_removes_each_original_entry() {
     ]);
 
     assert!(changed);
-    let names: Vec<_> = f.entries.iter().map(|entry| entry.name.as_str()).collect();
+    let names: Vec<_> = f.entries.iter().map(|entry| entry.name()).collect();
     assert_eq!(names, ["src", ".hidden"]);
 }
 
@@ -476,5 +470,5 @@ fn symlinked_directories_sort_as_directories() {
     ];
     f.loading = false;
     f.resort();
-    assert_eq!(f.entry_at(0).unwrap().name, "a-link");
+    assert_eq!(f.entry_at(0).unwrap().name(), "a-link");
 }
