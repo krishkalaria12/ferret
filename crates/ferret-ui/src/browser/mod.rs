@@ -176,7 +176,15 @@ pub struct Browser {
     /// Held so the filter input keeps notifying the folder.
     _filter_subscription: Subscription,
 
-    volumes_cache: Option<(Instant, Vec<Place>)>,
+    /// Mounted volumes as of the last background probe.
+    ///
+    /// Render only ever reads this. Probing means a `read_dir("/Volumes")`
+    /// plus a `metadata` per entry, and a stale network mount can make that
+    /// take seconds — which, on the render path, is seconds of frozen window.
+    volumes: Vec<Place>,
+    /// Re-probes `volumes` every [`VOLUMES_TTL`]. Held so the loop stops when
+    /// the browser goes away.
+    volume_refresh: Option<gpui::Task<()>>,
 
     /// Focus for the sidebar, so Tab can reach it and it can show that it has
     /// focus (§8: "Focus must be visible").
@@ -256,10 +264,12 @@ impl Browser {
             path_editing: None,
             filter_input,
             _filter_subscription: filter_subscription,
-            volumes_cache: None,
+            volumes: Vec::new(),
+            volume_refresh: None,
             sidebar_focus: cx.focus_handle(),
         };
         this.push_tab(start_directory(), window, cx);
+        this.start_volume_refresh(cx);
         this
     }
 

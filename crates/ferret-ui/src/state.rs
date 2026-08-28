@@ -30,6 +30,19 @@ pub struct FerretState {
     /// platform cache: it preserves texture identity across frames and keeps
     /// byte-to-image conversion out of the steady-state render path.
     pub rendered_os_icons: RenderedIconCache,
+    /// Whether `settings` has changed since it last reached disk.
+    ///
+    /// `FolderPrefs` tracks its own dirtiness; the settings file has no
+    /// equivalent, and the debounced writer needs somewhere to ask before it
+    /// rewrites a file nothing touched.
+    settings_dirty: bool,
+    /// The pending debounced write. Held here rather than on a view because
+    /// settings are mutated from context-menu closures that have an [`App`]
+    /// and no entity to hang a task off. Replacing it drops the previous
+    /// timer, which is what collapses a burst into one write.
+    ///
+    /// [`App`]: gpui::App
+    save_task: Option<gpui::Task<()>>,
 }
 
 impl gpui::Global for FerretState {}
@@ -68,28 +81,84 @@ pub fn load_state() -> FerretState {
         icons: FileIcons::embedded(),
         os_icons: ferret_platform::icon_provider(),
         rendered_os_icons: RenderedIconCache::default(),
+        settings_dirty: false,
+        save_task: None,
     }
 }
 
+/// Arm the debounced write of settings and folder preferences (A-09).
+///
+/// Every call restarts the timer, so a run of sort clicks — or a column drag,
+/// which fires per frame — collapses into one write. The write itself never
+/// touches the window thread: once the timer fires the payloads are serialised
+/// and handed to the background executor. Quitting flushes whatever is still
+/// pending; see [`crate::flush_pending_saves`].
+pub(crate) fn arm_config_save(cx: &mut gpui::App) {
+    let task = cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(ferret_settings::config::SAVE_DEBOUNCE)
+            .await;
+        let pending = cx.update(|cx| cx.global_mut::<FerretState>().take_pending_saves());
+        if pending.is_empty() {
+            return; // Nothing changed since the last write.
+        }
+        cx.background_executor()
+            .spawn(async move {
+                for (path, contents) in pending {
+                    write_config(&path, &contents);
+                }
+            })
+            .detach();
+    });
+    cx.global_mut::<FerretState>().save_task = Some(task);
+}
+
 impl FerretState {
-    /// Persist settings; best-effort, failures surface on the next save.
+    /// Record that `settings` has changed and owes the disk a write.
     ///
-    /// Writes go to a temp file first so a crash mid-write cannot truncate
-    /// the real file.
-    pub fn save_settings(&self) {
-        let Ok(path) = ferret_settings::settings_path() else {
-            return;
-        };
-        write_atomically(&path, &self.settings.to_json());
+    /// Every toggle that mutates `settings` calls this and then arms the
+    /// browser's debounce; nothing writes from an action handler.
+    pub fn touch_settings(&mut self) {
+        self.settings_dirty = true;
     }
 
-    /// Persist folder view preferences (debounced by the caller).
-    pub fn save_prefs(&mut self) {
-        let Ok(path) = ferret_settings::folder_prefs_path() else {
-            return;
-        };
-        if write_atomically(&path, &self.prefs.to_json()) {
+    /// Serialise whatever config is outstanding and mark it saved.
+    ///
+    /// Returns the payloads instead of writing them: serialising is a
+    /// millisecond and the write is a `create_dir_all`, a write and a rename,
+    /// so the caller hands these to the background executor. An empty result
+    /// is the common one — it is what lets an idle app write nothing at all
+    /// (`FolderPrefs::is_dirty`).
+    ///
+    /// Marking saved here rather than after the write is deliberate: a failed
+    /// write already reports itself, and holding the flag would make the next
+    /// debounce re-serialise the same bytes forever on a read-only config
+    /// directory.
+    pub fn take_pending_saves(&mut self) -> Vec<(PathBuf, String)> {
+        let mut pending = Vec::new();
+        if self.settings_dirty
+            && let Ok(path) = ferret_settings::settings_path()
+        {
+            pending.push((path, self.settings.to_json()));
+            self.settings_dirty = false;
+        }
+        if self.prefs.is_dirty()
+            && let Ok(path) = ferret_settings::folder_prefs_path()
+        {
+            pending.push((path, self.prefs.to_json()));
             self.prefs.mark_saved();
+        }
+        pending
+    }
+
+    /// Write everything outstanding on the calling thread.
+    ///
+    /// The one place a config write is allowed to block: quitting, where
+    /// there is no next frame to protect and a debounce that has not fired
+    /// yet would otherwise lose the user's last sort click.
+    pub fn flush_pending_saves(&mut self) {
+        for (path, contents) in self.take_pending_saves() {
+            write_config(&path, &contents);
         }
     }
 
@@ -120,7 +189,12 @@ impl FerretState {
 /// The config directory is created first: on a fresh machine nothing else
 /// makes it, and without it every save fails — silently, because the write
 /// goes to a path whose parent does not exist. Returns whether it landed.
-fn write_atomically(path: &std::path::Path, contents: &str) -> bool {
+///
+/// This blocks. Callers reach it through [`FerretState::take_pending_saves`]
+/// on the background executor, or through
+/// [`FerretState::flush_pending_saves`] at quit; nothing calls it from a
+/// frame.
+pub(crate) fn write_config(path: &std::path::Path, contents: &str) -> bool {
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
@@ -171,14 +245,64 @@ mod tests {
         let path = root.join("Ferret").join("settings.json");
         assert!(!path.exists());
 
-        assert!(write_atomically(&path, "{\"a\":1}"));
+        assert!(write_config(&path, "{\"a\":1}"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
 
         // Rewriting replaces the contents and leaves no temp file behind.
-        assert!(write_atomically(&path, "{\"a\":2}"));
+        assert!(write_config(&path, "{\"a\":2}"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":2}");
         assert!(!path.with_extension("json.tmp").exists());
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_idle_app_has_nothing_to_write() {
+        let mut state = load_state();
+        // Whatever the machine's real config looked like, loading it must not
+        // by itself owe the disk a write — this is the check that keeps the
+        // debounce from rewriting both files every two seconds forever.
+        state.take_pending_saves();
+        assert!(state.take_pending_saves().is_empty());
+
+        // A settings change is one payload, and only one: `FolderPrefs` is
+        // untouched, so its file is not rewritten alongside.
+        state.touch_settings();
+        let pending = state.take_pending_saves();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert!(
+            pending[0]
+                .0
+                .ends_with(ferret_settings::config::SETTINGS_FILE)
+        );
+
+        // And taking it clears it: two debounces in a row write once.
+        assert!(state.take_pending_saves().is_empty());
+    }
+
+    #[test]
+    fn a_remembered_folder_view_owes_the_disk_a_write() {
+        let mut state = load_state();
+        state.take_pending_saves();
+
+        state.settings.browser.remember_folder_views = true;
+        state.remember_folder_view(
+            &VfsPath::local("/x/ferret-state-test"),
+            FolderView {
+                mode: ferret_settings::ViewMode::Icons,
+                ..Default::default()
+            },
+        );
+
+        let pending = state.take_pending_saves();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert!(
+            pending[0]
+                .0
+                .ends_with(ferret_settings::config::FOLDER_PREFS_FILE)
+        );
+        // Compact, not pretty: this file is written by the app, not read by
+        // hand, and at capacity the formatting doubles it.
+        assert!(!pending[0].1.contains('\n'), "{}", pending[0].1);
     }
 }

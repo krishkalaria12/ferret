@@ -46,15 +46,38 @@ ferret-ui = { path = "crates/ferret-ui" }
 ferret-settings = { path = "crates/ferret-settings" }
 ferret-vfs = { path = "crates/ferret-vfs" }
 
+# Every crate below this line is already in `Cargo.lock` — each is an edge to
+# something the workspace compiles anyway, not a new package. D-38 asks that
+# each one carry the job it does, so the next person knows what would justify
+# removing it again.
+
+# A-13. One case-insensitive matcher is built per keystroke and run over the
+# names with no allocation on either side, instead of lowercasing both sides
+# once per entry. It is also the engine search will want when that lands.
+aho-corasick = "1"
 anyhow = "1"
 arc-swap = "1"
 async-trait = "0.1"
+# The folder indices key on `EntryId`s and on names read from the user's own
+# disk, never on attacker-chosen input, so they were paying SipHash for a
+# threat model Ferret does not have. If a remote backend ever keys a map on
+# server-supplied names, that map wants a seeded hasher instead — see §9.
+foldhash = "0.2"
 async-channel = "2"
 dirs = "6"
 futures = "0.3"
 notify = "7"
+# A-12. Sorting 200,000 rows on a header click is embarrassingly parallel, and
+# is safe to parallelise only now that the comparator no longer allocates.
+rayon = "1"
 rust-embed = "8"
 smol = "2"
+# D-35. `SmolStr` stores up to 22 bytes inline, so cloning an `Entry` whose
+# name fits — which is most of them — costs a memcpy rather than a heap
+# allocation and an atomic. `gpui::SharedString` is a newtype over this same
+# type, so the render boundary converts for free; `ferret-vfs` takes the leaf
+# crate directly rather than a GPUI dependency it is documented not to have.
+smol_str = "0.3"
 thiserror = "2"
 trash = "5"
 

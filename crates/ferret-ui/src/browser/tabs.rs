@@ -154,17 +154,39 @@ impl Browser {
     /// The open folder vanished: walk up to the nearest parent that still
     /// exists, so the user lands somewhere real rather than on another
     /// missing page.
+    ///
+    /// The walk runs on the background executor. Each step is an `is_dir`
+    /// stat, and the reason this is being called at all is that something in
+    /// this chain has stopped answering — an unmounted share is precisely
+    /// where a stat takes seconds, and this is reachable from a button.
     pub(super) fn go_to_existing_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut dir = self.active().folder.read(cx).dir.clone();
-        while let Some(parent) = dir.parent() {
-            if parent.as_local().is_some_and(Path::is_dir) {
-                self.navigate(parent, window, cx);
-                return;
-            }
-            dir = parent;
-        }
+        let start = self.active().folder.read(cx).dir.clone();
         let home = cx.global::<FerretState>().home_dir();
-        self.navigate(VfsPath::local(home), window, cx);
+        let window_handle = window.window_handle();
+        let this = cx.weak_entity();
+
+        cx.spawn(async move |_, cx| {
+            let target = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut dir = start;
+                    while let Some(parent) = dir.parent() {
+                        if parent.as_local().is_some_and(Path::is_dir) {
+                            return parent;
+                        }
+                        dir = parent;
+                    }
+                    VfsPath::local(home)
+                })
+                .await;
+
+            let _ = window_handle.update(cx, |_, window, cx| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.navigate(target, window, cx));
+                }
+            });
+        })
+        .detach();
     }
 
     /// Whether the active folder is gone (deleted or unreachable), which
@@ -203,8 +225,11 @@ impl Browser {
             sort_order,
             hidden_columns: tab.pane.read(cx).hidden_column_keys(),
         };
-        let state = cx.global_mut::<FerretState>();
-        state.remember_folder_view(&dir, view);
-        state.save_prefs();
+        cx.global_mut::<FerretState>()
+            .remember_folder_view(&dir, view);
+        // Debounced, not written here: this runs on every sort click, every
+        // column toggle and every folder entered, and the store is up to
+        // FOLDER_PREFS_CAPACITY records (A-09).
+        crate::state::arm_config_save(cx);
     }
 }

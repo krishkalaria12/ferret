@@ -110,12 +110,19 @@ impl FolderPrefs {
         prefs
     }
 
+    /// Serialise the whole store.
+    ///
+    /// Compact, not pretty: the module header says this file is written by the
+    /// app rather than by hand, and at [`FOLDER_PREFS_CAPACITY`] records
+    /// pretty-printing roughly doubles the bytes and takes the slower
+    /// serialiser, for a file nobody reads. `settings.json` is the one people
+    /// edit, and that one is still formatted.
     pub fn to_json(&self) -> String {
         let persisted = Persisted {
             clock: self.clock,
             folders: self.entries.clone(),
         };
-        serde_json::to_string_pretty(&persisted).unwrap_or_else(|_| "{}".into())
+        serde_json::to_string(&persisted).unwrap_or_else(|_| "{}".into())
     }
 
     /// Look up a folder's view, marking it as recently used.

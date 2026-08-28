@@ -11,10 +11,14 @@ repository.workspace = true
 ferret-platform.workspace = true
 ferret-settings.workspace = true
 ferret-vfs.workspace = true
+aho-corasick.workspace = true
 arc-swap.workspace = true
+foldhash.workspace = true
 futures.workspace = true
 gpui.workspace = true
 image.workspace = true
+rayon.workspace = true
+smol_str.workspace = true
 
 gpui-component.workspace = true
 gpui-component-assets.workspace = true

@@ -150,7 +150,8 @@ impl Browser {
         let width = self.sidebar_width;
         let state = cx.global_mut::<FerretState>();
         state.settings.sidebar.width = width;
-        state.save_settings();
+        state.touch_settings();
+        crate::state::arm_config_save(cx);
         cx.notify();
     }
 
@@ -165,7 +166,7 @@ impl Browser {
         // candidate at once rather than section by section.
         let places = self.places(cx);
         let favorites = self.favorites(cx);
-        let volumes = self.volumes(cx);
+        let volumes = self.volumes();
         let current = current_place(
             &dir,
             places
@@ -366,8 +367,9 @@ impl Browser {
                                     .sidebar
                                     .favorites
                                     .retain(|p| p.as_path() != path);
-                                state.save_settings();
+                                state.touch_settings();
                             });
+                            crate::state::arm_config_save(cx);
                         }
                     }))
                 })
@@ -401,7 +403,8 @@ impl Browser {
         if self.favorite_drag.take().is_none() {
             return;
         }
-        cx.global_mut::<FerretState>().save_settings();
+        cx.global_mut::<FerretState>().touch_settings();
+        crate::state::arm_config_save(cx);
         cx.notify();
     }
 }

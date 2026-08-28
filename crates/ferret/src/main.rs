@@ -36,6 +36,15 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     // Window lifecycle belongs to the binary, not to a view.
     cx.on_action(|_: &browser_actions::NewWindow, cx| open_main_window(cx));
+
+    // Config writes are debounced (A-09), so quitting inside the debounce
+    // window would lose the last sort click. This is the flush, and the only
+    // place a config write is allowed to block.
+    cx.on_app_quit(|cx: &mut App| {
+        ferret_ui::flush_pending_saves(cx);
+        async {}
+    })
+    .detach();
 }
 
 fn bind_keys(cx: &mut App) {
