@@ -131,10 +131,16 @@ fn digit_run_end(s: &str, from: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-/// First free variant of `wanted` among `taken`: `untitled folder`,
-/// `untitled folder 2`, `report copy 3`…
-pub fn unique_name(taken: &std::collections::HashSet<String>, wanted: &str) -> String {
-    if !taken.contains(wanted) {
+/// First free variant of `wanted`: `untitled folder`, `untitled folder 2`,
+/// `report copy 3`…
+///
+/// Takes a predicate rather than a set of names (A-23). Every caller answered
+/// it from the browsed directory, and materialising a `HashSet<String>` of
+/// 200,000 names to ask a handful of yes-or-no questions is 200,000
+/// allocations on the UI thread; `Folder::contains_name` answers each one from
+/// the index the listing already maintains.
+pub fn unique_name(is_taken: impl Fn(&str) -> bool, wanted: &str) -> String {
+    if !is_taken(wanted) {
         return wanted.to_string();
     }
     let (stem, ext) = match wanted.rsplit_once('.') {
@@ -147,7 +153,7 @@ pub fn unique_name(taken: &std::collections::HashSet<String>, wanted: &str) -> S
             Some(ext) => format!("{stem} {n}.{ext}"),
             None => format!("{stem} {n}"),
         };
-        if !taken.contains(&candidate) {
+        if !is_taken(&candidate) {
             return candidate;
         }
     }
@@ -160,26 +166,31 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
 
+    fn taken(names: &[&str]) -> impl Fn(&str) -> bool + use<> {
+        let names: HashSet<String> = names.iter().map(|n| n.to_string()).collect();
+        move |candidate: &str| names.contains(candidate)
+    }
+
     #[test]
     fn unique_names_suffix_before_the_extension() {
-        let taken: HashSet<String> = ["notes.txt", "notes 2.txt"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(unique_name(&taken, "notes.txt"), "notes 3.txt");
-        assert_eq!(unique_name(&HashSet::new(), "notes.txt"), "notes.txt");
+        assert_eq!(
+            unique_name(taken(&["notes.txt", "notes 2.txt"]), "notes.txt"),
+            "notes 3.txt"
+        );
+        assert_eq!(unique_name(taken(&[]), "notes.txt"), "notes.txt");
     }
 
     #[test]
     fn dotfiles_are_not_treated_as_extensions() {
-        let taken: HashSet<String> = [".gitignore"].into_iter().map(String::from).collect();
-        assert_eq!(unique_name(&taken, ".gitignore"), ".gitignore 2");
+        assert_eq!(
+            unique_name(taken(&[".gitignore"]), ".gitignore"),
+            ".gitignore 2"
+        );
     }
 
     #[test]
     fn extensionless_names_suffix_cleanly() {
-        let taken: HashSet<String> = ["Makefile"].into_iter().map(String::from).collect();
-        assert_eq!(unique_name(&taken, "Makefile"), "Makefile 2");
+        assert_eq!(unique_name(taken(&["Makefile"]), "Makefile"), "Makefile 2");
     }
 
     #[test]

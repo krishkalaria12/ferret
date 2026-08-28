@@ -29,13 +29,54 @@ impl Browser {
         .detach();
     }
 
-    fn entry_names(&self, cx: &Context<Self>) -> std::collections::HashSet<String> {
-        self.active().folder.read(cx).entry_names()
+    /// Assign each source a name free in `dest`, before anything is spawned.
+    ///
+    /// Naming has to happen on the window thread, because only there is the
+    /// folder model readable — but it costs one index lookup per source
+    /// (A-23), and there are as many sources as the user dragged rather than
+    /// as many as the directory holds. `claimed` covers collisions *within*
+    /// this batch, which the folder cannot know about yet.
+    ///
+    /// Names are only checked against the listing when `dest` is the folder on
+    /// screen; anywhere else Ferret has nothing loaded to check against, and
+    /// the copy fails rather than silently overwriting.
+    fn plan_names(
+        &self,
+        sources: Vec<VfsPath>,
+        dest: &VfsPath,
+        cx: &Context<Self>,
+    ) -> Vec<(VfsPath, String)> {
+        let folder = self.active().folder.read(cx);
+        let check_listing = *dest == folder.dir;
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut planned = Vec::with_capacity(sources.len());
+
+        for src in sources {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let target = unique_name(
+                |candidate| {
+                    claimed.contains(candidate)
+                        || (check_listing && folder.contains_name(candidate))
+                },
+                name,
+            );
+            claimed.insert(target.clone());
+            planned.push((src, target));
+        }
+        planned
+    }
+
+    /// A name nothing in the browsed directory is using.
+    fn free_name(&self, wanted: &str, cx: &Context<Self>) -> String {
+        let folder = self.active().folder.read(cx);
+        unique_name(|candidate| folder.contains_name(candidate), wanted)
     }
 
     pub(super) fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.active().folder.read(cx).dir.clone();
-        let name = unique_name(&self.entry_names(cx), "untitled folder");
+        let name = self.free_name("untitled folder", cx);
         let path = dir.join(&name);
 
         self.create_then_rename(
@@ -48,7 +89,7 @@ impl Browser {
 
     pub(super) fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.active().folder.read(cx).dir.clone();
-        let name = unique_name(&self.entry_names(cx), "untitled.txt");
+        let name = self.free_name("untitled.txt", cx);
         let path = dir.join(&name);
 
         self.create_then_rename(
@@ -195,24 +236,14 @@ impl Browser {
     ) {
         let fs = cx.global::<FerretState>().fs;
         let window_handle = window.window_handle();
-        // Names already in the destination, so a copy beside its original
-        // gets "file 2" rather than failing or overwriting.
-        let taken = if dest == self.active().folder.read(cx).dir {
-            self.entry_names(cx)
-        } else {
-            std::collections::HashSet::new()
-        };
+        // Names are settled here, so a copy beside its original gets "file 2"
+        // rather than failing or overwriting.
+        let planned = self.plan_names(sources, &dest, cx);
 
         cx.spawn(async move |_, cx| {
-            let mut taken = taken;
             let mut failures = Vec::new();
 
-            for src in sources {
-                let Some(name) = src.file_name().map(str::to_owned) else {
-                    continue;
-                };
-                let target = unique_name(&taken, &name);
-                taken.insert(target.clone());
+            for (src, target) in planned {
                 let into = dest.join(&target);
 
                 let result = if force_copy {
@@ -259,23 +290,19 @@ impl Browser {
         };
         let restore_on_copy = (!cut).then(|| sources.clone());
         let dest_dir = self.active().folder.read(cx).dir.clone();
-        let taken = self.entry_names(cx);
+        // A cut item pasted into its own folder is a no-op, and dropping it
+        // before naming keeps it from claiming a "file 2" nothing will use.
+        let sources: Vec<VfsPath> = sources
+            .into_iter()
+            .filter(|src| !(cut && src.parent().as_ref() == Some(&dest_dir)))
+            .collect();
+        let planned = self.plan_names(sources, &dest_dir, cx);
         let fs = cx.global::<FerretState>().fs;
         let window_handle = window.window_handle();
 
         cx.spawn(async move |_, cx| {
-            let mut taken = taken;
             let mut failures = Vec::new();
-            for src in sources {
-                let Some(name) = src.file_name() else {
-                    continue;
-                };
-                let dest_parent = src.parent();
-                if cut && dest_parent.as_ref() == Some(&dest_dir) {
-                    continue; // Pasting a cut item into its own folder.
-                }
-                let target = unique_name(&taken, name);
-                taken.insert(target.clone());
+            for (src, target) in planned {
                 let dest = dest_dir.join(&target);
 
                 let result = match fs.copy(&src, &dest).await {

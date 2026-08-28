@@ -18,7 +18,10 @@ impl Folder {
     /// Returns whether anything happened, so callers can tell a no-op on a
     /// file row from a real toggle.
     pub fn toggle_expanded(&mut self, row: usize, cx: &mut Context<Self>) -> bool {
-        let Some(entry) = self.entry_at(row) else {
+        let Some(id) = self.id_at(row) else {
+            return false;
+        };
+        let Some(entry) = self.entry(id) else {
             return false;
         };
         if !entry.is_dir_like() {
@@ -26,19 +29,19 @@ impl Folder {
         }
         let path = entry.path.clone();
 
-        if self.expanded.remove(&path) {
+        if self.expanded.contains(&id) {
             // Collapsing drops the loaded children: re-reading on the next
             // expand is cheap, and holding them would keep a deep tree's
             // worth of entries alive for a row nobody can see.
-            self.forget_subtree(&path);
+            self.forget_subtree(id);
             self.rebuild_index_and_order();
             cx.emit(FolderEvent::RowsChanged);
             cx.notify();
             return true;
         }
 
-        self.expanded.insert(path.clone());
-        self.load_children(path, cx);
+        self.expanded.insert(id);
+        self.load_children(id, path, cx);
         cx.notify();
         true
     }
@@ -59,15 +62,18 @@ impl Folder {
         }
     }
 
-    /// Drop a collapsed folder's children, and its descendants' with it.
-    pub(super) fn forget_subtree(&mut self, parent: &VfsPath) {
-        let Some(children) = self.children.remove(parent) else {
+    /// Drop a collapsed folder's children, and its descendants' with them.
+    ///
+    /// `parent` itself stays in the slab — it is still a row — but stops being
+    /// expanded, so a later reindex draws it closed.
+    pub(super) fn forget_subtree(&mut self, parent: EntryId) {
+        self.expanded.remove(&parent);
+        let Some(children) = self.children.remove(&parent) else {
             return;
         };
         for child in children {
-            if self.expanded.remove(&child.path) {
-                self.forget_subtree(&child.path);
-            }
+            self.forget_subtree(child);
+            self.remove(child);
         }
     }
 
@@ -76,13 +82,13 @@ impl Folder {
     /// Collected rather than streamed: a child listing is spliced into the
     /// middle of the display order, so rows arriving one batch at a time
     /// would shift everything below them repeatedly.
-    fn load_children(&mut self, parent: VfsPath, cx: &mut Context<Self>) {
+    fn load_children(&mut self, parent: EntryId, dir: VfsPath, cx: &mut Context<Self>) {
         let fs = cx.global::<crate::state::FerretState>().fs;
         let generation = self.generation;
         let (key, order) = (self.sort_key, self.sort_order);
 
         cx.spawn(async move |this, cx| {
-            let mut stream = fs.read_dir(&parent);
+            let mut stream = fs.read_dir(&dir);
             let mut entries = Vec::new();
             while let Some(item) = stream.next().await {
                 match item {
@@ -98,7 +104,11 @@ impl Folder {
                 if folder.generation != generation || !folder.expanded.contains(&parent) {
                     return; // Navigated away, or collapsed while loading.
                 }
-                folder.children.insert(parent, entries);
+                let ids = entries
+                    .into_iter()
+                    .map(|entry| folder.insert(entry, Placement::Nested))
+                    .collect();
+                folder.children.insert(parent, ids);
                 folder.rebuild_index_and_order();
                 folder.start_metadata_backfill(cx);
                 folder.request_os_icons(cx);
@@ -111,28 +121,36 @@ impl Folder {
 
     /// The pure model half of [`Self::integrate_probes`]; returns whether
     /// anything changed.
+    ///
+    /// Probes are resolved **by name**. Every path the watcher delivers is a
+    /// direct child of `self.dir` — `start_watch_apply` drops anything else
+    /// before probing it — so within this listing a name is a complete key,
+    /// and it is a quarter the bytes of a full path to hash (A-05).
     pub(super) fn apply_probes(
         &mut self,
         probed: Vec<(std::path::PathBuf, ferret_vfs::Result<Entry>)>,
     ) -> bool {
         let mut changed = false;
         let mut metadata_changed = false;
-        let mut updates = HashMap::new();
-        let mut removed = HashSet::new();
+        let mut updates: FastMap<SmolStr, Entry> = FastMap::default();
+        let mut removed: FastSet<SmolStr> = FastSet::default();
 
         for (path, result) in probed {
-            let vp = VfsPath::local(path);
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let name = SmolStr::new(name);
             match result {
                 Ok(entry) => {
-                    // The last probe for a path wins. In particular, a file
+                    // The last probe for a name wins. In particular, a file
                     // removed and recreated during one watcher burst remains
                     // present rather than being removed by an earlier probe.
-                    removed.remove(&vp);
-                    updates.insert(vp, entry);
+                    removed.remove(&name);
+                    updates.insert(name, entry);
                 }
                 Err(err) if err.is_gone() => {
-                    updates.remove(&vp);
-                    removed.insert(vp);
+                    updates.remove(&name);
+                    removed.insert(name);
                 }
                 // Transient stat failures leave the row as it was; the next
                 // event or a manual refresh corrects it.
@@ -141,42 +159,44 @@ impl Folder {
         }
 
         let mut inserts = Vec::new();
-        for (path, entry) in updates {
-            let Some(ix) = self.top_index.get(&path).copied() else {
+        for (name, entry) in updates {
+            let Some(id) = self.by_name.get(&name).copied() else {
                 inserts.push(entry);
                 continue;
             };
-            let Some(existing) = self.entries.get_mut(ix) else {
-                // `top_index` is rebuilt with `entries`; this is defensive
+            let Some(existing) = self.entry_by_id_mut(id) else {
+                // `by_name` is maintained with the slab; this is defensive
                 // against an interrupted reload, where treating the probe as
                 // a create is safer than overwriting an unrelated row.
                 inserts.push(entry);
                 continue;
             };
-            debug_assert_eq!(existing.path, path);
             metadata_changed |= existing.metadata != entry.metadata;
+            // The id is kept, so selection, cursor and expansion all follow a
+            // file rewritten in place — which is the same row to the user.
             *existing = entry;
             changed = true;
         }
 
-        // Do not remove or insert while using `top_index`: either operation
-        // shifts the remaining indices. All replacements above have used the
-        // pre-batch index, so structural mutation can now happen in one pass.
-        if !removed.is_empty() {
-            let old_len = self.entries.len();
-            self.entries.retain(|entry| !removed.contains(&entry.path));
-            changed |= self.entries.len() != old_len;
+        for name in removed {
+            let Some(id) = self.by_name.get(&name).copied() else {
+                continue; // Never listed, or already gone.
+            };
+            // Ids are stable, so removals need no care about the order they
+            // are applied in: nothing here shifts anything else's identity.
+            self.entries.retain(|&other| other != id);
+            self.forget_subtree(id);
+            self.remove(id);
+            changed = true;
         }
 
         for entry in inserts {
-            // A successful probe for a path absent from the old listing is a
-            // create. Keep it sorted without consulting an index invalidated
-            // by earlier insertions in this batch.
-            let pos = self.entries.partition_point(|existing| {
-                cmp_entries(existing, &entry, self.sort_key, self.sort_order)
-                    == std::cmp::Ordering::Less
-            });
-            self.entries.insert(pos, entry);
+            // A successful probe for a name absent from the listing is a
+            // create. Place it at its sorted spot against the listing as it
+            // stands, including anything inserted earlier in this batch.
+            let id = self.insert(entry, Placement::Top);
+            let pos = self.sorted_position(id);
+            self.entries.insert(pos, id);
             changed = true;
         }
 
@@ -191,10 +211,10 @@ impl Folder {
                 ferret_settings::SortKey::Modified | ferret_settings::SortKey::Size
             )
         {
-            self.entries
-                .sort_by(|a, b| cmp_entries(a, b, self.sort_key, self.sort_order));
+            self.resort();
+        } else {
+            self.rebuild_index_and_order();
         }
-        self.rebuild_index_and_order();
         true
     }
 
@@ -215,26 +235,20 @@ impl Folder {
 
     /// Re-read the listings of folders that were open before a reload.
     ///
-    /// `start_loading` drops the cached children but keeps `expanded`, so a
-    /// refresh has to fetch them again — otherwise a folder stays marked open
-    /// with nothing under it. Only the ones that still exist are re-read; the
-    /// rest are forgotten here, since nothing else will.
+    /// `start_loading` drops the cached children but carries which folders
+    /// were *open* across as paths, so a refresh has to fetch them again —
+    /// otherwise a folder stays marked open with nothing under it. Only the
+    /// ones that still exist are re-read; `apply_batch` never resolved an id
+    /// for the rest, so they are already forgotten.
     pub(super) fn reload_expanded_children(&mut self, cx: &mut Context<Self>) {
-        if self.expanded.is_empty() {
-            return;
-        }
-        // A folder that survived the reload is worth re-opening; one that did
-        // not is no longer expandable.
-        let (alive, gone): (Vec<VfsPath>, Vec<VfsPath>) = self
+        let reopen: Vec<(EntryId, VfsPath)> = self
             .expanded
             .iter()
-            .cloned()
-            .partition(|p| self.known_paths.contains(p));
-        for path in gone {
-            self.expanded.remove(&path);
-        }
-        for path in alive {
-            self.load_children(path, cx);
+            .filter(|id| !self.children.contains_key(id))
+            .filter_map(|&id| Some((id, self.entry(id)?.path.clone())))
+            .collect();
+        for (id, path) in reopen {
+            self.load_children(id, path, cx);
         }
     }
 
@@ -246,7 +260,7 @@ impl Folder {
     pub(super) fn request_os_icons(&mut self, cx: &mut Context<Self>) {
         let provider = cx.global::<crate::state::FerretState>().os_icons.clone();
         let wanted = crate::icons::collect_os_icon_requests(
-            self.entries.iter().chain(self.children.values().flatten()),
+            self.slab.iter().filter_map(Option::as_ref),
             provider.as_ref(),
         );
         if wanted.is_empty() {
@@ -270,9 +284,9 @@ impl Folder {
 
         let generation = self.generation;
         let targets: Vec<VfsPath> = self
-            .entries
+            .slab
             .iter()
-            .chain(self.children.values().flatten())
+            .filter_map(Option::as_ref)
             .filter(|e| e.metadata.is_none())
             .map(|e| e.path.clone())
             .collect();
@@ -312,8 +326,11 @@ impl Folder {
     ) {
         let mut selection_changed = false;
         for (path, md) in filled {
-            selection_changed |= self.selection.contains(&path);
-            if let Some(entry) = self.entry_mut(&path) {
+            let Some(id) = self.id_of(&path) else {
+                continue;
+            };
+            selection_changed |= self.selection.contains(&id);
+            if let Some(entry) = self.entry_by_id_mut(id) {
                 entry.metadata = Some(md);
             }
         }

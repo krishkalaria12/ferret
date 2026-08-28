@@ -2,7 +2,7 @@
 //! visible at all.
 //!
 //! Both re-derive the display order rather than moving rows, which is what
-//! lets a path-keyed selection survive them (see the module header).
+//! lets an id-keyed selection survive them (see the module header).
 
 use super::*;
 
@@ -40,7 +40,6 @@ impl Folder {
         }
     }
 
-    #[allow(dead_code)] // the inline filter box arrives with view modes
     pub fn set_filter(&mut self, filter: Option<String>) {
         self.filter = filter;
         if !self.loading {
@@ -81,12 +80,12 @@ impl Folder {
     pub fn select_rows(&mut self, rows: impl IntoIterator<Item = usize>) {
         self.selection.clear();
         for row in rows {
-            if let Some(e) = self.entry_at(row) {
-                self.selection.insert(e.path.clone());
+            if let Some(id) = self.id_at(row) {
+                self.selection.insert(id);
             }
         }
-        if let Some(last) = self.selection.iter().next().cloned() {
-            self.anchor = Some(last);
+        if let Some(first) = self.selection.iter().next().copied() {
+            self.anchor = Some(first);
         }
         self.refresh_selection_summary();
     }
@@ -114,7 +113,11 @@ impl Folder {
 
     pub(super) fn resort(&mut self) {
         let (key, order) = (self.sort_key, self.sort_order);
-        self.entries.sort_by(|a, b| cmp_entries(a, b, key, order));
+        // Taken out so the comparator can read the slab while the id vector is
+        // mutable. Sorting now permutes `u32`s, not `Entry`s.
+        let mut ids = std::mem::take(&mut self.entries);
+        ids.sort_by(|a, b| self.cmp_ids(*a, *b, key, order));
+        self.entries = ids;
         self.rebuild_index_and_order();
     }
 
@@ -123,103 +126,94 @@ impl Folder {
         self.rebuild_index_and_order();
     }
 
+    /// Compare two loaded entries by id.
+    ///
+    /// A missing slot sorts last. That cannot happen for ids drawn from
+    /// `entries`, but it keeps the ordering total, which a comparator handed
+    /// to `sort_by` has to be.
+    pub(super) fn cmp_ids(
+        &self,
+        a: EntryId,
+        b: EntryId,
+        key: SortKey,
+        order: SortOrder,
+    ) -> std::cmp::Ordering {
+        match (self.entry(a), self.entry(b)) {
+            (Some(a), Some(b)) => cmp_entries(a, b, key, order),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    }
+
+    /// Where `id` belongs in the sorted top-level listing.
+    ///
+    /// Used for watcher inserts, which have to land in place without
+    /// consulting an index that earlier inserts in the same batch invalidated.
+    pub(super) fn sorted_position(&self, id: EntryId) -> usize {
+        let (key, order) = (self.sort_key, self.sort_order);
+        self.entries.partition_point(|&other| {
+            self.cmp_ids(other, id, key, order) == std::cmp::Ordering::Less
+        })
+    }
+
     /// Flatten the listing — and the listings of any expanded folders —
     /// into the display order the table renders.
+    ///
+    /// This runs on every watcher burst, so it does no heap allocation in the
+    /// steady state: the row vector and the row index are reused in place and
+    /// keep their capacity, and both are keyed on `u32`s rather than on cloned
+    /// paths (A-05, D-36).
     pub(super) fn rebuild_index_and_order(&mut self) {
-        let mut order = Vec::with_capacity(self.entries.len());
-        for ix in 0..self.entries.len() {
-            let entry = &self.entries[ix];
-            let path = entry.path.clone();
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
 
+        for ix in 0..self.entries.len() {
+            let id = self.entries[ix];
+            let mark = order.len();
+            order.push(Row { id, depth: 0 });
+            self.push_expanded_children(id, 1, &mut order);
             // A folder whose subtree contains a match stays visible even when
-            // its own name does not match — otherwise the filter would hide
-            // the only route to a row it just told the user exists.
-            let mut subtree = Vec::new();
-            self.push_expanded_children(&path, 1, &mut subtree);
-            if !self.is_visible(entry) && subtree.is_empty() {
-                continue;
+            // its own name does not — otherwise the filter would hide the only
+            // route to a row it just told the user exists.
+            let has_visible_subtree = order.len() > mark + 1;
+            if !has_visible_subtree && !self.is_visible_id(id) {
+                order.truncate(mark);
             }
-            order.push(Row {
-                source: RowSource::Top(ix),
-                depth: 0,
-            });
-            order.append(&mut subtree);
         }
         self.order = order;
 
-        self.row_of_path.clear();
-        self.top_index.clear();
-        self.known_paths.clear();
-        for (ix, entry) in self.entries.iter().enumerate() {
-            self.top_index.insert(entry.path.clone(), ix);
+        let mut row_of_id = std::mem::take(&mut self.row_of_id);
+        row_of_id.clear();
+        for (row, entry) in self.order.iter().enumerate() {
+            row_of_id.insert(entry.id, row);
         }
-        for (row, source) in self.order.iter().map(|r| r.source.clone()).enumerate() {
-            if let Some(entry) = self.entry_for(&source) {
-                self.row_of_path.insert(entry.path.clone(), row);
-            }
-        }
-        for entry in self.entries.iter().chain(self.children.values().flatten()) {
-            self.known_paths.insert(entry.path.clone());
-        }
-        self.prune_stale_paths();
+        self.row_of_id = row_of_id;
+
         self.refresh_selection_summary();
     }
 
     /// Splice one expanded folder's visible children in beneath it, and
     /// theirs beneath them.
-    fn push_expanded_children(&self, parent: &VfsPath, depth: u16, order: &mut Vec<Row>) {
-        if !self.expanded.contains(parent) {
+    fn push_expanded_children(&self, parent: EntryId, depth: u16, order: &mut Vec<Row>) {
+        if !self.expanded.contains(&parent) {
             return;
         }
-        let Some(children) = self.children.get(parent) else {
+        let Some(children) = self.children.get(&parent) else {
             return; // Expanded but still loading.
         };
-        for (ix, child) in children.iter().enumerate() {
-            let mut subtree = Vec::new();
-            self.push_expanded_children(&child.path, depth + 1, &mut subtree);
-            if !self.is_visible(child) && subtree.is_empty() {
-                continue;
+        for &id in children {
+            let mark = order.len();
+            order.push(Row { id, depth });
+            self.push_expanded_children(id, depth + 1, order);
+            if order.len() == mark + 1 && !self.is_visible_id(id) {
+                order.truncate(mark);
             }
-            order.push(Row {
-                source: RowSource::Child {
-                    parent: parent.clone(),
-                    ix,
-                },
-                depth,
-            });
-            order.append(&mut subtree);
         }
     }
 
-    /// A loaded entry by path, wherever it lives — the browsed listing or an
-    /// expanded folder's.
-    ///
-    /// Indexed through `top_index`, never `row_of_path`: a display row is not
-    /// an entry index once rows can be filtered or nested.
-    pub(super) fn entry_mut(&mut self, path: &VfsPath) -> Option<&mut Entry> {
-        if let Some(ix) = self.top_index.get(path).copied() {
-            return self.entries.get_mut(ix);
-        }
-        let parent = path.parent()?;
-        let children = self.children.get_mut(&parent)?;
-        children.iter_mut().find(|e| e.path == *path)
-    }
-
-    fn entry_for(&self, source: &RowSource) -> Option<&Entry> {
-        match source {
-            RowSource::Top(ix) => self.entries.get(*ix),
-            RowSource::Child { parent, ix } => self.children.get(parent)?.get(*ix),
-        }
-    }
-
-    fn prune_stale_paths(&mut self) {
-        // Against everything loaded, not just what is on screen: a filter
-        // hides rows, it does not delete them.
-        self.selection.retain(|p| self.known_paths.contains(p));
-        self.anchor.retain(|p| self.known_paths.contains(p));
-        self.cursor.retain(|p| self.known_paths.contains(p));
-        self.expanded.retain(|p| self.known_paths.contains(p));
-        self.children.retain(|p, _| self.known_paths.contains(p));
+    fn is_visible_id(&self, id: EntryId) -> bool {
+        self.entry(id).is_some_and(|e| self.is_visible(e))
     }
 
     pub(super) fn is_visible(&self, e: &Entry) -> bool {
@@ -266,11 +260,12 @@ pub(super) fn cmp_entries(
             .display_len()
             .unwrap_or(0)
             .cmp(&b.display_len().unwrap_or(0)),
-        // Kind: group by extension, then by name.
+        // Kind: group by extension, then by name. The extension is the one
+        // resolved at listing time (D-35) — deriving it here allocated a
+        // `String` per comparison, millions of them per header click (A-12).
         SortKey::Kind => a
-            .path
             .extension()
-            .cmp(&b.path.extension())
+            .cmp(&b.extension())
             .then_with(|| crate::format::natural_compare(a.name(), b.name())),
     };
 
