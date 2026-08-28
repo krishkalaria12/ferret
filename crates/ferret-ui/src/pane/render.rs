@@ -45,7 +45,19 @@ impl Render for FilePane {
                 if width_probe.swap(w, Ordering::Relaxed) != w
                     && let Some(pane) = width_probe_owner.upgrade()
                 {
-                    pane.update(cx, |pane, cx| pane.table.update(cx, |_, cx| cx.notify()));
+                    // `refresh`, not `notify`: the table caches each column's
+                    // width when its groups are prepared and never re-reads
+                    // the delegate on a repaint. A plain notify left Name at
+                    // the width it was given before the pane had been
+                    // measured — its minimum — so every window wider than
+                    // that painted a band of dead space to the right of the
+                    // columns.
+                    pane.update(cx, |pane, cx| {
+                        pane.table.update(cx, |table, cx| {
+                            table.refresh(cx);
+                            cx.notify();
+                        })
+                    });
                 }
             })
             .child(
