@@ -11,6 +11,7 @@ repository.workspace = true
 ferret-platform.workspace = true
 ferret-settings.workspace = true
 ferret-vfs.workspace = true
+arc-swap.workspace = true
 futures.workspace = true
 gpui.workspace = true
 image.workspace = true

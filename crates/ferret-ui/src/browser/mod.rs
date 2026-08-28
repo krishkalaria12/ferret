@@ -365,10 +365,6 @@ impl SortKeyAndOrder for FolderView {
     }
 }
 
-fn smol_block_on<F: std::future::Future>(fut: F) -> F::Output {
-    smol::block_on(fut)
-}
-
 /// One toast for a batch operation. A single failure shows its own message
 /// unedited — every `VfsError` names its subject — and a batch leads with the
 /// count so the toast does not become a wall of near-identical lines.

@@ -421,6 +421,33 @@ fn watcher_probes_insert_and_remove_without_relisting() {
 }
 
 #[test]
+fn watcher_probe_batch_removes_each_original_entry() {
+    let mut f = populated(); // src, report.pdf, zebra.txt, .hidden
+
+    // `report.pdf` is before `zebra.txt` in `entries`. Removing it used to
+    // shift zebra's index, then the stale index for zebra removed `.hidden`.
+    // A watcher burst must resolve both paths against the same pre-batch model.
+    let changed = f.apply_probes(vec![
+        (
+            std::path::PathBuf::from("/x/report.pdf"),
+            Err(ferret_vfs::VfsError::NotFound {
+                path: VfsPath::local("/x/report.pdf"),
+            }),
+        ),
+        (
+            std::path::PathBuf::from("/x/zebra.txt"),
+            Err(ferret_vfs::VfsError::NotFound {
+                path: VfsPath::local("/x/zebra.txt"),
+            }),
+        ),
+    ]);
+
+    assert!(changed);
+    let names: Vec<_> = f.entries.iter().map(|entry| entry.name.as_str()).collect();
+    assert_eq!(names, ["src", ".hidden"]);
+}
+
+#[test]
 fn selecting_out_of_range_is_harmless() {
     let mut f = populated();
     f.select_only(99);

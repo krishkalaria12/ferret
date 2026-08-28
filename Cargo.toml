@@ -47,6 +47,7 @@ ferret-settings = { path = "crates/ferret-settings" }
 ferret-vfs = { path = "crates/ferret-vfs" }
 
 anyhow = "1"
+arc-swap = "1"
 async-trait = "0.1"
 async-channel = "2"
 dirs = "6"

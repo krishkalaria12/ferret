@@ -1826,6 +1826,7 @@ dependencies = [
 name = "ferret-ui"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "dirs",
  "ferret-platform",
  "ferret-settings",

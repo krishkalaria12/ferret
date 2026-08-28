@@ -187,7 +187,10 @@ impl BrowserPalette {
 /// `tnum` is the OpenType tag for tabular figures; a face without it simply
 /// ignores the feature, so this is safe to apply unconditionally.
 pub fn tabular_numerals() -> gpui::FontFeatures {
-    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
+    static FEATURES: std::sync::OnceLock<gpui::FontFeatures> = std::sync::OnceLock::new();
+    FEATURES
+        .get_or_init(|| gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)])))
+        .clone()
 }
 
 /// Text that stays legible on `fill`.

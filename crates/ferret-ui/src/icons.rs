@@ -7,9 +7,17 @@
 //! layer over the same trait later and win when they resolve.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+use arc_swap::ArcSwap;
 
 use ferret_vfs::Entry;
+
+/// One unique OS-icon type and a local path that represents it.
+///
+/// The sample path is all the platform provider needs to resolve an icon, so
+/// folder loading moves this bounded payload instead of cloning every entry.
+pub(crate) type OsIconRequest = (ferret_platform::IconKey, std::path::PathBuf);
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct Mapping {
@@ -58,6 +66,49 @@ pub struct FileIcons {
 }
 
 static ICONS: OnceLock<FileIcons> = OnceLock::new();
+
+/// Stable, decoded image handles for platform icons.
+///
+/// The platform cache owns raw BGRA bytes because it cannot depend on GPUI.
+/// This cache is the UI-side boundary: lock-free reads return the exact same
+/// `RenderImage` identity every frame, while a new type uses copy-on-write
+/// insertion once.
+pub struct RenderedIconCache {
+    images: ArcSwap<HashMap<ferret_platform::IconKey, Arc<gpui::RenderImage>>>,
+}
+
+impl Default for RenderedIconCache {
+    fn default() -> Self {
+        Self {
+            images: ArcSwap::from_pointee(HashMap::new()),
+        }
+    }
+}
+
+impl RenderedIconCache {
+    fn get(&self, key: &ferret_platform::IconKey) -> Option<Arc<gpui::RenderImage>> {
+        self.images.load().get(key).cloned()
+    }
+
+    fn insert_if_absent(
+        &self,
+        key: ferret_platform::IconKey,
+        image: Arc<gpui::RenderImage>,
+    ) -> Arc<gpui::RenderImage> {
+        loop {
+            let current = self.images.load_full();
+            if let Some(existing) = current.get(&key) {
+                return existing.clone();
+            }
+            let mut next = (*current).clone();
+            next.insert(key.clone(), image.clone());
+            let previous = self.images.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return image;
+            }
+        }
+    }
+}
 
 impl FileIcons {
     /// Parse the embedded table. A damaged table costs icons, not data:
@@ -117,6 +168,9 @@ pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
     let state = cx.global::<crate::state::FerretState>();
     let local = entry.path.as_local()?;
     let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+    if let Some(image) = state.rendered_os_icons.get(&key) {
+        return Some(gpui::ImageSource::Render(image));
+    }
     let bitmap = state.os_icons.lookup(&key)?;
 
     // Guarded rather than trusted: the bytes crossed an `unsafe` boundary,
@@ -129,23 +183,26 @@ pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
         bitmap.height,
         bitmap.bgra,
     )?);
-    Some(gpui::ImageSource::Render(std::sync::Arc::new(
-        gpui::RenderImage::new(vec![frame]),
-    )))
+    let image = Arc::new(gpui::RenderImage::new(vec![frame]));
+    Some(gpui::ImageSource::Render(
+        state.rendered_os_icons.insert_if_absent(key, image),
+    ))
 }
 
-/// Ask the platform to resolve the icons for the types on screen.
+/// Derive one platform-icon request for each uncached file type.
 ///
-/// Off the render path, and deduplicated by key: a 200,000-entry directory
-/// of `.rs` files costs one OS call, not 200,000.
-pub fn resolve_os_icons(entries: &[Entry], cx: &mut gpui::App) {
-    let state = cx.global::<crate::state::FerretState>();
-    if !state.os_icons.is_available() {
-        return;
+/// This deliberately consumes borrowed entries while the folder model is
+/// available. The returned vector is bounded by distinct icon keys rather
+/// than the number of directory entries.
+pub(crate) fn collect_os_icon_requests<'a>(
+    entries: impl Iterator<Item = &'a Entry>,
+    provider: &dyn ferret_platform::IconProvider,
+) -> Vec<OsIconRequest> {
+    if !provider.is_available() {
+        return Vec::new();
     }
-    let provider = state.os_icons.clone();
 
-    let mut wanted: Vec<(ferret_platform::IconKey, std::path::PathBuf)> = Vec::new();
+    let mut wanted = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in entries {
         let Some(local) = entry.path.as_local() else {
@@ -157,9 +214,17 @@ pub fn resolve_os_icons(entries: &[Entry], cx: &mut gpui::App) {
         }
         wanted.push((key, local.to_path_buf()));
     }
+    wanted
+}
+
+/// Resolve a pre-deduplicated set of platform icon requests off the render
+/// path. See [`collect_os_icon_requests`] for why this takes requests instead
+/// of a whole folder listing.
+pub(crate) fn resolve_os_icons(wanted: Vec<OsIconRequest>, cx: &mut gpui::App) {
     if wanted.is_empty() {
         return;
     }
+    let provider = cx.global::<crate::state::FerretState>().os_icons.clone();
 
     cx.background_executor()
         .spawn(async move {

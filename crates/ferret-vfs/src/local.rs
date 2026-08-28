@@ -1,10 +1,10 @@
-use crate::config::LISTING_BUFFER;
+use crate::config::{LISTING_BATCH_SIZE, LISTING_BUFFER};
 use crate::{
-    Capabilities, Entry, EntryKind, Metadata, RemoveMode, Result, SymlinkTarget, Vfs, VfsError,
-    VfsPath,
+    Capabilities, DirEntryBatch, Entry, EntryKind, Metadata, ReadDirStream, RemoveMode, Result,
+    SymlinkTarget, Vfs, VfsError, VfsPath,
 };
 use async_trait::async_trait;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::StreamExt;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -43,14 +43,14 @@ impl Vfs for LocalFs {
         }
     }
 
-    fn read_dir(&self, dir: &VfsPath) -> BoxStream<'static, Result<Entry>> {
+    fn read_dir(&self, dir: &VfsPath) -> ReadDirStream {
         let dir = dir.clone();
         let root = match Self::require_local(&dir) {
             Ok(root) => root,
             Err(err) => return futures::stream::once(async move { Err(err) }).boxed(),
         };
 
-        let (tx, rx) = async_channel::bounded::<Result<Entry>>(LISTING_BUFFER);
+        let (tx, rx) = async_channel::bounded::<Result<DirEntryBatch>>(LISTING_BUFFER);
         let fill_metadata = cfg!(windows);
 
         // The walk is blocking, so it runs on the blocking pool. `send_blocking`
@@ -66,10 +66,16 @@ impl Vfs for LocalFs {
                     }
                 };
 
+                let mut batch = Vec::with_capacity(LISTING_BATCH_SIZE);
                 for item in iter {
                     let entry = match item {
                         Ok(entry) => entry,
                         Err(source) => {
+                            if !batch.is_empty()
+                                && tx.send_blocking(Ok(std::mem::take(&mut batch))).is_err()
+                            {
+                                return;
+                            }
                             if tx
                                 .send_blocking(Err(VfsError::from_io("read", &dir, source)))
                                 .is_err()
@@ -80,9 +86,17 @@ impl Vfs for LocalFs {
                         }
                     };
 
-                    if tx.send_blocking(Ok(convert(entry, fill_metadata))).is_err() {
+                    batch.push(convert(entry, fill_metadata));
+                    if batch.len() < LISTING_BATCH_SIZE {
+                        continue;
+                    }
+                    if tx.send_blocking(Ok(std::mem::take(&mut batch))).is_err() {
                         return; // consumer went away: stop walking.
                     }
+                }
+
+                if !batch.is_empty() {
+                    let _ = tx.send_blocking(Ok(batch));
                 }
             })
             .await;
@@ -99,6 +113,26 @@ impl Vfs for LocalFs {
             fs::symlink_metadata(&local)
                 .map(|md| to_metadata(&md, &owned))
                 .map_err(|source| VfsError::from_io("read", &owned, source))
+        })
+        .await
+    }
+
+    async fn metadata_batch(&self, paths: Vec<VfsPath>) -> Vec<(VfsPath, Result<Metadata>)> {
+        // One blocking-pool dispatch per UI batch. `symlink_metadata` remains
+        // serial inside that task, but this avoids one task spawn and wakeup
+        // per row while preserving per-path errors for the caller.
+        smol::unblock(move || {
+            paths
+                .into_iter()
+                .map(|path| {
+                    let result = Self::require_local(&path).and_then(|local| {
+                        fs::symlink_metadata(&local)
+                            .map(|md| to_metadata(&md, &path))
+                            .map_err(|source| VfsError::from_io("read", &path, source))
+                    });
+                    (path, result)
+                })
+                .collect()
         })
         .await
     }
@@ -255,8 +289,14 @@ impl Vfs for LocalFs {
 }
 
 fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
+    // `DirEntry::path` joins the parent and file name. Keep that allocation
+    // alive for every path-dependent operation below rather than rebuilding it
+    // for symlink resolution and broken-link reporting.
     let path = VfsPath::Local(entry.path());
     let name = entry.file_name().to_string_lossy().into_owned();
+    let local = path
+        .as_local()
+        .expect("a LocalFs directory entry always has a local path");
 
     // `file_type` comes from the directory read itself and costs nothing.
     let file_type = entry.file_type().ok();
@@ -266,7 +306,7 @@ fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
         Some(ft) if ft.is_symlink() => EntryKind::Symlink {
             // Resolving the target is what tells a working link from a broken
             // one, and the list draws them differently, so it cannot wait.
-            target_kind: fs::metadata(entry.path()).ok().map(|md| {
+            target_kind: fs::metadata(local).ok().map(|md| {
                 if md.is_dir() {
                     SymlinkTarget::Dir
                 } else {
@@ -288,7 +328,7 @@ fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
     // has to name what it is pointing at.
     let link_target = kind
         .is_broken_symlink()
-        .then(|| fs::read_link(entry.path()).ok())
+        .then(|| fs::read_link(local).ok())
         .flatten();
 
     Entry {
@@ -381,11 +421,16 @@ mod tests {
 
     fn collect(fs: &LocalFs, dir: &VfsPath) -> BTreeMap<String, Entry> {
         smol::block_on(async {
-            fs.read_dir(dir)
-                .filter_map(|r| async move { r.ok() })
-                .map(|e| (e.name.clone(), e))
-                .collect()
-                .await
+            let mut stream = fs.read_dir(dir);
+            let mut entries = BTreeMap::new();
+            while let Some(item) = stream.next().await {
+                if let Ok(batch) = item {
+                    for entry in batch {
+                        entries.insert(entry.name.clone(), entry);
+                    }
+                }
+            }
+            entries
         })
     }
 
@@ -456,7 +501,9 @@ mod tests {
     #[test]
     fn dropping_the_stream_stops_the_walk() {
         let root = tempdir("cancel");
-        for i in 0..2_000 {
+        // More batches than the bounded channel can accept ensures the
+        // producer reaches a send after the consumer has gone away.
+        for i in 0..(LISTING_BATCH_SIZE * (LISTING_BUFFER + 2)) {
             fs::write(root.join(format!("f{i:05}")), b"").unwrap();
         }
 
@@ -465,6 +512,31 @@ mod tests {
             assert!(stream.next().await.is_some());
             drop(stream); // the producer's next send fails and it returns
         });
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn listings_arrive_in_bounded_batches() {
+        let root = tempdir("batches");
+        let expected = LISTING_BATCH_SIZE + 1;
+        for i in 0..expected {
+            fs::write(root.join(format!("f{i:05}")), b"").unwrap();
+        }
+
+        let batches: Vec<DirEntryBatch> = smol::block_on(async {
+            LocalFs::new()
+                .read_dir(&VfsPath::Local(root.clone()))
+                .filter_map(|item| async move { item.ok() })
+                .collect()
+                .await
+        });
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), LISTING_BATCH_SIZE);
+        assert_eq!(batches[1].len(), 1);
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), expected);
+        assert!(batches.iter().all(|batch| !batch.is_empty()));
 
         fs::remove_dir_all(&root).ok();
     }
@@ -575,6 +647,7 @@ mod link_target_tests {
             fs_impl
                 .read_dir(&VfsPath::local(root.clone()))
                 .filter_map(|r| async move { r.ok() })
+                .flat_map(futures::stream::iter)
                 .collect()
                 .await
         });

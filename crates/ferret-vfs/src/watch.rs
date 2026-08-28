@@ -10,8 +10,13 @@
 //! Dropping [`Watch`] unregisters the watcher. There is no stop token to
 //! forget, matching the cancel-by-drop rule of `Vfs::read_dir`.
 
+use crate::config::WATCH_EVENT_BUFFER;
 use notify::Watcher as _;
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 /// How long the watcher will wait before reporting an event burst.
@@ -28,8 +33,64 @@ pub enum WatchEvent {
     /// because by the time the event lands the truth lives on disk, not in
     /// the event kind.
     Changed(Vec<std::path::PathBuf>),
+    /// At least one event could not fit in the delivery queue.
+    ///
+    /// Individual paths are no longer a complete account of disk state, so
+    /// consumers must discard their incremental work and re-list the watched
+    /// directory. This is sent exactly once for each overflow interval.
+    Desynced,
     /// The watched directory itself was deleted (or became unreachable).
     Gone,
+}
+
+/// Delivers native callbacks without ever blocking a native watcher thread.
+///
+/// Once the bounded queue fills, the normal events are deliberately discarded:
+/// their individual paths cannot make the consumer's model correct again. A
+/// single helper thread waits for room to deliver `Desynced`; that event is the
+/// durable recovery contract. The flag keeps a large burst from creating one
+/// waiting thread per discarded native event.
+#[derive(Clone)]
+struct EventForwarder {
+    tx: async_channel::Sender<WatchEvent>,
+    desync_pending: Arc<AtomicBool>,
+}
+
+impl EventForwarder {
+    fn new(tx: async_channel::Sender<WatchEvent>) -> Self {
+        Self {
+            tx,
+            desync_pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn forward(&self, event: WatchEvent) {
+        // A queued (or waiting) desync makes all later individual events
+        // redundant until the consumer has re-listed the directory.
+        if self.desync_pending.load(Ordering::Acquire) {
+            return;
+        }
+
+        if !matches!(
+            self.tx.try_send(event),
+            Err(async_channel::TrySendError::Full(_))
+        ) {
+            return;
+        }
+
+        // Only the first overflowing callback starts the waiter. It blocks
+        // outside notify's callback thread and unblocks when the receiver is
+        // dropped, so dropping Watch remains cancellation by drop.
+        if self.desync_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let tx = self.tx.clone();
+        let desync_pending = Arc::clone(&self.desync_pending);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(WatchEvent::Desynced);
+            desync_pending.store(false, Ordering::Release);
+        });
+    }
 }
 
 /// A live watch over one directory.
@@ -45,11 +106,12 @@ impl Watch {
     /// Start watching `dir` non-recursively.
     ///
     /// The native watcher runs on its own thread and forwards events into a
-    /// bounded channel; when the channel is full the oldest behaviour wins by
-    /// dropping the *new* event, because a missed event only costs freshness,
-    /// while a blocked watcher thread would cost the whole backend.
+    /// bounded channel. It never waits for the UI: when that queue fills, a
+    /// single [`WatchEvent::Desynced`] is delivered as soon as there is room,
+    /// telling the consumer to perform one complete re-list.
     pub fn start(dir: PathBuf) -> std::io::Result<Watch> {
-        let (tx, rx) = async_channel::bounded::<WatchEvent>(64);
+        let (tx, rx) = async_channel::bounded::<WatchEvent>(WATCH_EVENT_BUFFER);
+        let forwarder = EventForwarder::new(tx);
         let watched = dir.clone();
 
         let to_io = |err: notify::Error| std::io::Error::other(err.to_string());
@@ -71,7 +133,7 @@ impl Watch {
                 // A path-level error usually means the subject vanished.
                 Err(_) => WatchEvent::Gone,
             };
-            let _ = tx.try_send(kind);
+            forwarder.forward(kind);
         })
         .map_err(to_io)?;
 
@@ -142,5 +204,25 @@ mod tests {
         std::thread::sleep(DEBOUNCE);
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn overflow_eventually_reports_a_desync() {
+        let (tx, rx) = async_channel::bounded(1);
+        let forwarder = EventForwarder::new(tx);
+
+        forwarder.forward(WatchEvent::Changed(vec![PathBuf::from("first")]));
+        forwarder.forward(WatchEvent::Changed(vec![PathBuf::from("dropped")]));
+
+        assert!(matches!(
+            rx.recv_blocking()
+                .expect("the initial event must be queued"),
+            WatchEvent::Changed(_)
+        ));
+        assert_eq!(
+            rx.recv_blocking()
+                .expect("overflow must be reported once capacity returns"),
+            WatchEvent::Desynced
+        );
     }
 }

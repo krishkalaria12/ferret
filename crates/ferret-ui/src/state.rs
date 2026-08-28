@@ -13,7 +13,7 @@ use ferret_platform::Platform;
 use ferret_settings::{FolderPrefs, FolderView, Settings};
 use ferret_vfs::{LocalFs, VfsPath};
 
-use crate::icons::FileIcons;
+use crate::icons::{FileIcons, RenderedIconCache};
 
 /// Everything global, in one struct.
 pub struct FerretState {
@@ -26,6 +26,10 @@ pub struct FerretState {
     /// Real Finder/Explorer icons, when the platform can supply them. Layers
     /// over `icons` and wins once resolved.
     pub os_icons: Arc<dyn ferret_platform::IconProvider>,
+    /// Decoded GPUI images keyed by icon type. This is distinct from the
+    /// platform cache: it preserves texture identity across frames and keeps
+    /// byte-to-image conversion out of the steady-state render path.
+    pub rendered_os_icons: RenderedIconCache,
 }
 
 impl gpui::Global for FerretState {}
@@ -63,6 +67,7 @@ pub fn load_state() -> FerretState {
         platform: ferret_platform::platform(),
         icons: FileIcons::embedded(),
         os_icons: ferret_platform::icon_provider(),
+        rendered_os_icons: RenderedIconCache::default(),
     }
 }
 

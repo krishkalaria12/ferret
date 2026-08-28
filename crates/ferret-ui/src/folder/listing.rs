@@ -29,6 +29,8 @@ impl Folder {
         self.row_of_path.clear();
         self.top_index.clear();
         self.known_paths.clear();
+        self.selected_visible_paths = std::sync::Arc::from([]);
+        self.selected_visible_bytes = 0;
         // The children are re-read once the parent listing lands; which
         // folders are *open* is the user's intent and survives a refresh.
         self.children.clear();
@@ -58,29 +60,26 @@ impl Folder {
 
         cx.spawn(async move |this, cx| {
             let mut stream = fs.read_dir(&dir);
-            let mut buffer: Vec<Entry> = Vec::new();
             let mut first_error: Option<VfsError> = None;
 
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(entry) => buffer.push(entry),
+                    Ok(batch) => {
+                        let ok = this.update(cx, |folder, cx| {
+                            if folder.generation != generation {
+                                return false;
+                            }
+                            folder.apply_batch(batch, cx);
+                            true
+                        });
+                        if ok.is_err() {
+                            return; // Folder dropped: stop walking.
+                        }
+                    }
                     Err(err) => {
                         // A failed open ends the stream; a bad child does not.
                         first_error = Some(err);
                         break;
-                    }
-                }
-                if buffer.len() >= BATCH_SIZE {
-                    let batch = std::mem::take(&mut buffer);
-                    let ok = this.update(cx, |folder, cx| {
-                        if folder.generation != generation {
-                            return false;
-                        }
-                        folder.apply_batch(batch, cx);
-                        true
-                    });
-                    if ok.is_err() {
-                        return; // Folder dropped: stop walking.
                     }
                 }
             }
@@ -88,9 +87,6 @@ impl Folder {
             let _ = this.update(cx, |folder, cx| {
                 if folder.generation != generation {
                     return;
-                }
-                if !buffer.is_empty() {
-                    folder.apply_batch(buffer, cx);
                 }
                 folder.finish_loading(first_error, cx);
             });
@@ -166,14 +162,17 @@ impl Folder {
 
                 let mut paths: Vec<std::path::PathBuf> = Vec::new();
                 let mut gone = false;
+                let mut desynced = false;
                 match event {
                     WatchEvent::Changed(changed) => paths.extend(changed),
+                    WatchEvent::Desynced => desynced = true,
                     WatchEvent::Gone => gone = true,
                 }
                 // Drain whatever else piled up behind the debounce.
                 while let Ok(more) = rx.try_recv() {
                     match more {
                         WatchEvent::Changed(changed) => paths.extend(changed),
+                        WatchEvent::Desynced => desynced = true,
                         WatchEvent::Gone => gone = true,
                     }
                 }
@@ -184,6 +183,11 @@ impl Folder {
                     }
                     if gone {
                         folder.mark_gone(cx);
+                    } else if desynced {
+                        // A full watcher queue means the individual paths no
+                        // longer form a complete delta. One clean walk is the
+                        // only way to converge with the filesystem again.
+                        folder.reload_preserving_state(cx);
                     } else if !paths.is_empty() {
                         // A huge burst is cheaper to answer with one clean
                         // walk than with hundreds of stats.

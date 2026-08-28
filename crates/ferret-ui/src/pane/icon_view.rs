@@ -116,10 +116,10 @@ impl FilePane {
         };
 
         let tile_icon = entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx);
-        let dragged = if selected {
-            self.folder.read(cx).selected_paths()
+        let dragged: Arc<[VfsPath]> = if selected {
+            self.folder.read(cx).selected_paths_shared()
         } else {
-            vec![entry.path.clone()]
+            Arc::from([entry.path.clone()])
         };
         let drag_tile = drag_payload(dragged);
         let tile_drop_dir = entry.is_dir_like().then(|| entry.path.clone());

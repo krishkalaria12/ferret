@@ -8,7 +8,14 @@ impl Render for FilePane {
         // The slow-click timer has no window to focus an editor with, so it
         // leaves the request here and the next frame starts the rename.
         if let Some(path) = self.pending_rename.take() {
-            self.begin_rename(path, window, cx);
+            if self.folder.read(cx).has_entry(&path) {
+                self.begin_rename(path, window, cx);
+            } else {
+                // The filesystem action completed before its watcher event.
+                // Keep the request; `RowsChanged` will re-render this pane
+                // when the new row becomes available.
+                self.pending_rename = Some(path);
+            }
         }
         // Drops arrive from row listeners that cannot reach the browser; this
         // is where they become an event it can act on.

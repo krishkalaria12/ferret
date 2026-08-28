@@ -88,6 +88,7 @@ impl Folder {
         if let Some(last) = self.selection.iter().next().cloned() {
             self.anchor = Some(last);
         }
+        self.refresh_selection_summary();
     }
 
     /// Type-ahead: select the first row at or after `from` whose name starts
@@ -161,6 +162,7 @@ impl Folder {
             self.known_paths.insert(entry.path.clone());
         }
         self.prune_stale_paths();
+        self.refresh_selection_summary();
     }
 
     /// Splice one expanded folder's visible children in beneath it, and

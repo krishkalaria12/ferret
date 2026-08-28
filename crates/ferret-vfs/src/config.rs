@@ -8,13 +8,33 @@
 //! This is for *tunables*, not for values that are part of a type's contract.
 //! An enum discriminant or a protocol constant belongs with its type.
 
-/// How many entries may sit in a listing channel before the producer parks.
+/// How many batches may sit in a listing channel before the producer parks.
 ///
 /// Bounded on purpose. Unbounded would let a 200,000-entry walk materialise the
-/// whole directory in memory, which is the thing streaming exists to avoid.
-/// Large enough that the consumer is never starved between frames; small enough
-/// that the buffer is a rounding error against the rows already on screen.
-pub const LISTING_BUFFER: usize = 512;
+/// whole directory in memory, which is the thing streaming exists to avoid. At
+/// [`LISTING_BATCH_SIZE`] entries per batch, this cap still bounds the queued
+/// rows while avoiding one send and receive per directory entry. Two batches
+/// let disk I/O stay one model update ahead without turning a slow UI into an
+/// unbounded in-memory listing.
+pub const LISTING_BUFFER: usize = 2;
+
+/// How many filesystem notifications may wait for the UI before it must
+/// resynchronise with a fresh listing.
+///
+/// Native watcher threads must never wait for the UI: doing so can stall the
+/// operating system's event delivery. This small buffer absorbs ordinary save
+/// bursts; a full buffer is explicitly reported as [`crate::WatchEvent::Desynced`]
+/// so the consumer can converge with one full reload instead of silently
+/// keeping an incomplete picture.
+pub const WATCH_EVENT_BUFFER: usize = 64;
+
+/// Entries grouped into one item of a directory listing stream.
+///
+/// A 200,000-entry directory reaches the UI in roughly fifty model updates,
+/// rather than one per row. This is large enough to amortize channel and
+/// executor overhead, but small enough that the first visible rows do not wait
+/// for a complete directory walk.
+pub const LISTING_BATCH_SIZE: usize = 4_096;
 
 /// Bytes read when sniffing a file's type or building a preview.
 ///

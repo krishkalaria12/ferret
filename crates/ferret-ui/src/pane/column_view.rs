@@ -325,14 +325,7 @@ impl FilePane {
         let theme = cx.theme();
         let (count, size, selected_entry) = self.folder.read_with(cx, |folder, _| {
             let count = folder.selection_count();
-            let entry = (count == 1)
-                .then(|| folder.selected_paths().first().cloned())
-                .flatten()
-                .and_then(|path| {
-                    (0..folder.row_count())
-                        .find_map(|row| folder.entry_at(row).filter(|e| e.path == path))
-                        .cloned()
-                });
+            let entry = folder.selected_entry().cloned();
             (count, folder.selection_size(), entry)
         });
 

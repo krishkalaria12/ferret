@@ -301,7 +301,7 @@ impl Browser {
                     let Some(this) = this.upgrade() else {
                         return;
                     };
-                    let (sources, dest) = (dragged.paths.clone(), dest.clone());
+                    let (sources, dest) = (dragged.paths.to_vec(), dest.clone());
                     let force_copy = window.modifiers().alt;
                     this.update(cx, |this, cx| {
                         // Same guard the pane applies.

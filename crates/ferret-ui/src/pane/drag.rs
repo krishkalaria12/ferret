@@ -13,7 +13,7 @@ use super::*;
 /// manager avoids.
 #[derive(Clone, Debug)]
 pub struct DraggedPaths {
-    pub paths: Vec<VfsPath>,
+    pub paths: Arc<[VfsPath]>,
 }
 
 /// The little card that follows the cursor during a drag.
@@ -117,8 +117,8 @@ pub(super) fn external_payload(
 }
 
 /// Build the drag payload and its preview for a row.
-pub(super) fn drag_payload(paths: Vec<VfsPath>) -> (DraggedPaths, SharedString) {
-    let label = match paths.as_slice() {
+pub(super) fn drag_payload(paths: Arc<[VfsPath]>) -> (DraggedPaths, SharedString) {
+    let label = match paths.as_ref() {
         [only] => SharedString::from(only.file_name().unwrap_or("item").to_string()),
         other => SharedString::from(format!("{} items", other.len())),
     };

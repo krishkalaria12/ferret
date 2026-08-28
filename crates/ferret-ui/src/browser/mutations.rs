@@ -38,17 +38,12 @@ impl Browser {
         let name = unique_name(&self.entry_names(cx), "untitled folder");
         let path = dir.join(&name);
 
-        let fs = cx.global::<FerretState>().fs;
-        // A single mkdir is sub-millisecond on local disks; blocking buys us
-        // a live window to start the inline rename in. Remote backends will
-        // route through an operation queue instead.
-        if let Err(err) = smol_block_on(fs.create_dir(&path)) {
-            window.push_notification(Notification::error(err.to_string()), cx);
-            return;
-        }
-        self.active()
-            .pane
-            .update(cx, |pane, cx| pane.begin_rename(path, window, cx));
+        self.create_then_rename(
+            path,
+            move |fs, path| async move { fs.create_dir(&path).await },
+            window,
+            cx,
+        );
     }
 
     pub(super) fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -56,14 +51,45 @@ impl Browser {
         let name = unique_name(&self.entry_names(cx), "untitled.txt");
         let path = dir.join(&name);
 
+        self.create_then_rename(
+            path,
+            move |fs, path| async move { fs.create_file(&path).await },
+            window,
+            cx,
+        );
+    }
+
+    /// Run a creation operation away from the window thread, then start the
+    /// inline rename only after the watcher can observe a real path.
+    fn create_then_rename<F, Fut>(
+        &mut self,
+        path: VfsPath,
+        create: F,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce(ferret_vfs::LocalFs, VfsPath) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ferret_vfs::Result<()>> + Send + 'static,
+    {
         let fs = cx.global::<FerretState>().fs;
-        if let Err(err) = smol_block_on(fs.create_file(&path)) {
-            window.push_notification(Notification::error(err.to_string()), cx);
-            return;
-        }
-        self.active()
-            .pane
-            .update(cx, |pane, cx| pane.begin_rename(path, window, cx));
+        let window_handle = window.window_handle();
+        // Capture the initiating pane. If the user changes tabs while a slow
+        // volume creates the item, the rename must not land in whichever tab
+        // happens to be active when the operation completes.
+        let pane = self.active().pane.clone();
+        cx.spawn(async move |_, cx| match create(fs, path.clone()).await {
+            Ok(()) => {
+                let _ = window_handle.update(cx, |_, _window, cx| {
+                    pane.update(cx, |pane, cx| pane.request_rename_when_visible(path, cx));
+                });
+            }
+            Err(err) => {
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    window.push_notification(Notification::error(err.to_string()), cx);
+                });
+            }
+        })
+        .detach();
     }
 
     pub(super) fn trash_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {

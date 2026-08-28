@@ -13,9 +13,11 @@
 //! smol::block_on(async {
 //!     let fs = LocalFs::new();
 //!     let mut entries = fs.read_dir(&VfsPath::local("/tmp"));
-//!     while let Some(entry) = entries.next().await {
-//!         if let Ok(entry) = entry {
-//!             println!("{}", entry.name);
+//!     while let Some(batch) = entries.next().await {
+//!         if let Ok(batch) = batch {
+//!             for entry in batch {
+//!                 println!("{}", entry.name);
+//!             }
 //!         }
 //!     }
 //! });
@@ -45,5 +47,5 @@ pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
 pub use errors::{Result, VfsError};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
-pub use vfs::{Capabilities, RemoveMode, Vfs};
+pub use vfs::{Capabilities, DirEntryBatch, ReadDirStream, RemoveMode, Vfs};
 pub use watch::{Watch, WatchEvent};

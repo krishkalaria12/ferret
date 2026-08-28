@@ -59,7 +59,7 @@ fn measure(fs: &LocalFs, label: &str, dir: &Path) -> Result<Measurement> {
                 first = Some(started.elapsed());
             }
             match item {
-                Ok(_) => entries += 1,
+                Ok(batch) => entries += batch.len(),
                 Err(_) => errors += 1,
             }
         }

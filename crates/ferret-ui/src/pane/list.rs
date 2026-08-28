@@ -318,10 +318,10 @@ impl TableDelegate for ListDelegate {
         // Dragging an unselected row carries that row; dragging a selected
         // one carries the whole selection (§8).
         let entry = folder.entry_at(row_ix).cloned();
-        let dragged: Vec<VfsPath> = match &entry {
-            Some(entry) if selected => folder.selected_paths(),
-            Some(entry) => vec![entry.path.clone()],
-            None => Vec::new(),
+        let dragged: Arc<[VfsPath]> = match &entry {
+            Some(_) if selected => folder.selected_paths_shared(),
+            Some(entry) => Arc::from([entry.path.clone()]),
+            None => Arc::from([]),
         };
         let drop_dir = entry
             .as_ref()

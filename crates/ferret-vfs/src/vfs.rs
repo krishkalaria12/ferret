@@ -3,6 +3,16 @@ use crate::{Entry, Metadata, Result, VfsPath};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
+/// One payload from a directory listing stream.
+///
+/// Batches keep a large walk from paying a channel send, task wake, and model
+/// update for every individual row. Entries within a batch retain the order in
+/// which the backend found them.
+pub type DirEntryBatch = Vec<Entry>;
+
+/// The asynchronous, cancel-by-drop stream returned from [`Vfs::read_dir`].
+pub type ReadDirStream = BoxStream<'static, Result<DirEntryBatch>>;
+
 /// What a backend can actually do.
 ///
 /// The UI reads this to disable actions up front instead of letting the user
@@ -43,8 +53,9 @@ pub enum RemoveMode {
 /// 1. **Nothing blocks a frame.** Every method is async even for local disk,
 ///    so a high-latency remote mount is a slow call rather than a frozen
 ///    window.
-/// 2. **Listings stream.** [`Vfs::read_dir`] yields entries as they arrive, so
-///    a huge directory paints immediately instead of after the walk finishes.
+/// 2. **Listings stream.** [`Vfs::read_dir`] yields entry batches as they
+///    arrive, so a huge directory paints immediately instead of after the walk
+///    finishes.
 ///
 /// **Cancellation is by drop.** Dropping the stream from `read_dir` stops the
 /// work; there is no separate cancel token to forget to call.
@@ -54,17 +65,31 @@ pub trait Vfs: Send + Sync + 'static {
 
     /// Stream the contents of a directory.
     ///
-    /// Entries arrive in whatever order the platform yields them — sorting
+    /// Batches arrive in whatever order the platform yields entries — sorting
     /// belongs to the view, which has to re-sort on column clicks anyway.
-    /// A per-entry `Err` is a single unreadable child and the stream continues;
-    /// a failure to open the directory at all arrives as the first item and
-    /// ends it.
-    fn read_dir(&self, dir: &VfsPath) -> BoxStream<'static, Result<Entry>>;
+    /// An `Err` item is a single unreadable child and the stream continues; a
+    /// failure to open the directory at all arrives as the first item and ends
+    /// it. Successful items are never empty.
+    fn read_dir(&self, dir: &VfsPath) -> ReadDirStream;
 
     /// Fill in the second metadata tier for one entry.
     ///
     /// Skip entirely when [`Capabilities::metadata_in_listing`] is set.
     async fn metadata(&self, path: &VfsPath) -> Result<Metadata>;
+
+    /// Fill in metadata for a bounded group of entries.
+    ///
+    /// Backends with blocking filesystem APIs should override this to perform
+    /// the whole group in one blocking-pool task. Results remain per-path so
+    /// one inaccessible file does not withhold the other rows' metadata.
+    async fn metadata_batch(&self, paths: Vec<VfsPath>) -> Vec<(VfsPath, Result<Metadata>)> {
+        let mut resolved = Vec::with_capacity(paths.len());
+        for path in paths {
+            let result = self.metadata(&path).await;
+            resolved.push((path, result));
+        }
+        resolved
+    }
 
     /// Stat one path into a full [`Entry`]: kind resolved (including symlink
     /// targets) plus metadata in one call.

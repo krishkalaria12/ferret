@@ -86,7 +86,7 @@ impl Folder {
             let mut entries = Vec::new();
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(entry) => entries.push(entry),
+                    Ok(batch) => entries.extend(batch),
                     // An unreadable child folder expands to nothing rather
                     // than failing the whole listing it sits in.
                     Err(_) => break,
@@ -117,40 +117,67 @@ impl Folder {
     ) -> bool {
         let mut changed = false;
         let mut metadata_changed = false;
+        let mut updates = HashMap::new();
+        let mut removed = HashSet::new();
 
         for (path, result) in probed {
             let vp = VfsPath::local(path);
             match result {
-                Ok(entry) => match self.top_index.get(&vp).copied() {
-                    Some(ix) => {
-                        if let Some(existing) = self.entries.get_mut(ix) {
-                            if existing.metadata != entry.metadata {
-                                metadata_changed = true;
-                            }
-                            *existing = entry;
-                            changed = true;
-                        }
-                    }
-                    None => {
-                        // Keep `entries` sorted; insert at the sorted spot.
-                        let pos = self.entries.partition_point(|existing| {
-                            cmp_entries(existing, &entry, self.sort_key, self.sort_order)
-                                == std::cmp::Ordering::Less
-                        });
-                        self.entries.insert(pos, entry);
-                        changed = true;
-                    }
-                },
+                Ok(entry) => {
+                    // The last probe for a path wins. In particular, a file
+                    // removed and recreated during one watcher burst remains
+                    // present rather than being removed by an earlier probe.
+                    removed.remove(&vp);
+                    updates.insert(vp, entry);
+                }
                 Err(err) if err.is_gone() => {
-                    if let Some(ix) = self.top_index.get(&vp).copied() {
-                        self.entries.remove(ix);
-                        changed = true;
-                    }
+                    updates.remove(&vp);
+                    removed.insert(vp);
                 }
                 // Transient stat failures leave the row as it was; the next
                 // event or a manual refresh corrects it.
                 Err(_) => {}
             }
+        }
+
+        let mut inserts = Vec::new();
+        for (path, entry) in updates {
+            let Some(ix) = self.top_index.get(&path).copied() else {
+                inserts.push(entry);
+                continue;
+            };
+            let Some(existing) = self.entries.get_mut(ix) else {
+                // `top_index` is rebuilt with `entries`; this is defensive
+                // against an interrupted reload, where treating the probe as
+                // a create is safer than overwriting an unrelated row.
+                inserts.push(entry);
+                continue;
+            };
+            debug_assert_eq!(existing.path, path);
+            metadata_changed |= existing.metadata != entry.metadata;
+            *existing = entry;
+            changed = true;
+        }
+
+        // Do not remove or insert while using `top_index`: either operation
+        // shifts the remaining indices. All replacements above have used the
+        // pre-batch index, so structural mutation can now happen in one pass.
+        if !removed.is_empty() {
+            let old_len = self.entries.len();
+            self.entries.retain(|entry| !removed.contains(&entry.path));
+            changed |= self.entries.len() != old_len;
+        }
+
+        for entry in inserts {
+            // A successful probe for a path absent from the old listing is a
+            // create. Keep it sorted without consulting an index invalidated
+            // by earlier insertions in this batch.
+            let pos = self.entries.partition_point(|existing| {
+                cmp_entries(existing, &entry, self.sort_key, self.sort_order)
+                    == std::cmp::Ordering::Less
+            });
+            self.entries.insert(pos, entry);
+            changed = true;
         }
 
         if !changed {
@@ -217,14 +244,16 @@ impl Folder {
     /// calls even for a 200,000-entry directory, and it runs off the render
     /// path — a row draws the bundled icon until the real one lands.
     pub(super) fn request_os_icons(&mut self, cx: &mut Context<Self>) {
-        let entries: Vec<Entry> = self
-            .entries
-            .iter()
-            .chain(self.children.values().flatten())
-            .cloned()
-            .collect();
+        let provider = cx.global::<crate::state::FerretState>().os_icons.clone();
+        let wanted = crate::icons::collect_os_icon_requests(
+            self.entries.iter().chain(self.children.values().flatten()),
+            provider.as_ref(),
+        );
+        if wanted.is_empty() {
+            return;
+        }
         cx.spawn(async move |this, cx| {
-            cx.update(|cx| crate::icons::resolve_os_icons(&entries, cx));
+            cx.update(|cx| crate::icons::resolve_os_icons(wanted, cx));
             // The provider fills its cache in the background; one repaint
             // shortly after is enough to pick the results up.
             cx.background_executor().timer(OS_ICON_REPAINT_DELAY).await;
@@ -252,15 +281,13 @@ impl Folder {
         }
 
         cx.spawn(async move |this, cx| {
-            const CHUNK: usize = 256;
-            for chunk in targets.chunks(CHUNK) {
-                let mut filled: Vec<(VfsPath, ferret_vfs::Metadata)> =
-                    Vec::with_capacity(chunk.len());
-                for path in chunk {
-                    if let Ok(md) = fs.metadata(path).await {
-                        filled.push((path.clone(), md));
-                    }
-                }
+            for chunk in targets.chunks(METADATA_BATCH_SIZE) {
+                let filled = fs
+                    .metadata_batch(chunk.to_vec())
+                    .await
+                    .into_iter()
+                    .filter_map(|(path, result)| result.ok().map(|metadata| (path, metadata)))
+                    .collect();
                 let done = targets.last() == chunk.last();
                 let ok = this.update(cx, |folder, cx| {
                     if folder.generation != generation {
@@ -283,10 +310,17 @@ impl Folder {
         final_chunk: bool,
         cx: &mut Context<Self>,
     ) {
+        let mut selection_changed = false;
         for (path, md) in filled {
+            selection_changed |= self.selection.contains(&path);
             if let Some(entry) = self.entry_mut(&path) {
                 entry.metadata = Some(md);
             }
+        }
+        if selection_changed {
+            // A selected row may have acquired its first size. Keep the
+            // status-bar cache coherent with the row repaint below.
+            self.refresh_selection_summary();
         }
 
         let now = Instant::now();

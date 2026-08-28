@@ -13,6 +13,7 @@
 //!    user's selection must not follow the shuffle.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use ferret_settings::{SortKey, SortOrder};
@@ -29,14 +30,14 @@ mod streaming_tests;
 #[cfg(test)]
 mod tests;
 
-/// How many entries accumulate before a batch is flushed to the model.
-///
-/// Large enough that a 200,000-entry walk costs ~50 model updates rather than
-/// 200,000; small enough that rows visibly stream in.
-pub const BATCH_SIZE: usize = 4_096;
-
 /// How often the metadata backfill reports progress to the UI.
 pub const META_NOTIFY_EVERY: Duration = Duration::from_millis(120);
+
+/// Entries resolved by one metadata blocking-pool task.
+///
+/// A chunk amortises task dispatch without holding back so many updates that
+/// Size and Date appear frozen on a large directory.
+pub const METADATA_BATCH_SIZE: usize = 256;
 
 /// How long a listing may produce nothing before the header admits it is
 /// working (`docs/ui-base.html` §9).
@@ -134,6 +135,13 @@ pub struct Folder {
     filter: Option<String>,
 
     selection: HashSet<VfsPath>,
+    /// Selected paths in display order. This is kept separately from
+    /// `selection` because selection survives filtering, while commands and
+    /// the status bar operate only on rows the person can currently see.
+    selected_visible_paths: Arc<[VfsPath]>,
+    /// Cached alongside `selected_visible_paths` so rendering the status bar
+    /// never has to walk a large listing.
+    selected_visible_bytes: u64,
     anchor: Option<VfsPath>,
     cursor: Option<VfsPath>,
 
@@ -164,6 +172,8 @@ impl Folder {
             show_hidden,
             filter: None,
             selection: HashSet::new(),
+            selected_visible_paths: Arc::from([]),
+            selected_visible_bytes: 0,
             anchor: None,
             cursor: None,
             generation: 0,
@@ -252,10 +262,15 @@ impl Folder {
 
     /// Paths of all selected entries, in display order.
     pub fn selected_paths(&self) -> Vec<VfsPath> {
-        self.visible_entries()
-            .filter(|e| self.selection.contains(&e.path))
-            .map(|e| e.path.clone())
-            .collect()
+        self.selected_visible_paths.to_vec()
+    }
+
+    /// Shared drag payload source for the current visible selection.
+    ///
+    /// The list can build one drag source per visible row. Cloning this handle
+    /// must therefore not clone every selected path per row or per frame.
+    pub fn selected_paths_shared(&self) -> Arc<[VfsPath]> {
+        self.selected_visible_paths.clone()
     }
 
     /// Every entry currently on screen, in display order.
@@ -275,18 +290,13 @@ impl Folder {
     /// user can neither see nor act on — every mutation runs over
     /// [`Self::selected_paths`], which is visible-only too.
     pub fn selection_count(&self) -> usize {
-        self.visible_entries()
-            .filter(|e| self.selection.contains(&e.path))
-            .count()
+        self.selected_visible_paths.len()
     }
 
     /// Sum of selected sizes. Directories contribute nothing rather than a
     /// lie (`docs/ui-base.html` §9).
     pub fn selection_size(&self) -> u64 {
-        self.visible_entries()
-            .filter(|e| self.selection.contains(&e.path))
-            .filter_map(|e| e.display_len())
-            .sum()
+        self.selected_visible_bytes
     }
 
     pub fn cursor_row(&self) -> Option<usize> {
@@ -308,6 +318,15 @@ impl Folder {
     /// Display row of `path`, or `None` when it is filtered out or absent.
     pub fn row_of(&self, path: &VfsPath) -> Option<usize> {
         self.row_of_path.get(path).copied()
+    }
+
+    /// The one selected entry when exactly one visible row is selected.
+    pub fn selected_entry(&self) -> Option<&Entry> {
+        (self.selected_visible_paths.len() == 1)
+            .then(|| self.selected_visible_paths.first())
+            .flatten()
+            .and_then(|path| self.row_of(path))
+            .and_then(|row| self.entry_at(row))
     }
 
     /// Every name in the browsed directory, for conflict-free "new file"
@@ -334,6 +353,7 @@ impl Folder {
         self.selection.insert(path.clone());
         self.anchor = Some(path.clone());
         self.cursor = Some(path);
+        self.refresh_selection_summary();
     }
 
     /// Toggle one row in the selection (Cmd/Ctrl-click).
@@ -346,6 +366,7 @@ impl Folder {
         }
         self.anchor = Some(path.clone());
         self.cursor = Some(path);
+        self.refresh_selection_summary();
     }
 
     /// Extend the selection from the anchor through `row` (Shift-click).
@@ -371,6 +392,7 @@ impl Folder {
             }
         }
         self.cursor = self.path_at(row);
+        self.refresh_selection_summary();
     }
 
     /// Right-click on an unselected row selects it first (Finder behaviour).
@@ -389,6 +411,7 @@ impl Folder {
         {
             self.selection.insert(path);
         }
+        self.refresh_selection_summary();
     }
 
     pub fn clear_selection(&mut self) {
@@ -396,10 +419,27 @@ impl Folder {
             return;
         }
         self.selection.clear();
+        self.refresh_selection_summary();
     }
 
     fn path_at(&self, row: usize) -> Option<VfsPath> {
         self.entry_at(row).map(|e| e.path.clone())
+    }
+
+    /// Rebuild the display-order portion of selection after a selection or
+    /// visibility change. Rendering consumes the resulting scalar/vector and
+    /// never scans the directory.
+    pub(super) fn refresh_selection_summary(&mut self) {
+        let mut paths = Vec::new();
+        let mut bytes = 0;
+        for entry in self.visible_entries() {
+            if self.selection.contains(&entry.path) {
+                paths.push(entry.path.clone());
+                bytes += entry.display_len().unwrap_or(0);
+            }
+        }
+        self.selected_visible_paths = paths.into();
+        self.selected_visible_bytes = bytes;
     }
 }
 
