@@ -359,11 +359,23 @@ and current compiler errors as authoritative.
 `.foreground`, `.muted_foreground`, `.border`, `.radius` and friends. Do not add a
 token to `ferret-ui` for something the component theme already names.
 
+What those tokens resolve to is Ferret's own, not the library's defaults:
+`crates/ferret-ui/themes/ferret.json` carries §7 of `docs/ui-base.html` in
+`gpui-component`'s theme format, and `theme::register` loads it over the stock
+palette at startup. Change a surface colour there rather than at a call site.
+The file holds four themes — light and dark, each opaque and translucent; the
+translucent pair is only selected when the window is drawing blurred.
+
 `crates/ferret-ui/src/theme.rs` holds only what `gpui-component` has no concept of:
 the sixteen ANSI slots the terminal panel needs, and the colours that encode file
 and git state in the browser. The palette in
 `crates/ferret-ui/themes/groknight.json` mirrors `TerminalPalette::groknight()`; if
 one changes, change both.
+
+Row selection is one of those: `cx.theme().selection` is the library's *text*
+highlight and it clamps the value to 30% alpha on load, so a row filled with it
+washes out and the focused selection ends up weaker than the idle one. Fill rows
+from `BrowserPalette::selected` instead.
 
 Preserve these visual constraints unless the task explicitly changes the design:
 
@@ -371,10 +383,25 @@ Preserve these visual constraints unless the task explicitly changes the design:
 - Interactive components define normal, hover, active, and disabled states when applicable.
 - Ferret ships a light theme as well as a dark one. Any new token must be defined for both; never hard-code a colour that only reads correctly in one appearance.
 
-Window vibrancy or blur is **not** currently used. It is unreliable outside macOS
-(compositor-dependent on Linux, version-gated on Windows), so the design must be
-legible on an opaque themed background. Treat blur as an optional macOS
-enhancement, never as something a layout depends on.
+Window vibrancy is wired but **does not currently render**, and is off by
+default behind `appearance.vibrancy`. The setting drives two things that must
+agree — `WindowBackgroundAppearance` on the window, and which pair of themes
+`theme::register` loads — so both read the same `vibrancy()` helper in
+`main.rs`, which ands the setting with the platform.
+
+Against the pinned GPUI revision the macOS window layer stays opaque: a surface
+drawn at 55% alpha over a bright backdrop measures exactly the value it would
+have composited against black, `Transparent` behaves the same as `Blurred`, and
+re-applying the appearance after the window opens changes nothing.
+`gpui-component` itself sets `Transparent` only under `cfg(target_os =
+"linux")`, so the macOS path is not one the stack exercises. Until that
+changes, turning the setting on only darkens the palette.
+
+Blur stays an enhancement regardless, never something a layout depends on: the
+opaque palette is the one the design has to be legible in, and every layout has
+to survive with the blur absent. If you re-test this after a GPUI bump, the
+measurement above is the check — compare a sidebar pixel over a bright backdrop
+against the same pixel with the window moved away.
 
 ## Desktop and Window Changes
 
