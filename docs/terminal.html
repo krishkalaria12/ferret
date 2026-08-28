@@ -1,0 +1,2013 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferret — Phase 2: Terminal &amp; Sync</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens copied from docs/plan.html so the three documents read as one set.
+   Do not diverge: if a colour changes here it changes there.
+   --------------------------------------------------------------------------- */
+:root {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+
+  /* The terminal's own colours, from crates/ferret-ui/themes/groknight.json.
+     Used by the mockup in §3 so the page shows the real palette, not a guess. */
+  --t-bg:   #141414;
+  --t-fg:   #e1e1e1;
+  --t-dim:  #787878;
+  --t-red:  #f7768e;
+  --t-grn:  #9ece6a;
+  --t-yel:  #e0af68;
+  --t-blu:  #7aa2f7;
+  --t-mag:  #bb9af7;
+  --t-cyn:  #7dcfff;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+
+  --measure: 68ch;
+  --rail: 16.5rem;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --accent:      #7aa2f7;
+    --accent-soft: #18202f;
+    --accent-line: #2c405f;
+
+    --ok:   #9ece6a;
+    --warn: #e0af68;
+    --risk: #f7768e;
+    --violet: #bb9af7;
+
+    --ground:  #101116;
+    --panel:   #16181e;
+    --sunken:  #1b1e25;
+    --rule:    #2a2e38;
+    --rule-soft: #22252d;
+
+    --ink:     #e3e5ea;
+    --ink-mid: #a3a8b5;
+    --ink-dim: #767c8b;
+  }
+}
+
+:root[data-theme="dark"] {
+  --accent:      #7aa2f7;
+  --accent-soft: #18202f;
+  --accent-line: #2c405f;
+
+  --ok:   #9ece6a;
+  --warn: #e0af68;
+  --risk: #f7768e;
+  --violet: #bb9af7;
+
+  --ground:  #101116;
+  --panel:   #16181e;
+  --sunken:  #1b1e25;
+  --rule:    #2a2e38;
+  --rule-soft: #22252d;
+
+  --ink:     #e3e5ea;
+  --ink-mid: #a3a8b5;
+  --ink-dim: #767c8b;
+}
+
+:root[data-theme="light"] {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Type scale ---------------------------------------------------------- */
+h1, h2, h3, h4 {
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  margin: 0;
+}
+h1 { font-size: clamp(1.9rem, 4.4vw, 2.9rem); line-height: 1.1; letter-spacing: -0.035em; }
+h2 { font-size: clamp(1.3rem, 2.6vw, 1.6rem); line-height: 1.2; }
+h3 { font-size: 1.06rem; letter-spacing: -0.005em; }
+h4 { font-size: .94rem; letter-spacing: 0; }
+
+p, li { max-width: var(--measure); }
+p { margin: 0 0 .9rem; }
+ul, ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+li { margin-bottom: .35rem; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+code, kbd, .mono { font-family: var(--mono); }
+code {
+  font-size: .875em;
+  background: var(--sunken);
+  border: 1px solid var(--rule-soft);
+  padding: .05em .34em;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+kbd {
+  font-size: .8em;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  padding: .1em .4em;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* --- Shell --------------------------------------------------------------- */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: var(--gutter);
+  max-width: 78rem;
+  margin: 0 auto;
+  padding: 0 var(--gutter) 6rem;
+}
+
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 2.25rem 0 2rem;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.5;
+}
+.rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .5rem;
+  padding-bottom: .75rem;
+  margin-bottom: .75rem;
+  border-bottom: 1px solid var(--rule);
+}
+.rail-head b { font-size: .95rem; letter-spacing: -.02em; }
+.rail nav ol { list-style: none; margin: 0; padding: 0; }
+.rail nav li { margin: 0; max-width: none; }
+.rail nav a {
+  display: block;
+  padding: .28rem .5rem .28rem 1.35rem;
+  color: var(--ink-mid);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  position: relative;
+  overflow-wrap: anywhere;
+}
+.rail nav a::before {
+  content: "├─";
+  position: absolute;
+  left: .18rem;
+  color: var(--ink-dim);
+  opacity: .55;
+}
+.rail nav li:last-child a::before { content: "└─"; }
+.rail nav a:hover { color: var(--ink); background: var(--sunken); }
+.rail nav a.is-current {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+.rail .siblings {
+  margin-top: 1.1rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--rule);
+  font-size: .76rem;
+  color: var(--ink-dim);
+}
+.rail .siblings a { display: block; padding: .15rem 0; text-decoration: none; color: var(--ink-mid); }
+.rail .siblings a:hover { color: var(--accent); }
+
+.doc { padding-top: 2.25rem; min-width: 0; }
+
+/* --- Masthead ------------------------------------------------------------ */
+.masthead { padding: 1.5rem 0 2.25rem; border-bottom: 1px solid var(--rule); margin-bottom: 2.5rem; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin: 0 0 .85rem;
+}
+.masthead .lede {
+  font-size: 1.12rem;
+  color: var(--ink-mid);
+  margin: 1rem 0 0;
+  max-width: 58ch;
+}
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 2rem;
+}
+@media (min-width: 46rem) {
+  .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.facts div { background: var(--panel); padding: .8rem .95rem; }
+.facts dt {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: .3rem;
+}
+.facts dd { margin: 0; font-size: .9rem; font-weight: 500; }
+
+/* --- Sections ------------------------------------------------------------ */
+section { padding-top: 3.25rem; }
+section > h2 { margin-bottom: .3rem; }
+.sec-tag {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .08em;
+  color: var(--ink-dim);
+  display: block;
+  margin-bottom: .45rem;
+}
+.sec-intro { color: var(--ink-mid); margin-top: .85rem; }
+h3 { margin-top: 2rem; margin-bottom: .5rem; }
+h4 { margin-top: 1.4rem; margin-bottom: .35rem; }
+
+/* --- Tables -------------------------------------------------------------- */
+.scroller { overflow-x: auto; margin: 1.1rem 0 1.4rem; border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: .875rem; min-width: 34rem; }
+table.wide { min-width: 54rem; }
+caption {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  padding: .7rem .85rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunken);
+}
+th, td { text-align: left; padding: .55rem .85rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-weight: 600;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--sunken); }
+td.num, th.num { font-variant-numeric: tabular-nums; }
+td.id { font-family: var(--mono); font-size: .8rem; color: var(--ink-dim); white-space: nowrap; }
+td.crate, th.crate { font-family: var(--mono); font-size: .8rem; }
+td.key { font-family: var(--mono); font-size: .8rem; white-space: nowrap; }
+
+/* --- Pills --------------------------------------------------------------- */
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  padding: .12rem .45rem;
+  border-radius: 3px;
+  border: 1px solid;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.p-core   { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.p-done   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent);   background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.p-later  { color: var(--ink-dim); border-color: var(--rule); background: var(--sunken); }
+.p-risky  { color: var(--risk); border-color: color-mix(in srgb, var(--risk) 40%, transparent); background: color-mix(in srgb, var(--risk) 10%, transparent); }
+.p-warn   { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+.yes { color: var(--ok); font-weight: 600; }
+.no  { color: var(--risk); font-weight: 600; }
+.part { color: var(--warn); }
+
+/* --- Callouts ------------------------------------------------------------ */
+.note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: .85rem 1rem;
+  border-radius: 0 5px 5px 0;
+  margin: 1.2rem 0;
+  font-size: .92rem;
+}
+.note.risk { border-left-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, transparent); }
+.note.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.note.ok   { border-left-color: var(--ok);   background: color-mix(in srgb, var(--ok) 9%, transparent); }
+.note > :last-child { margin-bottom: 0; }
+.note strong { font-family: var(--mono); font-size: .82rem; letter-spacing: .05em; text-transform: uppercase; display: block; margin-bottom: .3rem; }
+
+/* --- Decision blocks ------------------------------------------------------ */
+.dec {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--violet);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+  padding: .9rem 1.05rem;
+  margin: 1rem 0;
+}
+.dec h4 { margin: 0 0 .35rem; font-size: .98rem; }
+.dec h4 .did { color: var(--violet); margin-right: .5rem; }
+.dec p:last-child { margin-bottom: 0; }
+.dec .because {
+  font-size: .88rem;
+  color: var(--ink-mid);
+  border-top: 1px dashed var(--rule);
+  margin-top: .7rem;
+  padding-top: .6rem;
+}
+.dec .because b {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Window anatomy ------------------------------------------------------- */
+.anatomy {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+  margin: 1.3rem 0 .5rem;
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.an-row { display: flex; }
+.an-cell {
+  padding: .55rem .7rem;
+  border-right: 1px solid var(--rule-soft);
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-mid);
+  min-width: 0;
+}
+.an-cell:last-child { border-right: 0; }
+.an-cell b { display: block; color: var(--ink); font-weight: 600; letter-spacing: -.01em; }
+.an-cell span { color: var(--ink-dim); }
+.an-title { background: var(--sunken); }
+.an-new { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.an-new b { color: var(--accent); }
+
+/* --- Terminal mockup ------------------------------------------------------ */
+.term {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.3rem 0 .6rem;
+  background: var(--t-bg);
+}
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .4rem .65rem;
+  background: color-mix(in srgb, var(--t-bg) 70%, #ffffff 8%);
+  border-bottom: 1px solid #2a2a2a;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--t-dim);
+  flex-wrap: wrap;
+}
+.term-head .cwd { color: var(--t-fg); }
+.term-head .spacer { margin-left: auto; }
+.term-head .tbtn {
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: .08rem .4rem;
+  color: var(--t-dim);
+}
+.term-head .tbtn.on { color: var(--t-grn); border-color: color-mix(in srgb, var(--t-grn) 45%, transparent); }
+.term-body {
+  padding: .7rem .8rem;
+  font-family: var(--mono);
+  font-size: .76rem;
+  line-height: 1.5;
+  color: var(--t-fg);
+  overflow-x: auto;
+  white-space: pre;
+}
+.term-body .p1 { color: var(--t-grn); }
+.term-body .p2 { color: var(--t-blu); }
+.term-body .dim { color: var(--t-dim); }
+.term-body .yel { color: var(--t-yel); }
+.term-body .mag { color: var(--t-mag); }
+.term-body .cyn { color: var(--t-cyn); }
+.term-body .cur { background: var(--t-fg); color: var(--t-bg); }
+.cap {
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-dim);
+  margin: 0 0 1.4rem;
+  max-width: none;
+}
+
+/* --- Pipeline / lanes ----------------------------------------------------- */
+.pipe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: .4rem;
+  margin: 1.2rem 0 .4rem;
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.pipe .st {
+  flex: 1 1 8.5rem;
+  min-width: 8.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: .55rem .65rem;
+}
+.pipe .st b { display: block; color: var(--ink); font-size: .78rem; }
+.pipe .st span { color: var(--ink-dim); }
+.pipe .ar { align-self: center; color: var(--ink-dim); flex: 0 0 auto; }
+.pipe .st.eng { border-color: var(--accent-line); background: var(--accent-soft); }
+.pipe .st.eng b { color: var(--accent); }
+
+.lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: .6rem;
+  margin: 1.2rem 0;
+}
+.lane {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: .7rem .8rem;
+}
+.lane h4 {
+  margin: 0 0 .4rem;
+  font-size: .8rem;
+  color: var(--accent);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.lane ul { margin: 0; padding-left: 1.05rem; font-size: .85rem; }
+.lane li { margin-bottom: .25rem; max-width: none; }
+.lane .own {
+  font-family: var(--mono);
+  font-size: .68rem;
+  color: var(--ink-dim);
+  display: block;
+  margin-top: .5rem;
+  padding-top: .45rem;
+  border-top: 1px dashed var(--rule);
+}
+
+/* --- Code blocks ---------------------------------------------------------- */
+pre {
+  background: var(--sunken);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: .8rem .9rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.55;
+  margin: 1rem 0;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+pre .c { color: var(--ink-dim); }
+
+/* --- Steps ---------------------------------------------------------------- */
+.step {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  margin: .8rem 0;
+  background: var(--panel);
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0 1rem;
+}
+.step .pn {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--violet);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.step h3 { margin: 0 0 .15rem; }
+.step .dep {
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-dim);
+  margin-bottom: .6rem;
+}
+.step ul { margin-bottom: .6rem; }
+.step .accept {
+  font-size: .86rem;
+  border-top: 1px dashed var(--rule);
+  padding-top: .6rem;
+  color: var(--ink-mid);
+  max-width: 62ch;
+}
+.step .accept b {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Theme toggle --------------------------------------------------------- */
+#theme {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  background: var(--panel);
+  color: var(--ink-mid);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: .2rem .45rem;
+  cursor: pointer;
+  flex: none;
+}
+#theme:hover { color: var(--ink); border-color: var(--accent-line); }
+
+footer {
+  margin-top: 4rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--ink-dim);
+}
+
+/* --- Narrow --------------------------------------------------------------- */
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .rail {
+    position: static;
+    max-height: none;
+    padding: 1.5rem 0 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .rail nav ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .2rem;
+    padding-bottom: 1rem;
+  }
+  .rail nav a { padding: .2rem .5rem; border-left: 0; border-radius: 4px; }
+  .rail nav a::before, .rail nav li:last-child a::before { content: none; }
+  .rail .siblings { display: flex; gap: 1rem; padding-bottom: 1rem; }
+  .doc { padding-top: 1.5rem; }
+  .an-row { flex-wrap: wrap; }
+  .pipe .ar { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-head">
+    <b>ferret/terminal</b>
+    <button id="theme" type="button" aria-label="Switch colour theme">theme</button>
+  </div>
+  <nav aria-label="Sections">
+    <ol>
+      <li><a href="#what">what this is</a></li>
+      <li><a href="#engine">the engine decision</a></li>
+      <li><a href="#anatomy">panel anatomy</a></li>
+      <li><a href="#architecture">crate architecture</a></li>
+      <li><a href="#datapath">the data path</a></li>
+      <li><a href="#sync">directory sync</a></li>
+      <li><a href="#shellint">shell integration</a></li>
+      <li><a href="#theming">themes &amp; text size</a></li>
+      <li><a href="#interaction">interaction contract</a></li>
+      <li><a href="#buildorder">build order</a></li>
+      <li><a href="#measuring">gates &amp; budgets</a></li>
+      <li><a href="#risks">risks &amp; questions</a></li>
+    </ol>
+  </nav>
+  <div class="siblings">
+    companion documents
+    <a href="plan.html">plan.html — whole product</a>
+    <a href="ui-base.html">ui-base.html — phase 1</a>
+  </div>
+</aside>
+
+<main class="doc">
+
+<header class="masthead">
+  <p class="eyebrow">Phase 2 reference · rev 1 · 28 Aug 2026</p>
+  <h1>The terminal</h1>
+  <p class="lede">A real terminal docked under the file pane, that already <em>is</em> in the folder you are looking at. This is the feature that decides whether Ferret is worth using instead of Finder.</p>
+  <dl class="facts">
+    <div><dt>Delivers</dt><dd>F-10 · F-11 · F-12</dd></div>
+    <div><dt>Depends on</dt><dd>Phase 1 (complete)</dd></div>
+    <div><dt>New crate</dt><dd class="mono">ferret-terminal</dd></div>
+    <div><dt>VT engine</dt><dd class="mono">libghostty-vt</dd></div>
+    <div><dt>PTY</dt><dd class="mono">portable-pty</dd></div>
+    <div><dt>New decisions</dt><dd>D-22 … D-32</dd></div>
+  </dl>
+</header>
+
+<!-- ==================================================================== -->
+<section id="what">
+  <span class="sec-tag">§1</span>
+  <h2>What this is</h2>
+  <p class="sec-intro">The build document for Phase 2, in the same relationship to <a href="plan.html#phases">plan.html</a> that <a href="ui-base.html">ui-base.html</a> had to Phase 1.</p>
+
+  <p><a href="plan.html">plan.html</a> catalogues the terminal as three feature entries and
+  two paragraphs. That was enough to schedule it and nowhere near enough to build it. This
+  document is the missing half: which VT engine, why, how the threads are arranged, what
+  "sync" actually means when a process is running, what ships in the box for four different
+  shells, and the order to build it in so the app still runs at the end of every day.</p>
+
+  <p><strong>In scope:</strong> F-10 (the panel), F-11 (directory sync, both directions),
+  F-12 (terminal themes and independent text size), plus one small platform feature —
+  "Open in Terminal" (D-29), which ships early and independently because it is also the
+  bottom rung of the fallback ladder in §2.</p>
+
+  <p><strong>Not in scope:</strong> F-13, the SSH terminal that follows a remote mount — it
+  depends on F-21 and belongs to Phase 7. Nothing here should make F-13 harder, and §4 keeps
+  the seam it will need, but no remote code gets written now.</p>
+
+  <div class="note">
+    <strong>The bar</strong>
+    <p>A terminal that runs <code>ls</code> is a log view. The acceptance test is
+    <code>vim</code>, <code>htop</code> and <code>tmux</code> — three programs that between
+    them exercise the alternate screen, mouse reporting, resize, 256-colour and true-colour
+    SGR, cursor shapes, and bracketed paste. If those three are right, almost everything is
+    right. See §11.</p>
+  </div>
+
+  <h3>What Phase 1 already gives us</h3>
+  <p>The base shell is finished and its 122 tests pass, so this phase starts from a real
+  application rather than a scaffold. Three pieces of it are load-bearing here:</p>
+  <ul>
+    <li><code>crates/ferret-ui/themes/groknight.json</code> already carries a
+    <code>terminal</code> block with all sixteen ANSI slots plus foreground, background and
+    cursor. F-12's data format exists; only the loader is missing.</li>
+    <li><code>ferret-settings</code> owns the settings schema and keymap, including
+    <code>appearance.ui_font_size</code>. The terminal's font size is a sibling field, not a
+    new mechanism.</li>
+    <li>The browser owns per-tab state and a current directory that already changes on
+    navigation. Forward sync hooks that, it does not invent it.</li>
+  </ul>
+</section>
+
+<!-- ==================================================================== -->
+<section id="engine">
+  <span class="sec-tag">§2</span>
+  <h2>The engine decision</h2>
+  <p class="sec-intro">The one choice in this phase that is expensive to reverse.</p>
+
+  <p>A terminal panel is three layers, and only the middle one is a real choice:</p>
+
+  <div class="pipe">
+    <div class="st"><b>PTY</b><span>spawn a shell, read and write bytes, resize</span></div>
+    <span class="ar">→</span>
+    <div class="st eng"><b>VT engine</b><span>parse escapes, keep the grid, encode input</span></div>
+    <span class="ar">→</span>
+    <div class="st"><b>Renderer</b><span>paint the grid with GPUI</span></div>
+  </div>
+  <p class="cap">Ferret writes the first and third layers whichever engine it picks. Only the middle is a library decision.</p>
+
+  <h3>Ruling out an out-of-process terminal</h3>
+  <p>The first option to consider and dismiss: do not emulate anything, and drive a terminal
+  that already exists. It cannot deliver F-10. Terminal.app, iTerm2, kitty and Windows
+  Terminal are applications, not embeddable views — there is no supported API to host one
+  inside another process's window, and the child-window reparenting tricks that appear to
+  work break focus, IME, GPU compositing and window dragging, on both platforms. Every editor
+  with a built-in terminal — VS Code, Zed, JetBrains, Sublime — writes its own emulator on
+  top of a PTY for exactly this reason.</p>
+
+  <p>This also rules out the more interesting version of the idea: <a
+  href="https://crates.io/crates/kitty-rc"><code>kitty-rc</code></a>, a Rust client for
+  kitty's remote-control protocol. It is worth naming explicitly so it does not get proposed
+  again, because at a glance it looks like a terminal library and is not one.</p>
+
+  <div class="note warn">
+    <strong>Why <code>kitty-rc</code> is not a fallback</strong>
+    <p>It is the wrong layer. <code>kitty-rc</code> is a <em>client</em> that sends JSON
+    commands to a <em>running kitty instance</em> over a socket — <code>LaunchCommand</code>,
+    <code>FocusTabCommand</code>, <code>SetFontSizeCommand</code>. It parses no escape
+    sequences and owns no grid, so it cannot stand in for the middle box in the diagram
+    above. What it could do is drive an external kitty window: open one in the current folder
+    and re-<code>cd</code> it as you navigate, which is a real approximation of F-11. But it
+    delivers none of F-10 — no docked panel, nothing inside Ferret's window — and it works
+    only for users who have kitty installed <em>and</em> <code>allow_remote_control</code>
+    enabled. That is a narrower audience and a weaker result than the escape hatch below,
+    which needs nothing installed at all.</p>
+  </div>
+
+  <p>What we <em>do</em> take from the system is the <strong>shell</strong>, which is a
+  different question and is settled in D-24 below.</p>
+
+  <h3>The two real candidates</h3>
+  <p><a href="plan.html">plan.html</a> assumed <code>alacritty_terminal</code>, on the
+  reasonable grounds that Zed uses it and Zed is the closest working example of a terminal
+  on GPUI. That assumption predates <code>libghostty-vt</code> having usable Rust bindings.
+  It is now worth re-opening, and the comparison does not come out where the plan expected.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>VT engine comparison, as of August 2026</caption>
+      <thead>
+        <tr><th>Concern</th><th><code>alacritty_terminal</code></th><th><code>libghostty-vt</code></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>OSC 7 (working directory)</b></td>
+          <td><span class="no">Absent.</span> The OSC dispatch in <code>alacritty/vte</code>'s <code>ansi.rs</code> handles 0, 2, 4, 8, 10–12, 22, 50, 52, 104 and 110–112. There is no <code>set_current_directory</code> in the <code>Handler</code> trait. Alacritty never needed it — it gets the cwd from the OS process table instead.</td>
+          <td><span class="yes">First class.</span> Dedicated <code>osc</code> module; Ghostty's own shell integration is built on OSC 7 and OSC 133.</td>
+        </tr>
+        <tr>
+          <td><b>Build toolchain</b></td>
+          <td><span class="yes">Pure Rust.</span> <code>cargo build</code> and nothing else.</td>
+          <td><span class="no">Zig 0.16.x on <code>PATH</code>,</span> and by default the build fetches Ghostty sources from a commit pinned in <code>build.rs</code>. Avoidable only by vendoring a prebuilt static archive per target.</td>
+        </tr>
+        <tr>
+          <td><b>API stability</b></td>
+          <td><span class="yes">Settled.</span> Years of production use, breaking changes are rare and announced.</td>
+          <td><span class="part">Pre-1.0 and moving.</span> The bindings' own README: they "do not guarantee compatibility with arbitrary installed C API revisions" and track a pinned Ghostty commit.</td>
+        </tr>
+        <tr>
+          <td><b>Threading</b></td>
+          <td><code>Term</code> is <code>Send</code>; Zed runs it on a background thread behind a mutex.</td>
+          <td><span class="part">All types are <code>!Send + !Sync</code>.</span> Documented as "designed to run on dedicated threads using channels" — which is the design we want anyway (§5).</td>
+        </tr>
+        <tr>
+          <td><b>Windows</b></td>
+          <td><span class="yes">Long-supported</span> via Alacritty's own ConPTY backend.</td>
+          <td><span class="part">Proven but young.</span> Paneflow 0.8.1 ships an x64 MSVC build on a pinned static <code>.lib</code>, driving it through <code>portable-pty</code>/ConPTY. <span class="no">Windows ARM64 is not supported.</span></td>
+        </tr>
+        <tr>
+          <td><b>macOS</b></td>
+          <td><span class="yes">Shipping</span> in Alacritty and Zed.</td>
+          <td><span class="yes">Ghostty's home platform,</span> though note Paneflow migrated Linux and Windows first and left macOS on Alacritty pending evaluation. Treat macOS as unproven-by-others, not unsupported.</td>
+        </tr>
+        <tr>
+          <td><b>Conformance</b></td>
+          <td>Good. The baseline most TUIs are tested against.</td>
+          <td>Stronger. Kitty keyboard protocol, kitty graphics, grapheme clustering, wrapping and reflow on resize.</td>
+        </tr>
+        <tr>
+          <td><b>Reference code on GPUI</b></td>
+          <td><span class="yes">Zed's <code>crates/terminal</code></span> — same framework, directly readable.</td>
+          <td><span class="part">Xuanwo's <code>gpui-ghostty</code></span> and <code>ghostling_rs</code>; smaller, newer, but the exact combination.</td>
+        </tr>
+        <tr>
+          <td><b>Licence</b></td>
+          <td>Apache-2.0 — GPL-3.0 compatible.</td>
+          <td>MIT — GPL-3.0 compatible. <span class="part">Confirm per-crate before shipping;</span> the sys crate and the wrapper are stated differently in different places.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-22</span> The VT engine is <code>libghostty-vt</code>, pinned to an exact version.</h4>
+    <p>Version <code>0.2.1</code> (18 July 2026) is the floor. Pin it exactly in
+    <code>Cargo.toml</code> — <code>=0.2.1</code>, not a caret range — and bump it as a
+    deliberate, tested change, the same rule the workspace already applies to
+    <code>gpui</code> and <code>gpui-component</code>.</p>
+    <p class="because"><b>Because</b>
+    OSC 7 decides it. F-11's reverse direction — the terminal changes directory and the
+    file pane follows — is half of the signature feature, and on Windows OSC 7 is the
+    <em>only</em> way to get it: there is no <code>/proc</code> and no
+    <code>proc_pidinfo</code>. Choosing Alacritty means either forking <code>vte</code> or
+    running our own escape-sequence scanner over the raw PTY stream, correctly, across
+    chunk boundaries, forever. That is a worse thing to own than a pinned dependency. The
+    conformance and reflow advantages are real but secondary; they are the reason this is
+    an easy decision rather than a close one.</p>
+  </div>
+
+  <div class="note warn">
+    <strong>What this costs, stated plainly</strong>
+    <p>A Zig toolchain enters Ferret's build. That cuts against the spirit of D-13, which
+    turned on <code>runtime_shaders</code> specifically so contributors would not need full
+    Xcode. It is the strongest argument against this decision and it is not dismissed —
+    it is paid for by D-23, and it is why step 1 of §10 is a build spike on both platforms
+    before any other terminal code is written.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-23</span> The C API is isolated behind one internal module, and snapshots are owned Rust data.</h4>
+    <p>Everything in <code>ferret-terminal</code> outside <code>engine/</code> talks to a
+    small internal surface — feed bytes, take a snapshot, encode a key, resize — and never
+    touches a <code>libghostty-vt</code> type. Grid data crosses that boundary as owned
+    Rust values, copied out; no borrowed pointer into engine memory is ever held past the
+    call that produced it.</p>
+    <p class="because"><b>Because</b>
+    two independent reasons converge on the same shape. The dependency is pre-1.0, so its
+    API will move under us and we want one file to fix rather than a crate to re-write. And
+    the types are <code>!Send + !Sync</code>, so a snapshot that borrowed engine memory could
+    not be sent to the UI thread at all — copying is not defensive style here, it is the
+    only thing that compiles. This is also the seam that makes the Alacritty fallback a
+    week's work rather than a rewrite, if the Windows or Zig risks in §12 land badly.
+    It is one module boundary, not a plugin system: resist any urge to grow it into a trait
+    with one implementation.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-24</span> Ferret spawns the user's own login shell, with no configuration of its own.</h4>
+    <p>macOS: <code>$SHELL</code>, falling back to the user's <code>getpwuid</code> shell,
+    then <code>/bin/zsh</code>. Windows: PowerShell 7 (<code>pwsh.exe</code>) if on
+    <code>PATH</code>, else Windows PowerShell, else <code>cmd.exe</code>. Started as a login
+    shell so the user's real profile, aliases, prompt and <code>PATH</code> apply. A
+    <code>terminal.shell</code> settings override exists for people who want something else,
+    but it is empty by default.</p>
+    <p class="because"><b>Because</b>
+    a file manager's terminal that is not the user's own shell is a toy. Anyone who would
+    use this feature has a configured shell and expects it. The override exists because
+    Windows users switching between <code>pwsh</code>, <code>cmd</code> and Git Bash is
+    normal, not exotic.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-25</span> The PTY layer is <code>portable-pty</code>.</h4>
+    <p>One API over <code>forkpty</code> on macOS and ConPTY on Windows, with
+    <code>try_clone_reader()</code> and <code>take_writer()</code> giving independent read
+    and write handles.</p>
+    <p class="because"><b>Because</b>
+    it is the crate WezTerm ships on and the one Paneflow drives libghostty-vt with on
+    Windows, so the exact combination is in production somewhere. Writing our own ConPTY
+    binding to save a dependency would be trading a week for a rounding error, and ConPTY's
+    sharp edges — startup ordering, resize, draining output at exit, killing descendants —
+    are precisely the parts we would get wrong.</p>
+  </div>
+
+  <h3>The fallback ladder</h3>
+  <p>D-22 carries real risk (R-09, R-10, R-11), so it is worth writing down in advance what
+  we do if it fails, and at which point we would decide. Each rung costs more product than
+  the one above it, and each is reachable from the step in §10 where the failure would
+  actually surface.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>What we fall back to, and when we would know</caption>
+      <thead><tr><th>Rung</th><th>What ships</th><th>Cost of moving here</th><th>Decided at</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>1 · <code>libghostty-vt</code></b><br><span class="mono">D-22</span></td>
+          <td>Everything. Docked panel, both sync directions, on both platforms.</td>
+          <td>—</td>
+          <td>Default.</td>
+        </tr>
+        <tr>
+          <td><b>2 · <code>alacritty_terminal</code></b><br><span class="part">engine swap</span></td>
+          <td>The same product. F-10, F-11 and F-12 all still ship.</td>
+          <td>Roughly a week: rewrite the <code>engine/</code> module behind the D-23 boundary, and write an OSC 7 scanner over the raw PTY stream that is correct across chunk boundaries. Pure Rust, so R-09 and R-11 disappear with it.</td>
+          <td><b>Step 1.</b> If the spike does not build on Windows x64 in a day or two.</td>
+        </tr>
+        <tr>
+          <td><b>3 · Open in system terminal</b><br><span class="mono">D-29</span></td>
+          <td><span class="no">Not F-10.</span> A toolbar button and a context-menu item that open the OS terminal at the current folder. No panel, no sync.</td>
+          <td>The phase's whole premise. Ferret becomes a good file manager rather than the thing it set out to be — but it stays shippable, and Phases 3–6 are untouched.</td>
+          <td>Only if both rungs above fail on a platform we must ship.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-29</span> "Open in Terminal" ships regardless, as a small feature in its own right.</h4>
+    <p>A toolbar action and a context-menu item that launch the system terminal at the
+    current folder: <code>Terminal.app</code> (or the user's configured terminal) on macOS,
+    Windows Terminal falling back to PowerShell on Windows. It belongs to
+    <code>ferret-platform</code>, next to reveal-in-Finder and open-with, and it does not
+    depend on <code>ferret-terminal</code> existing at all.</p>
+    <p class="because"><b>Because</b>
+    every file manager has this and people expect it — it is worth building whether or not
+    the panel lands. That it doubles as rung 3 of the ladder is a convenience, not the
+    reason. Build it early, in <code>ferret-platform</code>, so the escape hatch is already
+    in place before the risky work starts rather than being written in a hurry after
+    something has gone wrong.</p>
+    <p class="because"><b>Note</b>
+    this is a feature, not just a decision, and <a href="plan.html">plan.html</a>'s
+    catalogue stops at F-85. Give it an F-id when these decisions are folded back in —
+    it belongs in §4.8, platform integration, next to F-70.</p>
+  </div>
+
+  <div class="note">
+    <strong>What the ladder is not</strong>
+    <p>It is not a licence to build all three. Rung 1 is the plan; D-23's module boundary is
+    the only structural concession made to rungs 2 and 3, and it earns its place on the
+    <code>!Send</code> constraint alone. Do not write an engine trait with one implementation
+    against a fallback that will probably never be taken.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="anatomy">
+  <span class="sec-tag">§3</span>
+  <h2>Panel anatomy</h2>
+  <p class="sec-intro">Where the terminal sits in the shell that Phase 1 built, and what it adds to it.</p>
+
+  <p>The panel docks below the file pane and above the status bar, filling the content
+  column. There is one per window, not one per tab (D-28) — it stays put while tabs come and
+  go, and follows whichever tab is active. The sidebar spans full height beside both.</p>
+
+  <div class="anatomy" role="img" aria-label="Window layout: title bar and tab strip across the top; sidebar down the left; and in the content column, stacked top to bottom, the path bar, file pane, status bar, splitter, terminal header and terminal grid.">
+    <div class="an-row"><div class="an-cell an-title" style="flex:1"><b>Title bar + toolbar</b><span>unchanged from Phase 1</span></div></div>
+    <div class="an-row"><div class="an-cell" style="flex:1"><b>Tab strip</b><span>unchanged</span></div></div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 11rem"><b>Sidebar</b><span>Places · Favorites · Volumes<br>full height, unchanged</span></div>
+      <div class="an-cell" style="flex:1"><b>Path bar</b><span>unchanged</span></div>
+    </div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 11rem"><span>&nbsp;</span></div>
+      <div class="an-cell" style="flex:1"><b>File pane</b><span>list · icon · column<br>shrinks when the panel opens</span></div>
+    </div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 11rem"><span>&nbsp;</span></div>
+      <div class="an-cell" style="flex:1"><b>Status bar</b><span>stays with the listing it describes — above the panel, not below it</span></div>
+    </div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 11rem"><span>&nbsp;</span></div>
+      <div class="an-cell an-new" style="flex:1"><b>Splitter — 5&nbsp;px</b><span>drag target, row-resize cursor</span></div>
+    </div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 11rem"><span>&nbsp;</span></div>
+      <div class="an-cell an-new" style="flex:1"><b>Terminal header — 26&nbsp;px</b><span>"Terminal" label · new/kill · close · Sync pill</span></div>
+    </div>
+    <div class="an-row">
+      <div class="an-cell" style="flex:0 0 11rem"><span>&nbsp;</span></div>
+      <div class="an-cell an-new" style="flex:1"><b>Terminal grid</b><span>default 240&nbsp;px, min 80&nbsp;px, max 70% of the content column</span></div>
+    </div>
+  </div>
+  <p class="cap">Blue rows are new in Phase 2. Everything else is Phase 1 geometry —
+  except the status bar, which moves: it belongs to the file pane, so the panel docks
+  below it rather than between the two.</p>
+
+  <h3>Geometry</h3>
+  <div class="scroller">
+    <table>
+      <caption>Logical pixels, matching what you pass to px() in GPUI</caption>
+      <thead><tr><th>Region</th><th class="num">Size</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Splitter</td><td class="num">5</td><td>Hit area 9&nbsp;px, drawn 1&nbsp;px. Same hairline treatment as the sidebar divider.</td></tr>
+        <tr><td>Terminal header</td><td class="num">26</td><td>Shorter than the tab strip on purpose — it is chrome for a panel, not a peer of the tabs.</td></tr>
+        <tr><td>Grid, default</td><td class="num">240</td><td>About 12 rows at the default size. Enough to be useful without stealing the listing.</td></tr>
+        <tr><td>Grid, minimum</td><td class="num">80</td><td>Below this, collapse to closed rather than render 2 rows.</td></tr>
+        <tr><td>Grid, maximum</td><td>70%</td><td>Of the content column height. The file pane never disappears.</td></tr>
+        <tr><td>Grid padding</td><td class="num">8 / 10</td><td>Vertical / horizontal. Cells start inside this.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The header</h3>
+  <div class="term">
+    <div class="term-head">
+      <span class="dim">▣</span>
+      <span class="cwd">Terminal</span>
+      <span class="spacer"></span>
+      <span class="tbtn">＋</span>
+      <span class="tbtn">✕</span>
+      <span class="tbtn on">◈ Sync</span>
+    </div>
+    <div class="term-body"><span class="p1">krish</span><span class="dim">@</span><span class="p2">mba</span> <span class="yel">ferret</span> <span class="dim">%</span> cargo test -p ferret-vfs
+<span class="dim">...</span>
+test result: <span class="p1">ok</span>. 30 passed; 0 failed
+
+<span class="p1">krish</span><span class="dim">@</span><span class="p2">mba</span> <span class="yel">ferret</span> <span class="dim">%</span> <span class="dim">cd -- '/Users/krish/src/ferret/crates/ferret-vfs'</span>
+<span class="p1">krish</span><span class="dim">@</span><span class="p2">mba</span> <span class="yel">ferret-vfs</span> <span class="dim">%</span> <span class="dim">cd -- '/Users/krish/src/ferret/crates/ferret-ui/src/pane'</span>
+<span class="p1">krish</span><span class="dim">@</span><span class="p2">mba</span> <span class="yel">pane</span> <span class="dim">%</span> <span class="cur">&nbsp;</span></div>
+  </div>
+  <p class="cap">The signature feature, drawn: the last two lines were not typed. Each is one
+  navigation in the file pane above, echoed into the shell. Colours are Groknight's actual
+  ANSI slots.</p>
+
+  <div class="note">
+    <strong>Matching the reference</strong>
+    <p>Iruka labels this header <em>Terminal</em> rather than showing a path, and puts a
+    filled <em>Sync</em> control at the right end — that shape is worth keeping, and Ferret
+    follows it. Two deliberate departures. The shell's directory appears next to the label
+    <em>only when it differs from the pane's</em>, because the rest of the time it duplicates
+    the path bar and the one moment you need it is when the two have come apart. And the
+    injected line is <code>cd -- '…'</code> rather than <code>cd "…"</code>: single quotes
+    stop the shell expanding <code>$</code> and backticks in a filename, and <code>--</code>
+    stops a directory named <code>-P</code> being read as a flag. The reference's form breaks
+    on both. Only the functional layout is being reimplemented here — no artwork, icon or
+    string is taken from it.</p>
+  </div>
+
+  <div class="scroller">
+    <table>
+      <caption>Header elements</caption>
+      <thead><tr><th>Element</th><th>Behaviour</th><th>States</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="crate">Terminal</td>
+          <td>A fixed label, as in the reference. The shell's working directory is appended, dimmed, <em>only</em> when it differs from the pane's — truncated from the left with a leading ellipsis, <code>~</code> for home.</td>
+          <td>Label alone in the ordinary case. Label + path whenever the two have diverged, which is exactly the <b>held</b> and sync-off cases.</td>
+        </tr>
+        <tr>
+          <td class="crate">◈ Sync</td>
+          <td>A filled pill at the right end, labelled, not an icon alone — it is the control people reach for and the one that explains the product. Toggles F-11 for this window. Persisted per window (D-28), defaulting to <code>terminal.sync_default</code>.</td>
+          <td><b>on</b> (green), <b>off</b> (dim), <b>held</b> (amber — sync wants to run but the shell is busy or unproven; see §6), <b>degraded</b> (green with a dotted underline — running at Tier 2 because the integration did not load; the tooltip says which shell and why).</td>
+        </tr>
+        <tr>
+          <td class="crate">＋ / ✕</td>
+          <td>Restart the session; close the panel. Closing kills the session and its descendants.</td>
+          <td>＋ becomes <b>restart</b> when the shell has exited, and the grid keeps its final contents until then.</td>
+        </tr>
+        <tr>
+          <td class="crate">(reserved)</td>
+          <td>The slot immediately left of <b>Sync</b> is where F-13's network button goes in Phase 7 — open an SSH session that follows the mounted remote folder. The reference has a control there already.</td>
+          <td><span class="p-later pill">phase 7</span> Leave the space in the layout now so the header does not get re-arranged later; draw nothing in it.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>When the shell exits</h3>
+  <p>The grid freezes with its last contents, dims by 40%, and a single line appears under
+  it: <span class="mono">[process exited with status 1 — press ⏎ to restart]</span>. The
+  panel does not close itself. A shell that died taking its scrollback with it is how you
+  lose the error message you were about to read.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="architecture">
+  <span class="sec-tag">§4</span>
+  <h2>Crate architecture</h2>
+  <p class="sec-intro">One new crate, and the rule that keeps it testable without a window.</p>
+
+  <p>Per the ownership rule in <code>AGENTS.md</code>, the new crate exists because the code
+  that belongs in it now exists. <code>ferret-terminal</code> owns the PTY, the engine and
+  the session; <code>ferret-ui</code> owns the panel view and the renderer.</p>
+
+  <pre><code>crates/ferret-terminal/
+├── src/lib.rs          <span class="c">// Session, SessionEvent, TerminalError — the public surface</span>
+├── src/engine/
+│   ├── mod.rs          <span class="c">// D-23 boundary: the ONLY module that names libghostty-vt</span>
+│   └── snapshot.rs     <span class="c">// owned Row/Cell/CursorState the UI consumes</span>
+├── src/pty.rs          <span class="c">// portable-pty: spawn, resize, kill, descendant cleanup</span>
+├── src/shell.rs        <span class="c">// D-24 which shell + D-30 how to inject into it:</span>
+│                       <span class="c">//   detect kind from argv[0], build args and env</span>
+├── src/session.rs      <span class="c">// the engine thread and its channels</span>
+├── src/sync.rs         <span class="c">// F-11 policy: when it is safe to inject a cd</span>
+├── src/foreground.rs   <span class="c">// tcgetpgrp / proc_pidinfo (macOS), toolhelp32 (Windows)</span>
+├── src/osc.rs          <span class="c">// OSC 7 and OSC 133 interpretation, path validation</span>
+├── src/quote.rs        <span class="c">// POSIX and PowerShell path quoting — pure, heavily tested</span>
+└── integration/        <span class="c">// scripts, embedded with include_str!, materialised</span>
+    │                   <span class="c">// into a per-run dir that ZDOTDIR/XDG_DATA_DIRS point at</span>
+    ├── ferret.bash  ferret.zsh  ferret.fish   <span class="c">// adapted from Ghostty (MIT)</span>
+    └── ferret.ps1                             <span class="c">// ours; Ghostty has no Windows script</span>
+
+crates/ferret-ui/src/terminal/
+├── mod.rs              <span class="c">// TerminalPanel: a GPUI entity holding one Session</span>
+├── element.rs          <span class="c">// the custom Element that paints a snapshot</span>
+├── input.rs            <span class="c">// key and mouse events → the session's channel</span>
+├── selection.rs        <span class="c">// drag-select, word/line select, copy</span>
+└── splitter.rs         <span class="c">// drag, persist, collapse</span></code></pre>
+
+  <h3>The layering rule, applied</h3>
+  <ul>
+    <li><code>ferret-terminal</code> must not depend on <code>ferret-ui</code>, on
+    <code>gpui</code>, or on <code>gpui-component</code>. It is a service crate like
+    <code>ferret-vfs</code>, and it must be testable without opening a window — feed it
+    bytes, assert on the snapshot. <code>ferret-vfs</code> and
+    <code>ferret-settings</code> hold that line today with 50 window-free tests; this crate
+    holds it too.</li>
+    <li>It may depend on <code>ferret-settings</code> for the terminal palette and font
+    size, and on <code>ferret-vfs</code> for <code>VfsPath</code> — the sync policy needs to
+    know a local path from a remote one, which is exactly the distinction
+    <code>VfsPath</code> exists to draw.</li>
+    <li>Only <code>ferret-ui</code> may draw. The renderer lives there because it is a GPUI
+    <code>Element</code> and nothing else in the workspace is allowed to be.</li>
+  </ul>
+
+  <div class="note">
+    <strong>The seam Phase 7 will need</strong>
+    <p>F-13 opens an SSH session that follows a remote mount. It differs from a local session
+    in exactly one place: what <code>pty.rs</code> spawns — <code>ssh host</code> rather than
+    the login shell. Keep the spawn decision in <code>shell.rs</code> behind a single
+    function returning a command, and Phase 7 adds a branch to it rather than a second
+    session type. Do not build that branch now.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="datapath">
+  <span class="sec-tag">§5</span>
+  <h2>The data path</h2>
+  <p class="sec-intro">Three threads, two channels, and the <code>!Send</code> constraint that arranges them.</p>
+
+  <p>Because every <code>libghostty-vt</code> type is <code>!Send + !Sync</code>, the
+  <code>Terminal</code> must be created on one thread and stay there for its whole life.
+  That is not a limitation to work around — it produces the design you would want anyway:
+  a shell's output is a serial byte stream, and parsing it on a dedicated thread keeps the
+  UI thread free during a flood.</p>
+
+  <div class="lanes">
+    <div class="lane">
+      <h4>GPUI main thread</h4>
+      <ul>
+        <li>Owns <code>TerminalPanel</code> and the latest snapshot.</li>
+        <li>Paints. Never parses.</li>
+        <li>Sends <code>Input</code>, <code>Resize</code>, <code>Scroll</code>, <code>Cd</code> down the request channel.</li>
+        <li>Receives <code>SessionEvent</code> and calls <code>cx.notify()</code>.</li>
+      </ul>
+      <span class="own">ferret-ui::terminal</span>
+    </div>
+    <div class="lane">
+      <h4>Engine thread — one per session</h4>
+      <ul>
+        <li>Creates and owns the <code>Terminal</code>. Never moves it.</li>
+        <li>Blocking-reads the PTY, feeds bytes to the parser.</li>
+        <li>Encodes keys and mouse events — encoding needs mode state, so it must happen here.</li>
+        <li>Builds owned snapshots and throttles them to one per frame.</li>
+        <li>Surfaces OSC 7, OSC 133, title and bell as events.</li>
+      </ul>
+      <span class="own">ferret-terminal::session</span>
+    </div>
+    <div class="lane">
+      <h4>Foreground poller</h4>
+      <ul>
+        <li>One shared timer thread for all sessions, not one each.</li>
+        <li>Answers "is the shell at a prompt?" when there is no shell integration.</li>
+        <li>Polls at 250&nbsp;ms, and only while a <code>cd</code> is queued.</li>
+      </ul>
+      <span class="own">ferret-terminal::foreground</span>
+    </div>
+  </div>
+
+  <h3>Shape of the loop</h3>
+  <p>Illustrative, not a signature — <code>libghostty-vt</code>'s exact API is pre-1.0 and
+  should be read from the docs at the pinned version:</p>
+
+  <pre><code><span class="c">// on the engine thread; `term` never leaves it</span>
+let mut term = Terminal::new(opts)?;
+let mut buf = [0u8; 64 * 1024];
+
+loop {
+    select! {
+        <span class="c">// PTY output: parse it, but do not snapshot per chunk</span>
+        n = reader.read(&amp;mut buf) =&gt; {
+            term.process(&amp;buf[..n]);
+            dirty = true;
+        }
+        <span class="c">// UI requests: encoding needs `term`'s mode state, so it happens here</span>
+        req = requests.recv() => match req {
+            Input(key)   =&gt; writer.write_all(&amp;term.encode_key(key))?,
+            Resize(c, r) =&gt; { term.resize(c, r); pty.resize(c, r)?; dirty = true; }
+            Cd(path)     =&gt; if sync.may_inject(&amp;term) { writer.write_all(...)?; },
+        }
+    }
+
+    <span class="c">// Throttle: at most one snapshot per frame, however fast the flood.</span>
+    if dirty &amp;&amp; last_emit.elapsed() &gt;= FRAME {
+        events.send(SessionEvent::Frame(term.snapshot()))?;   <span class="c">// owned copy, D-23</span>
+        last_emit = Instant::now();
+        dirty = false;
+    }
+}</code></pre>
+
+  <div class="note warn">
+    <strong>The throttle is not an optimisation</strong>
+    <p>It is the difference between working and not. <code>yes</code>, <code>cat</code> of a
+    large file, or a verbose build all produce output far faster than 60 frames a second. A
+    snapshot per read chunk saturates the channel, and the UI thread spends every frame
+    painting states no human will see. Emit at most one per frame and drop the intermediate
+    grids — they were never visible. Paneflow hit the same wall and fixed it the same way.</p>
+  </div>
+
+  <h3>What a snapshot contains</h3>
+  <p><code>libghostty-vt</code> gives us most of this already: <code>RenderState</code> is its
+  own viewport snapshot, walked with row and cell iterators. Our snapshot is the owned copy
+  we make while walking it — D-23's rule — because a <code>RenderState</code> is
+  <code>!Send</code> and cannot cross to the UI thread. Scrollback, wrapping and reflow are
+  the engine's job, not ours; we never keep a second copy of the grid.</p>
+  <p>Owned, <code>Send</code>, and cheap enough to build every frame. A 200×60 viewport is
+  12,000 cells; at roughly 16 bytes each that is under 200&nbsp;KB, and the allocation is
+  reused between frames rather than freshly allocated.</p>
+  <div class="scroller">
+    <table>
+      <caption>Snapshot fields</caption>
+      <thead><tr><th>Field</th><th>Why the UI needs it</th></tr></thead>
+      <tbody>
+        <tr><td class="crate">rows: Vec&lt;Row&gt;</td><td>Visible viewport only, never the whole scrollback. Each cell carries its grapheme, fg, bg and attribute bits.</td></tr>
+        <tr><td class="crate">cursor</td><td>Position, shape, visibility, blink. Drawn only when the panel has focus — same focus rule as the file pane's selection in <a href="ui-base.html">ui-base.html</a> §8.</td></tr>
+        <tr><td class="crate">scroll_offset, total_rows</td><td>Scrollbar geometry, and whether we are pinned to the bottom.</td></tr>
+        <tr><td class="crate">alt_screen: bool</td><td>Sync policy reads it (§6); the UI hides the scrollbar in alternate-screen mode, as every terminal does.</td></tr>
+        <tr><td class="crate">selection</td><td>Range in grid coordinates, so it survives reflow.</td></tr>
+        <tr><td class="crate">title</td><td>OSC 0/2. Shown in the header when the shell sets one.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Rendering rule</h3>
+  <p>Shape per <em>run</em> of identical style, not per cell. A monospace grid has a uniform
+  advance, so x positions are arithmetic and a run of 80 same-styled cells is one
+  <code>ShapedLine</code>. Shaping per cell is the mistake that makes a terminal feel slow,
+  and it is the terminal's equivalent of the virtualisation gate from Phase 1 — cheap now,
+  unrecoverable later.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="sync">
+  <span class="sec-tag">§6</span>
+  <h2>Directory sync</h2>
+  <p class="sec-intro">F-11. The signature feature, and the one with a way to lose someone's work.</p>
+
+  <div class="note ok">
+    <strong>The behaviour being guaranteed</strong>
+    <p><b>You navigate in the file pane. The terminal is already there.</b> No keystroke, no
+    focus change, no waiting. That sentence is the product, and everything in this section
+    exists to make it true <em>without</em> the failure mode that would discredit it — a
+    <code>cd</code> landing in the middle of a running program. The safety rules below are
+    not hedges against the feature working; in the ordinary case — a shell sitting at a
+    prompt, which is what a shell is doing almost all of the time — every one of them passes
+    at once and the <code>cd</code> goes out in the same frame as the navigation.</p>
+  </div>
+
+  <p>Two directions, with very different risk. Terminal&nbsp;→&nbsp;UI is safe: we read a
+  path and navigate a pane. UI&nbsp;→&nbsp;terminal <em>writes into someone's shell</em>,
+  and a write at the wrong moment corrupts a command they were typing or, worse, lands in a
+  running program's stdin.</p>
+
+  <h3>Forward: the pane moves, the shell follows</h3>
+  <p>The rule is a single conjunction. Inject only when <strong>all</strong> of these hold:</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Forward-sync preconditions</caption>
+      <thead><tr><th>Condition</th><th>How we know</th><th>If unknown</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>Sync is on</b></td>
+          <td>Per-tab toggle.</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td><b>Not on the alternate screen</b></td>
+          <td>From the snapshot — mode 1049. Catches <code>vim</code>, <code>htop</code>, <code>less</code>, <code>tmux</code>.</td>
+          <td>Never unknown; the engine always knows. This is the cheapest and most valuable of the checks.</td>
+        </tr>
+        <tr>
+          <td><b>The shell is at a prompt</b></td>
+          <td><b>Tier 1 — normally.</b> OSC 133 prompt marks from the integration D-30 injects: exact, and present on both platforms without the user doing anything.<br><b>Tier 2 — when injection failed.</b> macOS: <code>tcgetpgrp(fd)</code> equals the shell's pid. Windows: the shell process has no child processes (Toolhelp32 snapshot).</td>
+          <td>Hold the <code>cd</code>, show the toggle amber, retry on the next poll.</td>
+        </tr>
+        <tr>
+          <td><b>The input line is empty</b></td>
+          <td><b>Tier 1 only.</b> OSC 133's <code>B</code> mark gives the column where input starts; compare it to the cursor column.</td>
+          <td><span class="part">Unknowable at Tier 2.</span> See R-12 — but D-30 makes Tier 2 the rare case rather than the Windows default.</td>
+        </tr>
+        <tr>
+          <td><b>The terminal has been idle</b><br><span class="part">Tier 2 only</span></td>
+          <td>No output and no keystroke for one second (D-26).</td>
+          <td><b>Tier 1 does not wait at all.</b> OSC 133 has already told us the prompt is up and the input line is empty, so there is nothing an idle timer would add — it would only make the feature feel slow. The wait is a Tier 2 substitute for knowledge we normally have.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>When they hold, write one line: <code class="mono">&nbsp;cd -- '/quoted/path'\n</code>.
+  Note the leading space — with <code>HISTCONTROL=ignorespace</code> (bash) or
+  <code>setopt HIST_IGNORE_SPACE</code> (zsh) it keeps Ferret's own <code>cd</code> lines out
+  of the user's history. Because D-30 injects, we set that ourselves at spawn rather than
+  hoping the user has it; at Tier 2 those lines are visible in history, which is untidy but
+  not harmful. Never override a <code>HISTCONTROL</code> the user has already set to
+  something else — append to it.</p>
+
+  <p>Only the newest queued directory is ever sent, coalesced over 120&nbsp;ms. Someone
+  arrow-keying down a folder tree generates a navigation per keystroke; the queue holds one
+  entry and replaces it, so the shell receives one <code>cd</code> when they stop, not forty.
+  120&nbsp;ms is under the threshold where a UI feels like it is responding to you rather
+  than catching up with you, and it is the only delay in the Tier 1 path.</p>
+
+  <h4>Why this is not a race</h4>
+  <p>The order is fixed and it matters. The pane navigates first and repaints; the
+  <code>cd</code> is queued from that same update. If the shell is busy the queue simply
+  holds — the pane does not wait for the shell, ever. A file manager that blocked navigation
+  on a terminal would be a worse file manager than the one Phase 1 already shipped, and no
+  amount of sync is worth that trade.</p>
+
+  <div class="dec">
+    <h4><span class="did">D-26</span> At Tier 2, a <code>cd</code> that cannot be proven safe is held, not guessed at.</h4>
+    <p>When the integration did not load — the cases in §7 — Ferret can tell that no child
+    process is running but cannot tell whether the user has half-typed a command. In that
+    state the <code>cd</code> stays queued and the toggle sits amber until the terminal has
+    been idle for a full second, roughly four times the Tier 1 window. If a keystroke arrives
+    during that window the timer restarts.</p>
+    <p class="because"><b>Because</b>
+    injecting into a shell we cannot read is how you append <code>cd</code> to somebody's
+    half-written <code>rm</code>. Waiting a second costs nothing — nobody is watching the
+    terminal at the moment they navigate a folder — and a keystroke inside the window is the
+    one signal we do get that a human is mid-thought. An earlier draft of this decision
+    disabled forward sync on Windows entirely; D-30 makes that unnecessary, because Tier 1
+    is now the normal case on both platforms.</p>
+  </div>
+
+  <h3>Reverse: the shell moves, the pane follows</h3>
+  <p>The shell emits <code>ESC ] 7 ; file://host/path ST</code> on every directory change.
+  <code>libghostty-vt</code>'s <code>osc</code> module parses it; <code>osc.rs</code>
+  validates it before anything acts on it:</p>
+  <ol>
+    <li>Host must be empty, <code>localhost</code>, or this machine's hostname. Anything else
+    is a remote path we have no business opening — Phase 7 revisits this for SFTP mounts.</li>
+    <li>Percent-decode, then reject any path that is not absolute.</li>
+    <li><code>stat</code> it. A path that does not exist or is not a directory is dropped
+    silently — a shell can report a directory it deleted a moment ago.</li>
+    <li>If it equals the pane's current directory, drop it. This is the common case, and it
+    is what closes the feedback loop.</li>
+    <li>Otherwise navigate the pane, without adding to the tab's back/forward history — the
+    user did not press anything, so a shell <code>cd</code> should not fill up their history
+    stack.</li>
+  </ol>
+
+  <p><b>macOS fallback.</b> With no shell integration, poll the foreground process's cwd with
+  <code>proc_pidinfo(PROC_PIDVNODEPATHINFO)</code> on the idle timer. It is how Alacritty
+  and Zed do it, it needs no setup, and it is why macOS gets working sync with nothing
+  installed. There is no Windows equivalent; that asymmetry is the whole reason §7 exists.</p>
+
+  <h3>Loop prevention</h3>
+  <p>Forward sync writes a <code>cd</code>; the shell obeys and emits OSC 7; that OSC 7 would
+  navigate the pane to where it already is. Step 4 above absorbs it. Belt and braces: each
+  injected <code>cd</code> carries a generation number, and an OSC 7 matching the pending
+  target is consumed rather than acted on. Both mechanisms are cheap; keep both, because
+  step 4 alone breaks if the user navigates twice in quick succession.</p>
+
+  <h3>Quoting</h3>
+  <p><code>quote.rs</code> is pure, has no dependencies, and gets the most tests in the
+  crate — the fixture from Phase 1 already generates the names that break naive quoting:
+  255-character names, NFD, emoji, and anything with a quote in it.</p>
+  <div class="scroller">
+    <table>
+      <caption>Path quoting by shell</caption>
+      <thead><tr><th>Shell</th><th>Rule</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td>bash / zsh / fish</td><td>Wrap in single quotes; replace each <code>'</code> with <code>'\''</code>.</td><td class="key">it's → 'it'\''s'</td></tr>
+        <tr><td>PowerShell</td><td>Wrap in single quotes; double each <code>'</code>. Use <code>-LiteralPath</code> so globbing characters are inert.</td><td class="key">it's → 'it''s'</td></tr>
+        <tr><td>cmd.exe</td><td>Double quotes, and refuse any path containing <code>"</code> — cmd has no escape for it.</td><td class="key">— </td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Never interpolate a path into a command string without going through this module. The
+  <code>--</code> in <code>cd --</code> is not decoration either: it stops a directory named
+  <code>-P</code> from being read as a flag.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="shellint">
+  <span class="sec-tag">§7</span>
+  <h2>Shell integration</h2>
+  <p class="sec-intro">What upgrades sync from good to exact — and, because Ferret spawns the shell itself, something the user never has to install.</p>
+
+  <p>The integration is two escape sequences emitted by the shell: <b>OSC 7</b> on every
+  directory change, and <b>OSC 133</b> marks around the prompt (<code>A</code> before it,
+  <code>B</code> at the start of user input, <code>C</code> when a command starts,
+  <code>D</code> with its exit status). Together they give §6 exact answers to both of its
+  hard questions — is the shell at a prompt, and has the user typed anything.</p>
+
+  <div class="dec">
+    <h4><span class="did">D-30</span> Shell integration is injected at spawn, not installed to disk.</h4>
+    <p>D-24 already has Ferret choosing the shell binary and building its command line, which
+    means it also owns <code>argv</code> and the environment. That is enough to load the
+    integration for the session without touching a single file the user owns.</p>
+    <div class="scroller">
+      <table>
+        <caption>Injection mechanism per shell</caption>
+        <thead><tr><th>Shell</th><th>How it loads</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>zsh</td><td class="key">ZDOTDIR → our dir</td><td>Our <code>.zshrc</code> sources the integration, restores the user's <code>ZDOTDIR</code>, then sources their real files.</td></tr>
+          <tr><td>bash</td><td class="key">--rcfile / ENV</td><td>Preserve the user's own <code>--rcfile</code> if one was configured, and source it from ours.</td></tr>
+          <tr><td>fish</td><td class="key">XDG_DATA_DIRS prepend</td><td>fish auto-loads <code>&lt;dir&gt;/fish/vendor_conf.d/*.fish</code>.</td></tr>
+          <tr><td>PowerShell</td><td class="key">-NoExit -Command ". &lt;script&gt;"</td><td>Runs before the user's <code>$PROFILE</code>, which loads normally afterwards.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="because"><b>Because</b>
+    this is what the two implementations most worth copying both do. Ghostty injects
+    automatically for bash, zsh, fish, elvish and nushell; VS Code injects for the same family
+    and gates it behind one setting. Neither edits a user's rc file, and the reasons are
+    good ones: nothing to install means the feature works on first launch, nothing to
+    uninstall means removing Ferret removes Ferret, and nothing persistent means a crash
+    mid-write cannot corrupt a shell profile. The earlier draft of this document had Ferret
+    appending a marked block to <code>~/.zshrc</code>; that is the worse design, and the
+    only reason to reach for it is the fallback below.</p>
+  </div>
+
+  <p>We are already depending on Ghostty, whose integration scripts are MIT and therefore
+  GPL-3.0 compatible. Adapt those rather than writing four from scratch — they are
+  battle-tested against real prompt frameworks — renaming the <code>GHOSTTY_</code>
+  environment variables to <code>FERRET_</code> so the two can coexist on one machine.
+  PowerShell is the exception: Ghostty has no Windows support and ships no script for it, so
+  that one we write, modelled on VS Code's.</p>
+
+  <h3>When injection does not take</h3>
+  <p>Three known cases, all of which degrade to Tier 2 rather than breaking:</p>
+  <ul>
+    <li><b>macOS <code>/bin/bash</code></b> is version 3.2 and does not support the
+    injection path. Anyone using Apple's stock bash rather than a Homebrew one gets Tier 2.</li>
+    <li><b><code>ZDOTDIR</code> set in <code>/etc/zshenv</code></b> overrides ours, because
+    system-wide zsh config wins. Rare, but it is the documented failure mode Ghostty hit.</li>
+    <li><b>A shell we ship no script for</b> — nushell, elvish, <code>cmd.exe</code>, or
+    anything set via the <code>terminal.shell</code> override.</li>
+  </ul>
+
+  <div class="dec">
+    <h4><span class="did">D-27</span> A persistent install exists, but only as the fallback for those three cases.</h4>
+    <p>When Ferret detects that injection did not take — the integration sets a sentinel
+    variable, and its absence after the first prompt is the signal — the degraded sync
+    control offers <em>Load integration permanently</em>. That appends a guarded block:</p>
+    <pre><code><span class="c"># >>> ferret shell integration >>></span>
+[ -f "$HOME/.config/ferret/ferret.bash" ] &amp;&amp; . "$HOME/.config/ferret/ferret.bash"
+<span class="c"># &lt;&lt;&lt; ferret shell integration &lt;&lt;&lt;</span></code></pre>
+    <p>Idempotent, and an uninstall removes exactly the marked block. The body lives in its
+    own file so upgrading never touches the rc again.</p>
+    <p class="because"><b>Because</b>
+    the fallback has to exist — Tier 2 on stock macOS bash is a real configuration and we
+    should be able to fix it rather than shrug. But it is now a repair for a detected
+    problem rather than the normal path, which is a much easier thing to justify writing to
+    someone's home directory for. Marked blocks are the convention every tool that does this
+    uses (conda, nvm, Starship). Ferret never writes to a shell profile without the user
+    clicking a button that says so.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-31</span> <code>TERM</code> is <code>xterm-256color</code>, not <code>xterm-ghostty</code>.</h4>
+    <p>Overridable via <code>terminal.term</code> for anyone who has installed the Ghostty
+    terminfo entry and wants the extra capabilities advertised.</p>
+    <p class="because"><b>Because</b>
+    <code>TERM</code> travels. The moment someone <code>ssh</code>es out of the panel, that
+    value is what the remote host looks up — and <code>xterm-ghostty</code> is not in any
+    stock terminfo database, which produces <span class="mono">'xterm-ghostty': unknown
+    terminal type</span> and a broken remote session. It is the single most reported
+    friction point Ghostty has, with a small industry of blog posts about working around it.
+    Ferret should not inherit a known papercut for capabilities most users will never
+    exercise. This matters more here than in a standalone terminal, because F-13 in Phase 7
+    makes SSH a first-class path rather than something the user happens to type.</p>
+  </div>
+
+  <p>Whatever loads it, the script must be safe in a non-interactive shell — one that writes
+  escape codes into an <code>scp</code> session breaks it. Every script guards on
+  interactivity first.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="theming">
+  <span class="sec-tag">§8</span>
+  <h2>Themes &amp; text size</h2>
+  <p class="sec-intro">F-12, which is mostly already built.</p>
+
+  <p><code>crates/ferret-ui/themes/groknight.json</code> already carries the sixteen ANSI
+  slots plus foreground, background and cursor. The work is a loader, a settings field, and
+  the resolution rules below.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>New settings, siblings of appearance.ui_font_size</caption>
+      <thead><tr><th>Key</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="key">terminal.font_family</td><td class="key">system monospace</td><td>Menlo on macOS, Cascadia Mono then Consolas on Windows. Must fall back rather than fail.</td></tr>
+        <tr><td class="key">terminal.font_size</td><td class="num">13.0</td><td>Independent of <code>ui_font_size</code>. That independence is the feature.</td></tr>
+        <tr><td class="key">terminal.line_height</td><td class="num">1.2</td><td>Multiplier.</td></tr>
+        <tr><td class="key">terminal.palette</td><td class="key">"Groknight"</td><td>Names a theme file's <code>terminal</code> block.</td></tr>
+        <tr><td class="key">terminal.scrollback_lines</td><td class="num">10000</td><td>Bounded. Memory is roughly cols × lines × cell size.</td></tr>
+        <tr><td class="key">terminal.shell</td><td class="key">null</td><td>D-24 override. Empty means the system default.</td></tr>
+        <tr><td class="key">terminal.term</td><td class="key">"xterm-256color"</td><td>D-31. Change only if the Ghostty terminfo entry is installed everywhere you ssh.</td></tr>
+        <tr><td class="key">terminal.shell_integration</td><td class="key">true</td><td>D-30 injection. Off means Tier 2 everywhere — an escape hatch for an exotic shell setup, not a normal choice.</td></tr>
+        <tr><td class="key">terminal.sync_default</td><td class="key">true</td><td>Initial state of the per-window toggle.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Colour resolution</h3>
+  <ol>
+    <li>A cell with an explicit true-colour SGR uses it verbatim.</li>
+    <li>An indexed colour 0–15 resolves through the palette's sixteen slots.</li>
+    <li>16–255 resolves through the standard xterm cube — computed, not stored.</li>
+    <li>Default fg/bg come from the palette's <code>foreground</code> and
+    <code>background</code>.</li>
+  </ol>
+  <p>The panel background is the palette's, not <code>cx.theme()</code>'s. A terminal that
+  repaints its background when the app theme flips has lost its own identity, and a
+  Groknight-dark grid inside a light window is a legitimate thing to want.</p>
+
+  <div class="note">
+    <strong>The light-theme gap</strong>
+    <p>Groknight is a dark palette and Ferret ships light and dark. F-12 needs a second
+    palette before this phase closes, in the same JSON shape, defaulting when the app theme
+    is light and the user has not pinned one. Both themes are first class — that gate from
+    <code>AGENTS.md</code> applies here exactly as it did to the shell.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="interaction">
+  <span class="sec-tag">§9</span>
+  <h2>Interaction contract</h2>
+  <p class="sec-intro">Every binding needs a Windows equivalent — the same gate Phase 1 held.</p>
+
+  <p>The governing principle: <strong>inside a focused terminal, keys belong to the
+  terminal.</strong> A file manager that swallows <kbd>Ctrl</kbd><kbd>C</kbd> before the
+  shell sees it is broken. Only the bindings below are intercepted; everything else is
+  encoded and written to the PTY.</p>
+
+  <div class="scroller">
+    <table class="wide">
+      <caption>Intercepted bindings</caption>
+      <thead><tr><th>Action</th><th>macOS</th><th>Windows</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Toggle panel</td><td class="key">⌘J</td><td class="key">Ctrl J</td><td>Global; works from the file pane too. Mirrored by a toolbar button at the right end of the title bar, which renders in the toolbar's active state while the panel is open — as the reference does.</td></tr>
+        <tr><td>Focus panel / return to pane</td><td class="key">⌃`</td><td class="key">Ctrl `</td><td>Toggles focus between the two.</td></tr>
+        <tr><td>Copy</td><td class="key">⌘C</td><td class="key">Ctrl Shift C</td><td>Windows must use Shift — plain <kbd>Ctrl</kbd><kbd>C</kbd> is SIGINT and stays SIGINT.</td></tr>
+        <tr><td>Paste</td><td class="key">⌘V</td><td class="key">Ctrl Shift V</td><td>Bracketed paste when the shell has asked for it.</td></tr>
+        <tr><td>Clear scrollback</td><td class="key">⌘K</td><td class="key">Ctrl Shift K</td><td>Does not disturb the running command.</td></tr>
+        <tr><td>Font size</td><td class="key">⌘+ / ⌘− / ⌘0</td><td class="key">Ctrl+ / Ctrl− / Ctrl0</td><td>Terminal only; the interface does not scale with it.</td></tr>
+        <tr><td>Toggle sync</td><td class="key">⌘⇧S</td><td class="key">Ctrl Shift S</td><td>Mirrors the header control.</td></tr>
+        <tr><td>Scroll page</td><td class="key">⇧PgUp / PgDn</td><td class="key">Shift PgUp / PgDn</td><td>Passed through when on the alternate screen, where the program owns them.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Mouse</h3>
+  <ul>
+    <li>When the program has enabled mouse reporting <em>and</em> Shift is not held, encode
+    and forward. Shift is the universal escape hatch for selecting text over a program that
+    wants the mouse; every terminal implements it and users expect it.</li>
+    <li>Drag selects; double-click selects a word; triple-click selects a line. Selection is
+    in grid coordinates so reflow does not scramble it.</li>
+    <li><kbd>⌘</kbd>/<kbd>Ctrl</kbd>-click on a detected URL opens it. Detection runs over
+    the snapshot, and OSC 8 hyperlinks take priority over pattern matching when present.</li>
+    <li>Scroll wheel moves scrollback; on the alternate screen it is translated to arrow keys,
+    which is what makes the wheel work in <code>less</code> and <code>man</code>.</li>
+  </ul>
+
+  <h3>Focus</h3>
+  <p>The panel is a focus region alongside the sidebar, path bar and file pane, and joins the
+  <kbd>Tab</kbd> ring defined in <a href="ui-base.html">ui-base.html</a> §8. The cursor is
+  drawn solid when focused and hollow when not — the same idea as
+  <code>--app-selected</code> versus <code>--app-selected-idle</code> in the file pane.
+  Opening the panel with <kbd>⌘J</kbd> focuses it; closing it returns focus to the pane.</p>
+
+  <h3>Drag and drop</h3>
+  <p>Dropping a file from the pane onto the terminal inserts its quoted path at the cursor —
+  through <code>quote.rs</code>, the same as sync. It does not execute anything. This is a
+  small feature that makes the two halves feel like one application, and it costs almost
+  nothing once quoting exists.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="buildorder">
+  <span class="sec-tag">§10</span>
+  <h2>Build order</h2>
+  <p class="sec-intro">Eleven steps, each leaving the app runnable — the rule that made Phase 1 recoverable.</p>
+
+  <div class="step">
+    <span class="pn">01</span>
+    <div>
+      <h3>Build spike, both platforms <span class="pill p-risky">go / no-go</span></h3>
+      <p class="dep">depends on: — · answers D-22</p>
+      <p>Create <code>ferret-terminal</code> with one dependency and one test: feed
+      <code>"hello\r\n\x1b[31mred\x1b[0m"</code> to a <code>Terminal</code>, assert the grid
+      contains <span class="mono">hello</span> and that <span class="mono">red</span> carries
+      SGR 31. No PTY, no UI. Then build it on Windows.</p>
+      <ul>
+        <li>Pin <code>=0.2.1</code>. Record the Zig version and the Ghostty commit in <code>AGENTS.md</code>.</li>
+        <li>Decide the vendoring question here: does CI install Zig, or do we check in a prebuilt static archive per target with checksums, as Paneflow does?</li>
+        <li>Gate the crate behind a cargo feature so <code>cargo check -p ferret-vfs</code> stays toolchain-free for contributors who are not touching the terminal.</li>
+      </ul>
+      <p class="accept"><b>Stop here if</b> this does not build cleanly on Windows x64 within a day or two of work. That is the signal to take rung 2 of the ladder in §2 — <code>alacritty_terminal</code> plus our own OSC 7 scanner, a known and bounded cost. Do not discover this in step 9.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">02</span>
+    <div>
+      <h3>PTY and the session thread</h3>
+      <p class="dep">depends on: 1 · delivers the headless half of F-10</p>
+      <ul>
+        <li><code>portable-pty</code> spawns the shell from D-24; reader and writer split.</li>
+        <li>Shell detection and the D-30 injection — <code>ZDOTDIR</code>, <code>--rcfile</code>, <code>XDG_DATA_DIRS</code>, <code>-Command</code> — plus <code>TERM</code> from D-31. Do this here, not later: it changes how the shell is spawned, and retrofitting it into a working spawn path is worse than building it in.</li>
+        <li>The engine thread, its two channels, and the frame throttle from §5.</li>
+        <li>Clean shutdown: kill the shell, kill its descendants, drain output, join the thread.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> a window-free test spawns <code>sh -c 'echo hello'</code>, waits for a frame event, and asserts row 0 — on both platforms in CI — and a second test asserts that a real zsh and a real PowerShell both emit an OSC 133 <code>A</code> mark before their first prompt.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">03</span>
+    <div>
+      <h3>Render a snapshot</h3>
+      <p class="dep">depends on: 2 · first visible pixels</p>
+      <ul>
+        <li>The custom GPUI <code>Element</code>; cell metrics from the font; runs, not cells.</li>
+        <li>Hard-code the panel at a fixed height. No splitter, no input, no header yet.</li>
+        <li>Point it at <code>ls -la /usr/bin</code> and at <code>cargo build</code>.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> colours, bold, and a full screen of build output render correctly, and a profile shows shaping cost scaling with runs rather than characters.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">04</span>
+    <div>
+      <h3>Input</h3>
+      <p class="dep">depends on: 3 · F-10 becomes usable</p>
+      <ul>
+        <li>Key encoding on the engine thread; modifiers; the intercept list from §9.</li>
+        <li>Bracketed paste; IME; mouse encoding behind the Shift escape hatch.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> you can run <code>vim</code>, edit a file, and
+      <code>:wq</code> — arrow keys, Escape, and the alternate screen all correct.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">05</span>
+    <div>
+      <h3>Panel, header and splitter</h3>
+      <p class="dep">depends on: 4 · first change to the Phase 1 shell</p>
+      <ul>
+        <li>Dock into the content column per §3; drag, collapse, persist height per window. One session per window, following the active tab (D-28).</li>
+        <li>The header: cwd, sync toggle (inert for now), new, close.</li>
+        <li><kbd>⌘J</kbd> / <kbd>Ctrl J</kbd>, focus ring membership, the exited-shell state.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> the panel opens, resizes, persists across a restart, and the file pane's virtualisation still holds at 200,000 rows with the panel open.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">06</span>
+    <div>
+      <h3>Scrollback, selection, copy, URLs</h3>
+      <p class="dep">depends on: 5</p>
+      <p class="accept"><b>Done when</b> a 10,000-line build log scrolls smoothly, selection survives a resize, and copy round-trips multi-line output with its line breaks intact.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">07</span>
+    <div>
+      <h3>Resize correctness</h3>
+      <p class="dep">depends on: 6 · the step most likely to be underestimated</p>
+      <p>Emulator resize, then PTY resize, then let the OS deliver SIGWINCH. Reflow wrapped
+      lines. Debounce during a splitter drag — one resize per frame, not per pixel.</p>
+      <p class="accept"><b>Done when</b> <code>htop</code> and <code>tmux</code> redraw
+      correctly while the splitter is being dragged, and a wrapped 200-column line survives a
+      shrink and a re-widen.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">08</span>
+    <div>
+      <h3>Forward sync <span class="pill p-core">F-11</span></h3>
+      <p class="dep">depends on: 7</p>
+      <ul>
+        <li><code>foreground.rs</code> for both platforms; <code>quote.rs</code> with the fixture's hostile names.</li>
+        <li>The precondition table from §6; the single-entry queue; the amber held state.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> arrow-keying through a tree moves the shell once you
+      stop, and doing the same thing while <code>htop</code> runs injects nothing at all.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">09</span>
+    <div>
+      <h3>Reverse sync <span class="pill p-core">F-11</span></h3>
+      <p class="dep">depends on: 8 · the injection itself landed back in step 2</p>
+      <ul>
+        <li>OSC 7 validation and loop prevention per §6; the macOS <code>proc_pidinfo</code> fallback for Tier 2.</li>
+        <li>The sentinel check that detects a failed injection, the degraded toggle state, and D-27's repair installer behind it.</li>
+      </ul>
+      <p class="accept"><b>Done when</b> <code>cd</code> in the shell moves the file pane on
+      both platforms, and the round trip — navigate, inject, OSC 7, absorb — settles without
+      a second navigation. Then break it on purpose: point <code>terminal.shell</code> at
+      stock <code>/bin/bash</code> and confirm it degrades to Tier 2 and offers the repair
+      rather than misbehaving.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">10</span>
+    <div>
+      <h3>Themes and text size <span class="pill p-core">F-12</span></h3>
+      <p class="dep">depends on: 5</p>
+      <p>The palette loader, the settings from §8, a light palette to sit beside Groknight,
+      and the font-size bindings.</p>
+      <p class="accept"><b>Done when</b> the terminal keeps its own palette across an app
+      theme flip, and its font size changes without moving anything else in the window.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="pn">11</span>
+    <div>
+      <h3>Windows pass</h3>
+      <p class="dep">depends on: all</p>
+      <p>ConPTY startup ordering and descendant cleanup, the PowerShell snippet end to end,
+      every binding from §9, and the unavailable-sync state from D-26.</p>
+      <p class="accept"><b>Done when</b> the §11 acceptance runs on Windows, not just macOS.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="measuring">
+  <span class="sec-tag">§11</span>
+  <h2>Gates &amp; budgets</h2>
+  <p class="sec-intro">What has to be true, and the numbers that say so.</p>
+
+  <h3>Gates</h3>
+  <ol>
+    <li><b>Build on both platforms before anything else.</b> Step 1 exists to make D-22
+    falsifiable in a day. Every later step assumes it passed.</li>
+    <li><b>Runs, not cells.</b> As soon as pixels appear, confirm shaping scales with style
+    runs. This is Phase 2's virtualisation gate.</li>
+    <li><b>Never inject blind.</b> No code path writes to the PTY on the app's behalf without
+    passing the §6 preconditions. Injecting into a running program is this phase's
+    equivalent of Phase 1's trash-before-delete rule.</li>
+    <li><b>But do inject.</b> The mirror of the rule above, and the easier one to lose sight
+    of while writing the safety code. At a prompt with an empty input line, the
+    <code>cd</code> goes out — no idle timer, no extra confirmation, no waiting for focus.
+    A sync that is technically safe and practically never fires has failed at the thing
+    Phase 2 exists to do.</li>
+    <li><b>Keys belong to the terminal.</b> Only §9's list is intercepted.</li>
+    <li><b>Both themes, both platforms.</b> Unchanged from Phase 1.</li>
+    <li><b>Run it.</b> <code>cargo check</code> proves nothing about a PTY.</li>
+  </ol>
+
+  <h3>Budgets</h3>
+  <div class="scroller">
+    <table>
+      <caption>Measured with cargo xtask, extended for this phase</caption>
+      <thead><tr><th>Measure</th><th class="num">Budget</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Keystroke to glyph on screen</td><td class="num">&lt; 16 ms p99</td><td>Instrument the input channel to the frame event.</td></tr>
+        <tr><td>Frame time during a <code>yes</code> flood</td><td class="num">&lt; 8 ms</td><td>In the app. The throttle is what makes this pass.</td></tr>
+        <tr><td>Snapshot build, 200×60</td><td class="num">&lt; 2 ms</td><td>Bench in the crate, no window.</td></tr>
+        <tr><td>Panel open to visible prompt</td><td class="num">&lt; 150 ms</td><td>Dominated by shell startup, so measure with a real profile loaded.</td></tr>
+        <tr><td>Scrollback memory, 10k lines × 200 cols</td><td class="num">&lt; 40 MB</td><td>Bounds <code>terminal.scrollback_lines</code>.</td></tr>
+        <tr><td>Forward-sync latency, Tier 1</td><td class="num">&lt; 150 ms</td><td>The 120&nbsp;ms coalescing window plus a frame. Instrument navigation → bytes written to the PTY.</td></tr>
+        <tr><td>Forward-sync latency, Tier 2</td><td class="num">&lt; 1200 ms</td><td>The one-second idle window plus a poll. Slower on purpose (D-26).</td></tr>
+        <tr><td>Navigations per <code>cd</code> while arrow-keying</td><td class="num">exactly 1</td><td>Twenty rapid navigations must produce one injected line, not twenty.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Acceptance</h3>
+  <div class="note ok">
+    <strong>Done when</strong>
+    <p><code>vim</code>, <code>htop</code> and <code>tmux</code> all behave correctly, and
+    navigating the file pane moves the shell without ever corrupting a running command — on
+    macOS and Windows. Unchanged from <a href="plan.html#phases">plan.html</a>; this
+    document does not get to lower the bar it was given.</p>
+  </div>
+  <p>Concretely, the manual pass before this phase closes: open <code>vim</code> and resize
+  the splitter while it is running; run <code>htop</code> and confirm the mouse works and
+  that navigation injects nothing; start <code>tmux</code>, split it, and confirm its own
+  panes resize; <code>cat</code> a 50&nbsp;MB file and keep scrolling the file pane while it
+  runs; navigate twenty folders quickly and confirm exactly one <code>cd</code> arrives;
+  <code>cd</code> in the shell and watch the pane follow.</p>
+
+  <div class="note ok">
+    <strong>The one that decides the phase</strong>
+    <p>Open the panel, click through six folders in the sidebar and the listing at normal
+    speed, and read the terminal. There should be six prompts, each in the folder you were
+    looking at, arriving as fast as you clicked — and you should not have touched the
+    terminal once. If that feels instant, F-11 works. If it feels like the shell is trailing
+    you, the coalescing window or the Tier 1 path is wrong, and no other measurement in this
+    table matters until it is fixed.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="risks">
+  <span class="sec-tag">§12</span>
+  <h2>Risks &amp; questions</h2>
+  <p class="sec-intro">New entries, continuing plan.html's numbering. Fold them back into §9 and §11 there when this document is accepted.</p>
+
+  <div class="scroller">
+    <table>
+      <caption>Risks introduced by this phase</caption>
+      <thead><tr><th>ID</th><th>Risk</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="id">R-09</td>
+          <td><b>A Zig toolchain enters the build.</b> Contributors, CI and release builds all need it. Cuts against D-13's reason for existing.</td>
+          <td>Decide vendoring in step 1. Gate the crate behind a cargo feature so the rest of the workspace stays pure-Rust to check and test. Document the exact Zig version.</td>
+        </tr>
+        <tr>
+          <td class="id">R-10</td>
+          <td><b><code>libghostty-vt</code> is pre-1.0.</b> Its API will break under us, and the bindings track a pinned Ghostty commit rather than a stable C ABI.</td>
+          <td>Pin exactly (D-22). One module names the library (D-23). Budget a day per bump and treat it as a change, not a chore.</td>
+        </tr>
+        <tr>
+          <td class="id">R-11</td>
+          <td><b>Windows ARM64 has no supported build</b> of the engine. Ferret would ship x64 only there.</td>
+          <td>Acceptable for v1.0 — x64 emulation covers ARM64 Windows. Revisit at Phase 9 packaging. Record it as a known platform limit rather than discovering it during release.</td>
+        </tr>
+        <tr>
+          <td class="id">R-12</td>
+          <td><b>Forward sync can append to a half-typed command line</b> at Tier 2, because nothing on the wire tells us the user has typed something.</td>
+          <td>Largely retired by D-30: with the integration injected at spawn, Tier 1's OSC 133 <code>B</code> mark answers this exactly, on both platforms, with no user setup. What remains is the three failure cases in §7 — stock macOS bash, a system-wide <code>ZDOTDIR</code>, an unsupported shell — where D-26's one-second idle window and the alternate-screen check are the defence, and D-27 offers a permanent fix. Verify the degraded path deliberately in step 9 rather than hoping it never runs.</td>
+        </tr>
+        <tr>
+          <td class="id">R-13</td>
+          <td><b>ConPTY behaves differently</b> from a Unix PTY: no process groups, resize races, output arriving after exit, orphaned descendants.</td>
+          <td><code>portable-pty</code> (D-25) absorbs most of it. Step 11 is a dedicated pass. Do not assume a macOS-passing test means anything on Windows.</td>
+        </tr>
+        <tr>
+          <td class="id">R-14</td>
+          <td><b>The panel competes with the file pane for frame time.</b> A flooding terminal beside a 200,000-row listing is the worst case, and Phase 1's virtualisation gate was won on that fixture.</td>
+          <td>The frame throttle in §5 caps terminal work per frame regardless of output rate. Re-run the Phase 1 scroll test with the panel open and flooding (step 5).</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Questions</h3>
+
+  <p>All four are now answered. They are kept here with their reasoning rather than deleted,
+  because the next person to disagree deserves to see what was weighed.</p>
+
+  <div class="dec">
+    <h4><span class="did">Q-05 · Q-10</span> How many sessions, and scoped to what? <span class="pill p-done">answered</span></h4>
+    <p><span class="did mono"><b>D-28</b></span> — <b>exactly one session per window</b>,
+    following the active tab. Not one per tab.</p>
+    <p class="because"><b>Because</b>
+    per-tab looked right until it was costed. Ten tabs would mean ten shells, ten scrollback
+    buffers, and — the part that actually decides it — closing a tab would kill a shell that
+    might have a build running in it. A file manager whose tab close button can destroy a
+    running job is a bad file manager. Per-window has none of that: the terminal is a
+    property of the window, the active tab's directory is what it follows, and switching
+    tabs is just another navigation, handled by the same §6 safety rules that handle
+    navigating inside one. It composes with the amber <b>held</b> state for free — if a build
+    is running in tab A and you switch to tab B, the shell stays where it is, the header
+    keeps showing A's directory, and the <code>cd</code> lands when the build finishes.
+    Dolphin, the closest prior art with a decade of use behind it, is per-window too.
+    The rest of the original answer stands: anyone who wants four shells has
+    <code>tmux</code>, and <code>tmux</code> works here because this is a real terminal.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">Q-09</span> Zig in CI, or vendored static archives? <span class="pill p-done">answered</span></h4>
+    <p><span class="did mono"><b>D-32</b></span> — <b>build from source; Zig is a CI and
+    release-build dependency.</b> No prebuilt archives in the repository. The contributor cost
+    is paid down instead by feature-gating: <code>ferret-terminal</code> sits behind a cargo
+    feature, so <code>cargo check</code>, <code>cargo test</code> and every other crate's
+    workflow stay pure-Rust for anyone not working on the terminal. Document the exact Zig
+    version, the pinned Ghostty commit, and <code>GHOSTTY_ZIG_SYSTEM_DIR</code> for
+    network-free builds.</p>
+    <p class="because"><b>Because</b>
+    a committed <code>.a</code> or <code>.lib</code> is a blob nobody can verify against the
+    source commit it claims to come from, in a GPL-3.0 repository where auditability is
+    part of the point. It also has to be regenerated for three targets on every bump, by
+    whoever happens to have the toolchain, which is how vendored binaries silently drift
+    from their sources. Installing Zig in CI is one workflow step. The real cost was always
+    the contributor who just wants to fix a sidebar bug, and the feature gate removes that
+    cost entirely rather than trading it for an unverifiable artefact. Revisit only if
+    contributor friction turns out to be real and measured.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">Q-11</span> When do we prompt for shell integration? <span class="pill p-done">dissolved</span></h4>
+    <p><b>Never, in the normal case.</b> D-30 injects the integration at spawn, so there is
+    nothing to install and nothing to ask about. The prompt survives only as the repair path
+    in D-27, offered when Ferret has <em>detected</em> that injection did not take.</p>
+    <p class="because"><b>Because</b>
+    the question was a false choice created by the earlier design. Once the shell is spawned
+    by us, asking permission to edit a file we no longer need to edit is a dialog with no
+    purpose. The best answer to "when should we interrupt the user about this" is usually to
+    find the design where you do not have to.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Ferret · phase 2 reference · rev 1 · 28 August 2026 · GPL-3.0-or-later<br>
+  Companion to <a href="plan.html">plan.html</a> (whole product) and <a href="ui-base.html">ui-base.html</a> (phase 1).
+  New IDs D-22…D-32 and R-09…R-14 continue that document's numbering and should be folded into it; Q-05 and Q-09…Q-11 are answered in §12.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  // Theme toggle: attribute beats media query in both directions.
+  var root = document.documentElement;
+  var btn = document.getElementById('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('ferret-plan-theme'); } catch (e) {}
+  if (saved === 'dark' || saved === 'light') root.setAttribute('data-theme', saved);
+
+  btn.addEventListener('click', function () {
+    var explicit = root.getAttribute('data-theme');
+    var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var current = explicit || (systemDark ? 'dark' : 'light');
+    var next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('ferret-plan-theme', next); } catch (e) {}
+  });
+
+  // Mark the section currently in view in the rail. Same rule as plan.html:
+  // the last section whose top has passed the line is the one being read.
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail nav a'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
+  var ticking = false;
+
+  function mark() {
+    ticking = false;
+    var line = window.scrollY + 120;
+    var active = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].offsetTop <= line) active = sections[i]; else break;
+    }
+    links.forEach(function (a) { a.classList.remove('is-current'); });
+    if (active && byId[active.id]) byId[active.id].classList.add('is-current');
+  }
+
+  window.addEventListener('scroll', function () {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(mark); }
+  }, { passive: true });
+  window.addEventListener('resize', mark, { passive: true });
+  mark();
+})();
+</script>
+</body>
+</html>
