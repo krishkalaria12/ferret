@@ -28,13 +28,30 @@ pub const LISTING_BUFFER: usize = 2;
 /// keeping an incomplete picture.
 pub const WATCH_EVENT_BUFFER: usize = 64;
 
-/// Entries grouped into one item of a directory listing stream.
+/// Largest batch of entries in one item of a directory listing stream.
 ///
-/// A 200,000-entry directory reaches the UI in roughly fifty model updates,
-/// rather than one per row. This is large enough to amortize channel and
-/// executor overhead, but small enough that the first visible rows do not wait
-/// for a complete directory walk.
+/// A 200,000-entry directory reaches the UI in roughly fifty model updates
+/// rather than one per row: large enough to amortise the channel send, the
+/// task wake and the model update.
+///
+/// This is a *ceiling*, reached by doubling from [`FIRST_LISTING_BATCH`] —
+/// see there for why it is not also the first batch.
 pub const LISTING_BATCH_SIZE: usize = 4_096;
+
+/// Entries in the first batch, before the ramp doubles towards
+/// [`LISTING_BATCH_SIZE`].
+///
+/// The constant above was chosen when a batch was names only. D-33 changed
+/// what a batch *is*: every entry now carries a resolved `stat`, so the batch
+/// size also decides how long the first row waits — and a flat 4,096 made that
+/// 4,096 stats, taking time-to-first-row from 2.0 ms to 5.8 ms.
+///
+/// Ramping keeps both properties: the first rows appear almost immediately,
+/// and the steady state is still one update per few thousand entries. It also
+/// bounds what a cancelled walk leaves in flight to one batch, which is
+/// smallest exactly when a walk is most likely to be abandoned — right at the
+/// start, while someone is typing past a directory.
+pub const FIRST_LISTING_BATCH: usize = 128;
 
 /// Threads in Ferret's own worker pool ([`crate::pool`]).
 ///

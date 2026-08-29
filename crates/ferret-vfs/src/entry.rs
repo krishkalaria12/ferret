@@ -47,12 +47,16 @@ impl EntryKind {
 ///
 /// See [`crate::Capabilities::metadata_in_listing`] — where the platform hands
 /// this over with the listing, there is no second call to make.
+/// Carried on every entry, so its size is multiplied by the size of the
+/// directory: 200,000 rows of `flat/` hold 200,000 of these. `created` and
+/// `readonly` used to be here and were read by nothing — 3.2 MB of creation
+/// times nobody displayed (A-34). Both come back from the same `stat` that is
+/// already being made, so re-adding one when a column wants it costs a line
+/// and no syscalls; carrying them until then cost 16 bytes a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Metadata {
     pub len: u64,
     pub modified: Option<SystemTime>,
-    pub created: Option<SystemTime>,
-    pub readonly: bool,
     /// Hidden by name (leading dot) *or* by the platform's own flag — the
     /// `HIDDEN` / `SYSTEM` attributes on Windows, `UF_HIDDEN` on macOS.
     pub hidden: bool,
@@ -234,6 +238,29 @@ mod tests {
         assert_eq!(
             entry("my.folder", EntryKind::Dir, 0).extension(),
             Some("folder")
+        );
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    /// `Entry` is carried once per row, so its size is multiplied by the size
+    /// of the directory — 200,000 of them for `flat/`. This is a tripwire, not
+    /// a target: growing it is sometimes right, and doing so accidentally is
+    /// not (A-34).
+    #[test]
+    fn entry_stays_small() {
+        assert!(
+            size_of::<super::Entry>() <= 128,
+            "Entry is {} bytes; at 200,000 rows every extra 8 is 1.6 MB",
+            size_of::<super::Entry>()
+        );
+        // The niche in `VfsPath`'s `Arc` means an empty slab slot costs
+        // nothing over a full one, which is what makes the slab affordable.
+        assert_eq!(
+            size_of::<Option<super::Entry>>(),
+            size_of::<super::Entry>(),
+            "Option<Entry> must pack into Entry's niche"
         );
     }
 }

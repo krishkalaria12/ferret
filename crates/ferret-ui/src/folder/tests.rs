@@ -7,7 +7,6 @@ fn entry(name: &str, kind: EntryKind, len: u64, modified: Option<SystemTime>) ->
         modified,
         // Mirror what LocalFs produces: the leading dot is hidden.
         hidden: name.starts_with('.'),
-        ..Default::default()
     }))
 }
 

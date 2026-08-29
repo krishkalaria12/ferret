@@ -1,4 +1,4 @@
-use crate::config::{LISTING_BATCH_SIZE, LISTING_BUFFER};
+use crate::config::{FIRST_LISTING_BATCH, LISTING_BATCH_SIZE, LISTING_BUFFER};
 use crate::{
     Capabilities, DirEntryBatch, Entry, EntryKind, Metadata, ReadDirStream, RemoveMode, Result,
     SymlinkTarget, Vfs, VfsError, VfsPath,
@@ -70,13 +70,19 @@ impl Vfs for LocalFs {
                     }
                 };
 
-                let mut pending = Vec::with_capacity(LISTING_BATCH_SIZE);
+                // Ramped rather than flat, because a batch now carries a
+                // `stat` per entry and so decides how long the first row
+                // waits (A-35).
+                let mut batch_size = FIRST_LISTING_BATCH;
+                let mut pending = Vec::with_capacity(batch_size);
                 for item in iter {
                     let entry = match item {
                         Ok(entry) => entry,
                         Err(source) => {
                             if !pending.is_empty()
-                                && tx.send_blocking(Ok(resolve(&mut pending))).is_err()
+                                && tx
+                                    .send_blocking(Ok(resolve(&mut pending, batch_size)))
+                                    .is_err()
                             {
                                 return;
                             }
@@ -91,16 +97,20 @@ impl Vfs for LocalFs {
                     };
 
                     pending.push(entry);
-                    if pending.len() < LISTING_BATCH_SIZE {
+                    if pending.len() < batch_size {
                         continue;
                     }
-                    if tx.send_blocking(Ok(resolve(&mut pending))).is_err() {
+                    if tx
+                        .send_blocking(Ok(resolve(&mut pending, batch_size)))
+                        .is_err()
+                    {
                         return; // consumer went away: stop walking.
                     }
+                    batch_size = (batch_size * 2).min(LISTING_BATCH_SIZE);
                 }
 
                 if !pending.is_empty() {
-                    let _ = tx.send_blocking(Ok(resolve(&mut pending)));
+                    let _ = tx.send_blocking(Ok(resolve(&mut pending, batch_size)));
                 }
             })
             .await;
@@ -292,9 +302,9 @@ impl Vfs for LocalFs {
 /// first rows still arrive after `LISTING_BATCH_SIZE` names rather than after
 /// the whole directory, and a dropped stream leaves at most one batch of
 /// stats in flight rather than a directory's worth.
-fn resolve(entries: &mut Vec<fs::DirEntry>) -> DirEntryBatch {
+fn resolve(entries: &mut Vec<fs::DirEntry>, next_capacity: usize) -> DirEntryBatch {
     let batch = std::mem::take(entries);
-    entries.reserve(LISTING_BATCH_SIZE);
+    entries.reserve(next_capacity);
     crate::pool::install(move || batch.into_par_iter().map(convert).collect())
 }
 
@@ -351,8 +361,6 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
     Metadata {
         len: md.len(),
         modified: md.modified().ok(),
-        created: md.created().ok(),
-        readonly: md.permissions().readonly(),
         hidden: path.is_hidden_by_name() || platform_hidden(md),
     }
 }
@@ -550,6 +558,7 @@ fn platform_hidden(_md: &fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::FIRST_LISTING_BATCH;
     use std::collections::BTreeMap;
 
     fn collect(fs: &LocalFs, dir: &VfsPath) -> BTreeMap<String, Entry> {
@@ -652,7 +661,8 @@ mod tests {
     #[test]
     fn listings_arrive_in_bounded_batches() {
         let root = tempdir("batches");
-        let expected = LISTING_BATCH_SIZE + 1;
+        // Enough to get past the ramp and into the steady state.
+        let expected = LISTING_BATCH_SIZE * 2 + 1;
         for i in 0..expected {
             fs::write(root.join(format!("f{i:05}")), b"").unwrap();
         }
@@ -665,9 +675,22 @@ mod tests {
                 .await
         });
 
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), LISTING_BATCH_SIZE);
-        assert_eq!(batches[1].len(), 1);
+        // The first batch is small, so the first rows appear without waiting
+        // on a `stat` for four thousand of them (A-35).
+        assert_eq!(batches[0].len(), FIRST_LISTING_BATCH);
+        // Then it doubles, up to the ceiling and no further.
+        assert_eq!(batches[1].len(), FIRST_LISTING_BATCH * 2);
+        assert!(
+            batches.iter().all(|b| b.len() <= LISTING_BATCH_SIZE),
+            "no batch may exceed the ceiling: {:?}",
+            batches.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+        assert!(
+            batches.iter().any(|b| b.len() == LISTING_BATCH_SIZE),
+            "a listing this size must reach the steady state"
+        );
+
+        // And nothing is lost or duplicated on the way.
         assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), expected);
         assert!(batches.iter().all(|batch| !batch.is_empty()));
 
