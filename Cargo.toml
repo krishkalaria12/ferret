@@ -78,10 +78,19 @@ dirs = "6"
 foldhash = "0.2"
 futures = "0.3"
 notify = "7"
+# Not for speed first: `std`'s poisoning was doing active harm. Every lock in
+# Ferret guards a few nanoseconds — a map lookup, a `Point`, an `Option` — and
+# two of them swallowed a poisoned lock into an indistinguishable "no value",
+# so one panic anywhere turned icons or column widths off permanently. There is
+# no poisoning here, so `lock()` returns the guard and those paths cannot exist.
+parking_lot = "0.12"
 # A-12. Sorting 200,000 rows on a header click is embarrassingly parallel, and
 # is safe to parallelise only now that the comparator no longer allocates.
 rayon = "1"
 rust-embed = "8"
+# Bounded collections that never reach the heap: at most four table columns,
+# at most two of them hideable.
+smallvec = "1"
 smol = "2"
 # D-35. `SmolStr` stores up to 22 bytes inline, so cloning an `Entry` whose
 # name fits — which is most of them — costs a memcpy rather than a heap

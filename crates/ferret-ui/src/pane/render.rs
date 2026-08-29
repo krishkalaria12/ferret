@@ -19,14 +19,14 @@ impl Render for FilePane {
         }
         // Drops arrive from row listeners that cannot reach the browser; this
         // is where they become an event it can act on.
-        if let Some(row) = self.toggles.lock().unwrap().take() {
+        if let Some(row) = self.toggles.lock().take() {
             self.folder.update(cx, |f, cx| f.toggle_expanded(row, cx));
         }
-        let sizing: Vec<FileColumn> = std::mem::take(&mut self.sizing_requests.lock().unwrap());
+        let sizing: Vec<FileColumn> = std::mem::take(&mut self.sizing_requests.lock());
         for column in sizing {
             self.size_column_to_content(column, window, cx);
         }
-        if let Some(drop) = self.drops.lock().unwrap().take() {
+        if let Some(drop) = self.drops.lock().take() {
             cx.emit(PaneEvent::DropPaths {
                 sources: drop.sources,
                 dest: drop.dest,
@@ -94,7 +94,7 @@ impl Render for FilePane {
                 queue_drop(&pane_drops, dragged, pane_dir.clone(), window);
             })
             .on_prepaint(move |bounds, _, _| {
-                *origin.lock().unwrap() = bounds.origin;
+                *origin.lock() = bounds.origin;
             })
             .on_key_down(cx.listener(Self::handle_typeahead))
             .on_action(cx.listener(|this, _: &actions::Open, _, cx| {

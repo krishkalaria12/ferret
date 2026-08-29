@@ -191,8 +191,8 @@ impl Platform for MacOs {
 // Icons (D-18)
 
 use crate::icon::{IconBitmap, IconKey, IconProvider};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Icon size to ask the OS for, in points.
 ///
@@ -206,6 +206,11 @@ const ICON_POINTS: f64 = 64.0;
 pub struct MacIcons {
     /// Resolved icons, keyed by type. Bounded by the number of *types* the
     /// user has looked at, not by the number of files.
+    ///
+    /// `parking_lot`, so there is no poisoning to swallow. `lookup` used to
+    /// end in `.lock().ok()?`, which turned a lock poisoned by a panic
+    /// anywhere in the process into "this type has no icon" — permanently,
+    /// and indistinguishably from a genuine miss.
     cache: Mutex<HashMap<IconKey, Option<IconBitmap>>>,
 }
 
@@ -213,20 +218,18 @@ impl IconProvider for MacIcons {
     fn lookup(&self, key: &IconKey) -> Option<IconBitmap> {
         // Cache only — never the OS. This runs once per visible row while a
         // frame is being built.
-        self.cache.lock().ok()?.get(key)?.clone()
+        self.cache.lock().get(key)?.clone()
     }
 
     fn resolve(&self, key: &IconKey, sample: &std::path::Path) -> bool {
-        if self.cache.lock().is_ok_and(|c| c.contains_key(key)) {
+        if self.cache.lock().contains_key(key) {
             return false; // Already answered, including a cached failure.
         }
         let bitmap = icon_for_path(sample).filter(IconBitmap::is_well_formed);
         let cached_something = bitmap.is_some();
         // A failure is cached too: a type whose icon cannot be read must not
         // be retried once per frame forever.
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(key.clone(), bitmap);
-        }
+        self.cache.lock().insert(key.clone(), bitmap);
         cached_something
     }
 }

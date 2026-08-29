@@ -170,8 +170,8 @@ impl Platform for Windows {
 // Icons (D-18)
 
 use crate::icon::{IconBitmap, IconKey, IconProvider};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Icon size to ask the shell for, in pixels.
 ///
@@ -187,17 +187,21 @@ const ICON_PIXELS: i32 = 32;
 pub struct WindowsIcons {
     /// Resolved icons, keyed by type — bounded by the number of *types* seen,
     /// never by the number of files.
+    ///
+    /// `parking_lot`, so there is no poisoning to swallow: `lookup` used to
+    /// turn a lock poisoned anywhere in the process into a permanent, silent
+    /// "this type has no icon".
     cache: Mutex<HashMap<IconKey, Option<IconBitmap>>>,
 }
 
 impl IconProvider for WindowsIcons {
     fn lookup(&self, key: &IconKey) -> Option<IconBitmap> {
         // Cache only: this runs once per visible row while a frame is built.
-        self.cache.lock().ok()?.get(key)?.clone()
+        self.cache.lock().get(key)?.clone()
     }
 
     fn resolve(&self, key: &IconKey, sample: &std::path::Path) -> bool {
-        if self.cache.lock().is_ok_and(|c| c.contains_key(key)) {
+        if self.cache.lock().contains_key(key) {
             return false;
         }
         let bitmap = icon_for_path(sample, matches!(key, IconKey::Directory))
@@ -205,9 +209,7 @@ impl IconProvider for WindowsIcons {
         let cached_something = bitmap.is_some();
         // Failures are cached too, so an unreadable type is not retried once
         // per frame forever.
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(key.clone(), bitmap);
-        }
+        self.cache.lock().insert(key.clone(), bitmap);
         cached_something
     }
 }

@@ -8,7 +8,10 @@
 //! watcher and lets the old listing task see a dead entity and stop.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use ferret_platform::Place;
 use ferret_settings::{FolderView, SortKey, SortOrder, ThemeChoice, ViewMode};
@@ -165,7 +168,7 @@ pub struct Browser {
     /// `gpui-component`'s `Tab` stops propagation of its own pointer events,
     /// so a per-tab listener never runs; the strip therefore does its own hit
     /// testing, and this is the geometry it needs.
-    tab_lefts: std::sync::Arc<std::sync::Mutex<Vec<gpui::Pixels>>>,
+    tab_lefts: Arc<Mutex<Vec<gpui::Pixels>>>,
     clipboard: Option<(Vec<VfsPath>, bool)>,
 
     /// `Some` while the path bar renders an editable input.
@@ -259,7 +262,7 @@ impl Browser {
             sidebar_drag: None,
             tab_drag: None,
             favorite_drag: None,
-            tab_lefts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            tab_lefts: Arc::new(Mutex::new(Vec::new())),
             clipboard: None,
             path_editing: None,
             filter_input,

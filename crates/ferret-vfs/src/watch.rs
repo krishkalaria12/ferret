@@ -37,10 +37,11 @@
 
 use crate::config::WATCH_EVENT_BUFFER;
 use notify::Watcher as _;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex, MutexGuard, OnceLock,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -151,6 +152,11 @@ struct Registry {
     /// `None` until the first subscription, and again if the backend refuses
     /// to start. Separate from `subscribers` so neither lock is ever held
     /// while the other is taken.
+    ///
+    /// `parking_lot` throughout: these are taken from the backend's callback
+    /// thread on every filesystem event, they guard a map lookup and a
+    /// non-blocking send, and `std`'s poisoning would turn one panic anywhere
+    /// into a process that silently stops watching files.
     backend: Mutex<Option<notify::RecommendedWatcher>>,
     subscribers: Mutex<HashMap<PathBuf, Vec<Subscriber>>>,
     /// Registered directories with no subscribers left, oldest first.
@@ -174,18 +180,6 @@ fn registry() -> &'static Arc<Registry> {
     })
 }
 
-/// Take a lock, recovering the guard if a previous holder panicked.
-///
-/// Nothing inside these critical sections can panic — they are map operations
-/// and a non-blocking channel send — so a poisoned lock could only come from a
-/// panic elsewhere in the process. Refusing to watch anything ever again
-/// because of that is a far worse outcome than continuing.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 impl Registry {
     /// Fan one backend event out to the directories it concerns.
     ///
@@ -199,7 +193,7 @@ impl Registry {
     /// `/private/var/folders/x/...` — and are re-expressed against each
     /// subscriber's own directory on the way out.
     fn dispatch(&self, result: notify::Result<notify::Event>) {
-        let subscribers = lock(&self.subscribers);
+        let subscribers = self.subscribers.lock();
 
         let event = match result {
             Ok(event) => event,
@@ -260,7 +254,7 @@ impl Registry {
     /// Register `dir` with the backend, starting it if this is the first one.
     fn watch_natively(self: &Arc<Self>, dir: &Path) -> std::io::Result<()> {
         let to_io = |err: notify::Error| std::io::Error::other(err.to_string());
-        let mut backend = lock(&self.backend);
+        let mut backend = self.backend.lock();
         if backend.is_none() {
             let registry = Arc::clone(self);
             *backend = Some(
@@ -276,7 +270,7 @@ impl Registry {
     }
 
     fn unwatch_natively(&self, dir: &Path) {
-        if let Some(backend) = lock(&self.backend).as_mut() {
+        if let Some(backend) = self.backend.lock().as_mut() {
             // The directory may already be gone, which is exactly when this
             // fails and exactly when there is nothing left to detach.
             let _ = backend.unwatch(dir);
@@ -308,13 +302,13 @@ impl Registry {
         // idle registration is reclaimed here rather than rebuilt, so
         // navigating back to somewhere recently open is free.
         let first = {
-            let mut subscribers = lock(&self.subscribers);
+            let mut subscribers = self.subscribers.lock();
             let watchers = subscribers.entry(dir.clone()).or_default();
             watchers.push(subscriber);
             watchers.len() == 1
         };
         let reclaimed = {
-            let mut idle = lock(&self.idle);
+            let mut idle = self.idle.lock();
             let was_parked = idle.contains(&dir);
             idle.retain(|parked| *parked != dir);
             was_parked
@@ -324,7 +318,7 @@ impl Registry {
         if needs_registering && let Err(err) = self.watch_natively(&dir) {
             // Leave nothing half-registered behind for the next subscriber to
             // inherit as a watch that silently never fires.
-            lock(&self.subscribers).remove(&dir);
+            self.subscribers.lock().remove(&dir);
             return Err(err);
         }
 
@@ -340,7 +334,7 @@ impl Registry {
 
     fn unsubscribe(&self, dir: &Path, id: u64) {
         let last = {
-            let mut subscribers = lock(&self.subscribers);
+            let mut subscribers = self.subscribers.lock();
             let Some(watchers) = subscribers.get_mut(dir) else {
                 return;
             };
@@ -359,7 +353,7 @@ impl Registry {
         // costs every other watched directory a gap in delivery, and a folder
         // just navigated away from is one of the likeliest to come back.
         let evicted = {
-            let mut idle = lock(&self.idle);
+            let mut idle = self.idle.lock();
             idle.retain(|parked| parked != dir);
             idle.push(dir.to_path_buf());
             (idle.len() > MAX_IDLE_WATCHES).then(|| idle.remove(0))
@@ -411,7 +405,7 @@ impl Watch {
     #[cfg(test)]
     fn subscribers_for(dir: &Path) -> usize {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        lock(&registry().subscribers).get(&dir).map_or(0, Vec::len)
+        registry().subscribers.lock().get(&dir).map_or(0, Vec::len)
     }
 
     /// Whether the backend is still registered for `dir` — with a live
@@ -419,7 +413,7 @@ impl Watch {
     #[cfg(test)]
     fn is_registered(dir: &Path) -> bool {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        lock(&registry().subscribers).contains_key(&dir) || lock(&registry().idle).contains(&dir)
+        registry().subscribers.lock().contains_key(&dir) || registry().idle.lock().contains(&dir)
     }
 }
 

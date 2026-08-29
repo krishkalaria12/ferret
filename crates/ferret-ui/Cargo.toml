@@ -17,7 +17,9 @@ foldhash.workspace = true
 futures.workspace = true
 gpui.workspace = true
 image.workspace = true
+parking_lot.workspace = true
 rayon.workspace = true
+smallvec.workspace = true
 smol_str.workspace = true
 
 gpui-component.workspace = true

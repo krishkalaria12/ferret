@@ -42,13 +42,13 @@ impl Render for DragPreview {
 /// The delegate's drop listener has no route to the browser, so it leaves the
 /// request here and the pane's next frame emits it — the same hand-off the
 /// slow-click rename uses.
-pub(super) type DropQueue = Arc<std::sync::Mutex<Option<PendingDrop>>>;
+pub(super) type DropQueue = Arc<Mutex<Option<PendingDrop>>>;
 
 /// A disclosure triangle click waiting to be applied.
 ///
 /// Same hand-off as drops: the delegate renders the row but only the pane can
 /// mutate the folder.
-pub(super) type ToggleQueue = Arc<std::sync::Mutex<Option<usize>>>;
+pub(super) type ToggleQueue = Arc<Mutex<Option<usize>>>;
 
 pub(super) struct PendingDrop {
     pub(super) sources: Vec<VfsPath>,
@@ -68,7 +68,7 @@ pub(super) fn queue_drop(
     if sources.is_empty() {
         return;
     }
-    *queue.lock().unwrap() = Some(PendingDrop {
+    *queue.lock() = Some(PendingDrop {
         sources,
         dest,
         force_copy: window.modifiers().alt,
@@ -116,13 +116,17 @@ pub(super) fn external_payload(
     )))
 }
 
-/// Build the drag payload and its preview for a row.
-pub(super) fn drag_payload(paths: Arc<[VfsPath]>) -> (DraggedPaths, SharedString) {
-    let label = match paths.as_ref() {
-        [only] => SharedString::from(only.file_name().unwrap_or("item").to_string()),
-        other => SharedString::from(format!("{} items", other.len())),
-    };
-    (DraggedPaths { paths }, label)
+/// What the little card that follows the cursor says.
+///
+/// Derived inside the `on_drag` constructor rather than alongside the payload
+/// (A-02a). The payload itself has to exist before a drag starts, but it is
+/// now an `Arc` clone; the label is a fresh allocation, and building one per
+/// row per frame paid for a card that is drawn at most once and usually never.
+pub(super) fn drag_label(paths: &[VfsPath]) -> SharedString {
+    match paths {
+        [only] => SharedString::new(only.file_name().unwrap_or("item")),
+        other => SharedString::new(format!("{} items", other.len())),
+    }
 }
 
 #[cfg(test)]
