@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ferret — Performance &amp; architecture audit</title>
+<title>Ferret — Second audit: correctness, waste and the settings that lie</title>
 <style>
 /* ---------------------------------------------------------------------------
    Tokens copied from docs/plan.html so the four documents read as one set.
@@ -556,15 +556,14 @@ footer {
     <ol>
       <li><a href="#what">what this is</a></li>
       <li><a href="#verdict">the verdict</a></li>
-      <li><a href="#render">the render path</a></li>
-      <li><a href="#listing">the listing pipeline</a></li>
-      <li><a href="#model">model &amp; correctness</a></li>
-      <li><a href="#blocking">blocking the ui thread</a></li>
-      <li><a href="#jwalk">jwalk: where it belongs</a></li>
-      <li><a href="#architecture">architectural changes</a></li>
+      <li><a href="#wrong">what the app gets wrong</a></li>
+      <li><a href="#promises">the file that lies</a></li>
+      <li><a href="#render">the render path, again</a></li>
+      <li><a href="#memory">memory &amp; the listing</a></li>
+      <li><a href="#regression">the gap rev 1 opened</a></li>
       <li><a href="#libraries">libraries worth adopting</a></li>
-      <li><a href="#hygiene">hygiene &amp; build</a></li>
-      <li><a href="#measuring">measuring it</a></li>
+      <li><a href="#decisions">decisions</a></li>
+      <li><a href="#measuring">what the budgets miss</a></li>
       <li><a href="#order">the order to do this in</a></li>
       <li><a href="#limits">what this did not check</a></li>
     </ol>
@@ -580,16 +579,16 @@ footer {
 <main class="doc">
 
 <header class="masthead">
-  <p class="eyebrow">Audit · rev 1 · 28 Aug 2026</p>
-  <h1>Where Ferret is slow</h1>
-  <p class="lede">A read of the whole workspace before Phase 2 begins. Twenty-six findings, ranked, with the file and line for each — plus the honest answer to where <code>jwalk</code> earns its place and where it would be a second thread pool for nothing.</p>
+  <p class="eyebrow">Audit · rev 2 · 29 Aug 2026</p>
+  <h1>What the first audit did not look at</h1>
+  <p class="lede">Rev 1 is finished — twenty-six findings and six decisions, landed. This is the pass over what that left behind, and over the parts of the workspace the first audit passed through without auditing: the settings schema, the sidebar and title bar, the binary, and the asset and theme layers. The headline is not performance this time. It is that the app quietly does the wrong thing in four places, and one of them is wrong for almost every user on earth.</p>
   <dl class="facts">
-    <div><dt>Reviewed</dt><dd class="mono">13,278 lines · 6 crates</dd></div>
-    <div><dt>Findings</dt><dd>26 (A-01 … A-26)</dd></div>
-    <div><dt>Correctness bugs</dt><dd>3</dd></div>
-    <div><dt>New decisions</dt><dd>D-33 … D-38</dd></div>
-    <div><dt>Method</dt><dd>Static reading</dd></div>
-    <div><dt>New dependencies</dt><dd>7 free · 4 new</dd></div>
+    <div><dt>Reviewed</dt><dd class="mono">16,208 lines · 6 crates</dd></div>
+    <div><dt>Findings</dt><dd>13 (A-27 … A-39)</dd></div>
+    <div><dt>Correctness bugs</dt><dd>4 user-visible</dd></div>
+    <div><dt>New decisions</dt><dd>D-39 … D-42</dd></div>
+    <div><dt>Method</dt><dd>Reading, then measuring</dd></div>
+    <div><dt>New dependencies</dt><dd>1 shipped · 2 free · 1 optional</dd></div>
   </dl>
 </header>
 
@@ -597,32 +596,55 @@ footer {
 <section id="what">
   <span class="sec-tag">§1</span>
   <h2>What this is</h2>
-  <p class="sec-intro">Phase 1 is finished. This is the pass over it before <a href="terminal.html">Phase 2</a> starts adding to it.</p>
+  <p class="sec-intro">The second read of the workspace, after the first one was acted on in full.</p>
 
-  <p>The base shell works, and it works on the fixture — Gate 1 was satisfied by choosing a
-  virtualised table and never collecting a listing into a <code>Vec</code>. What this audit
-  found is a second layer of cost that virtualisation does not save you from: work that is
-  <em>O(the whole directory)</em> but runs <em>per visible row</em> or <em>per frame</em>, and
-  work that is correctly asynchronous but serialised one syscall at a time. Both are invisible
-  in a home directory and both are quadratic in <code>flat/</code>.</p>
+  <p>Rev 1 asked one question — <em>where is this slow?</em> — and answered it well enough that
+  the answers are now in the code: shared handles in <code>Entry</code>, stable
+  <code>EntryId</code>s, one watcher registry, metadata resolved during the walk, three budgets
+  in CI. The reindex that took 17.8 ms takes 1.8 ms. The listing that filled itself in for
+  half a second arrives complete.</p>
+
+  <p>That success is what makes this pass different. The obvious hot paths have been walked
+  twice; what is left is not more of the same. It is <b>work the first audit never looked
+  at</b> — <code>ferret-settings</code>, <code>ferret-platform</code>, <code>ferret</code>
+  itself, and the sidebar, title bar and menus that make up most of the shell — plus the
+  handful of places where rev 1's own fixes stopped one step short.</p>
 
   <div class="note warn">
     <strong>Read this first</strong>
-    <p>Every finding below comes from <em>reading</em> the code, not from a profiler. The
-    complexity claims are structural and I stand behind them; the wall-clock numbers are
-    arithmetic from the sizes involved and are illustrations, not measurements. §11 says what
-    to add to <code>xtask</code> so the important ones become numbers the repository owns
-    rather than assertions in a document.</p>
+    <p>Rev 1 said plainly that nothing in it was profiled. That is no longer true, and the
+    distinction matters: this document mixes <b>measured</b> figures with <b>structural</b>
+    claims and labels every one. A measured figure names the command that produced it. A
+    structural claim says what the code does and what that costs in kind, and is not
+    accompanied by a wall-clock number it did not earn.</p>
+  </div>
+
+  <div class="note">
+    <strong>The shape of it</strong>
+    <p>Rev 1's findings were nearly all one thing: <em>work that is O(the directory) running
+    per row or per frame</em>. This one splits three ways, and the biggest group is the one
+    a performance audit does not usually produce.</p>
+    <ul>
+      <li><b>Four correctness bugs</b> (§3, §4). Every date in the app is in the wrong time
+      zone. The default theme setting does not do what it says. Twelve settings do nothing at
+      all. Copy and paste does not reach Finder. None of these is slow; all of them are
+      wrong.</li>
+      <li><b>Six pieces of waste</b> (§5, §6) that rev 1 walked past because they are not in
+      the file list — including one syscall-per-frame that is the exact bug rev 1 fixed as
+      A-25, left standing in the function next to it.</li>
+      <li><b>One regression rev 1 introduced</b> (§7), documented at the time and still open.</li>
+    </ul>
   </div>
 
   <h3>How the findings are numbered</h3>
-  <p><code>A-nn</code> for audit findings, so nothing collides with <code>plan.html</code>'s
-  <code>F-nn</code> features, <code>D-nn</code> decisions or <code>R-nn</code> risks. Six new
-  decisions are proposed as <code>D-33</code> … <code>D-38</code>, continuing where
-  <a href="terminal.html">terminal.html</a> left off. Severity is a pill on each finding:</p>
+  <p>Continuing from rev 1 rather than restarting: <code>A-27</code> onward and
+  <code>D-39</code> onward. This is not tidiness. Twenty-six of the old identifiers are cited
+  in code comments — <code>A-05</code> in <code>folder/mod.rs</code>, <code>D-35</code> in
+  <code>entry.rs</code>, <code>A-24</code> in <code>listing.rs</code> — and reusing a number
+  would point a future reader at the wrong finding.</p>
   <ul>
-    <li><span class="pill p-risky">critical</span> — breaks a stated gate, or is wrong rather than slow.</li>
-    <li><span class="pill p-warn">major</span> — a real stall a user will feel on a large directory.</li>
+    <li><span class="pill p-risky">critical</span> — wrong rather than slow, or a stall on a path a person uses constantly.</li>
+    <li><span class="pill p-warn">major</span> — a real cost, or a promise the app does not keep.</li>
     <li><span class="pill p-later">minor</span> — waste worth removing while you are already in the file.</li>
   </ul>
 </section>
@@ -631,7 +653,7 @@ footer {
 <section id="verdict">
   <span class="sec-tag">§2</span>
   <h2>The verdict</h2>
-  <p class="sec-intro">Ranked by what a person would actually notice, in a 200,000-entry directory with something selected.</p>
+  <p class="sec-intro">Ranked by what a person would actually notice — which, this time, mostly means "notice is wrong" rather than "notice is slow".</p>
 
   <div class="scroller">
   <table class="wide">
@@ -640,1300 +662,767 @@ footer {
       <tr><th>ID</th><th>Finding</th><th class="key">Where</th><th>Sev</th></tr>
     </thead>
     <tbody>
-      <tr><td class="id">A-01</td><td>OS icon bitmaps are cloned and re-wrapped into a fresh <code>RenderImage</code> once per row, per frame</td><td class="key">icons.rs · macos.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-02</td><td><code>selected_paths()</code> scans the whole listing, and is called once per <em>selected visible row</em>, per frame</td><td class="key">pane/list.rs · icon_view.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-03</td><td>The metadata backfill is strictly serial: one blocking-pool round trip per entry</td><td class="key">folder/expansion.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-04</td><td><code>apply_probes</code> reuses indices it has already invalidated — a two-file watcher burst can edit the wrong row</td><td class="key">folder/expansion.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-05</td><td><code>rebuild_index_and_order</code> is a full O(n) reindex, and it runs on every watcher burst</td><td class="key">folder/sort.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-06</td><td>The watcher drops events when its channel fills and never tells anyone — the listing goes permanently stale</td><td class="key">vfs/watch.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-07</td><td>The status bar recounts and re-sums the whole listing every frame</td><td class="key">browser/render.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-08</td><td>Every cell clones its <code>Entry</code> (a <code>PathBuf</code> + a <code>String</code>) every frame</td><td class="key">pane/*.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-09</td><td>Folder view preferences are written synchronously on every navigation; <code>SAVE_DEBOUNCE</code> is dead code</td><td class="key">browser/tabs.rs · state.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-10</td><td>The listing channel carries one entry per message — 200,000 sends the consumer immediately re-batches</td><td class="key">vfs/local.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-11</td><td><code>request_os_icons</code> clones the entire listing to derive a handful of icon keys</td><td class="key">folder/expansion.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-12</td><td>The Kind comparator allocates a <code>String</code> per comparison — millions per sort click</td><td class="key">folder/sort.rs · vfs/path.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-13</td><td>Filtering and type-ahead lowercase both sides into fresh <code>String</code>s, per entry, per keystroke</td><td class="key">folder/sort.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-14</td><td>Ancestor columns pay for watchers, metadata backfill and icon resolution they never draw</td><td class="key">pane/column_view.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-15</td><td>The path bar re-lists and materialises the whole directory on every keystroke</td><td class="key">browser/path_bar.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-16</td><td>The column view's metadata panel does two O(n) scans per frame</td><td class="key">pane/column_view.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-17</td><td>One <code>notify</code> watcher per <code>Folder</code> — up to four per tab in column view</td><td class="key">vfs/watch.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-18</td><td><code>new_file</code> / <code>new_folder</code> block the window on a filesystem call</td><td class="key">browser/mutations.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-19</td><td><code>tabular_numerals()</code> allocates a <code>String</code>, a <code>Vec</code> and an <code>Arc</code> per cell, per frame</td><td class="key">theme.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-20</td><td><code>FileIcons::asset_path</code> allocates and formats a new path string per row, per frame</td><td class="key">icons.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-21</td><td><code>visible_columns()</code> allocates a <code>Vec</code> and takes a <code>Mutex</code> on every delegate call</td><td class="key">pane/list.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-22</td><td><code>convert()</code> rebuilds the same <code>PathBuf</code> three times per entry</td><td class="key">vfs/local.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-23</td><td><code>entry_names()</code> materialises every name in the directory for a membership test</td><td class="key">folder/mod.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-24</td><td>Watcher events for expanded children are filtered out, and the subtree is not watched anyway</td><td class="key">folder/listing.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-25</td><td><code>volumes()</code> can do filesystem work on the render path when its TTL expires</td><td class="key">browser/mutations.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-26</td><td>Dependency declarations, committed <code>.DS_Store</code>, unpinned git revs, dead tunables</td><td class="key">Cargo.toml · repo</td><td><span class="pill p-later">minor</span></td></tr>
+      <tr><td class="id">A-27</td><td>Every date the app displays is UTC — the Date Modified column is wrong for anyone not on Greenwich</td><td class="key">format.rs</td><td><span class="pill p-risky">critical</span></td></tr>
+      <tr><td class="id">A-28</td><td><code>places()</code> runs seven <code>is_dir()</code> syscalls and seven allocations on the render path, every frame</td><td class="key">browser/sidebar.rs · platform/macos.rs</td><td><span class="pill p-risky">critical</span></td></tr>
+      <tr><td class="id">A-29</td><td>The selection summary is rebuilt in O(the directory) on <em>every</em> selection change — 0.7–1.4 ms each, during a marquee drag or shift-arrow repeat</td><td class="key">folder/mod.rs</td><td><span class="pill p-risky">critical</span></td></tr>
+      <tr><td class="id">A-30</td><td>Twelve settings are declared, shipped as documentation, and read by nothing</td><td class="key">ferret-settings · ferret-ui</td><td><span class="pill p-risky">critical</span></td></tr>
+      <tr><td class="id">A-31</td><td><code>theme: "system"</code> — the default — reads the OS appearance once at launch and never follows it</td><td class="key">ferret/main.rs</td><td><span class="pill p-warn">major</span></td></tr>
+      <tr><td class="id">A-32</td><td>The clipboard never leaves the process: no interop with Finder, and none between two Ferret windows</td><td class="key">browser/mutations.rs · browser/mod.rs</td><td><span class="pill p-warn">major</span></td></tr>
+      <tr><td class="id">A-33</td><td><code>IconKey::of</code> allocates a <code>String</code> per row per frame — and the allocation budget cannot see it</td><td class="key">platform/icon.rs · icons.rs</td><td><span class="pill p-warn">major</span></td></tr>
+      <tr><td class="id">A-34</td><td><code>Metadata</code> carries two fields nothing reads, on every one of 200,000 entries</td><td class="key">vfs/entry.rs</td><td><span class="pill p-warn">major</span></td></tr>
+      <tr><td class="id">A-35</td><td><code>LISTING_BATCH_SIZE</code> was tuned when a batch was names only; it now gates the first row on 4,096 <code>stat</code> calls</td><td class="key">vfs/config.rs · vfs/local.rs</td><td><span class="pill p-later">minor</span></td></tr>
+      <tr><td class="id">A-36</td><td><code>Assets::list</code> ignores the path it is given and returns every embedded asset</td><td class="key">assets.rs</td><td><span class="pill p-later">minor</span></td></tr>
+      <tr><td class="id">A-37</td><td>The sidebar allocates a row id and a label per row, per frame</td><td class="key">browser/sidebar.rs</td><td><span class="pill p-later">minor</span></td></tr>
+      <tr><td class="id">A-38</td><td>The table delegate re-reads the model four times per cell and re-resolves the palette per cell</td><td class="key">pane/list.rs</td><td><span class="pill p-later">minor</span></td></tr>
+      <tr><td class="id">A-39</td><td>The macOS icon conversion swizzles one pixel at a time — carried forward from rev 1 and still undone</td><td class="key">platform/macos.rs</td><td><span class="pill p-later">minor</span></td></tr>
     </tbody>
   </table>
   </div>
 
-  <div class="note">
-    <strong>The shape of it</strong>
-    <p>Nine of the top ten reduce to two root causes. <b>One:</b> <code>Entry</code> is
-    expensive to clone (a heap <code>PathBuf</code> plus a heap <code>String</code>) and the
-    render path clones it constantly. <b>Two:</b> the model keys everything — selection, cursor,
-    row lookup, expansion — on a full <code>VfsPath</code>, so every index rebuild is
-    <em>n</em> allocations and <em>n</em> long-string hashes. Fix those two representations
-    (§8) and roughly two-thirds of this table stops being reachable rather than being fixed one
-    call site at a time.</p>
+  <div class="note risk">
+    <strong>If you only do one thing</strong>
+    <p>Fix <b>A-27</b>. Everything else in this table is a cost or an unkept promise; A-27 is
+    the app confidently telling the user something false, in a column they read constantly, on
+    every file they own. A five-and-a-half-hour offset turns "modified 00:30 today" into
+    "19:00 yesterday" — the wrong day, on the wrong date, and nothing about the display
+    suggests it should be doubted.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="wrong">
+  <span class="sec-tag">§3</span>
+  <h2>What the app gets wrong</h2>
+  <p class="sec-intro">Four findings that are not about speed. A file manager's job is to tell you the truth about your files; these are the places it does not.</p>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-27</span> Every date the app displays is UTC <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-ui/src/format.rs:53–75 — <code>format_date</code></p>
+    <p><code>format_date</code> takes a <code>SystemTime</code>, converts it to seconds since
+    the epoch, and runs Howard Hinnant's <code>civil_from_days</code> on it. That algorithm is
+    correct and the implementation is correct. It computes a <em>UTC</em> civil date, and
+    nothing anywhere in the workspace ever applies a local offset:</p>
+    <pre><code>let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+let days = secs.div_euclid(86_400);          // UTC days
+let rem  = secs.rem_euclid(86_400);          // UTC seconds past midnight
+let (h, m) = (rem / 3600, (rem % 3600) / 60);</code></pre>
+    <p>Grepping the whole workspace for any timezone handling returns one hit, and it is a
+    comment in this function's own test asserting the UTC value. There is no offset, no
+    <code>localtime_r</code>, no tz database, nothing.</p>
+    <p>So for a user in IST (+05:30), a file saved at 00:30 on the 4th displays as
+    <b>19:00 on the 3rd</b> — wrong time, wrong day, wrong date. In PST (−08:00) it runs the
+    other way. Only users on UTC see the truth, and they see it only outside British Summer
+    Time. This is on the Date Modified column, the column view's metadata panel, and anywhere
+    else a date appears.</p>
+    <p class="fix"><b>Fix</b> — This is the one place in the workspace where writing it by
+    hand is the wrong instinct. The offset is not a constant: it depends on the date being
+    formatted (DST), on the user's zone, and on a tz database that ships updates several times
+    a year. <code>plan.html</code>'s "no date library — civil-from-days is thirty lines" note
+    was written when formatting was the whole job; it is not any more. See <b>D-39</b>.</p>
+  </div>
+
+  <div class="find sev2">
+    <h4><span class="fid">A-31</span> <code>theme: "system"</code> does not follow the system <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret/src/main.rs:249–254 · crates/ferret-settings/src/schema.rs:22–29</p>
+    <p>The schema documents the default as "Follow the OS appearance, <em>and change with it
+    while running</em>". <code>apply_startup_theme</code> calls
+    <code>Theme::sync_system_appearance</code> exactly once, during startup, and nothing in
+    the workspace observes an appearance change afterwards — grepping for
+    <code>observe_window_appearance</code> or <code>WindowAppearance</code> outside that one
+    line returns nothing.</p>
+    <p>So Ferret reads whether the Mac is in dark mode at launch and then holds that opinion
+    forever. Every user on the macOS "Auto" appearance — which is the OS default — gets a
+    window that is the wrong colour for half of every day, and the setting that promises
+    otherwise is itself the default.</p>
+    <p class="fix"><b>Fix</b> — <code>Window::observe_window_appearance</code> exists in the
+    pinned GPUI revision (<code>gpui/src/window.rs:1958</code>). Register it when the window
+    opens and re-run the same three-way match already in
+    <code>apply_startup_theme</code>. The subscription belongs with the window, so it lives
+    or dies with it.</p>
+  </div>
+
+  <div class="find sev2">
+    <h4><span class="fid">A-32</span> The clipboard never leaves the process <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret-ui/src/browser/mod.rs:172 · browser/mutations.rs:280–335</p>
+    <p>Copy and cut write to a private field:</p>
+    <pre><code>// Browser
+clipboard: Option&lt;(Vec&lt;VfsPath&gt;, bool)&gt;,</code></pre>
+    <p>Two consequences, and the second is the one nobody will report as a bug because it
+    looks like the app is broken rather than incomplete:</p>
+    <ul>
+      <li><b>No interop.</b> Cmd-C in Ferret puts nothing on the system pasteboard, so Cmd-V
+      in Finder, in a Save dialog, or in a terminal does nothing. The reverse also fails:
+      copying in Finder and pasting in Ferret pastes whatever Ferret last copied, or
+      nothing.</li>
+      <li><b>No interop with itself.</b> The field is on <code>Browser</code>, and every
+      window has its own. Copying in one Ferret window and pasting in another is a no-op —
+      silently, because <code>paste_clipboard</code> takes <code>None</code> and returns.</li>
+    </ul>
+    <p class="fix"><b>Fix</b> — No new dependency. GPUI already models exactly this:
+    <code>ClipboardEntry::ExternalPaths</code> (<code>gpui/src/platform.rs:2355</code>) with
+    <code>App::write_to_clipboard</code> and <code>read_from_clipboard</code>. The cut/copy
+    distinction has no pasteboard representation on macOS, so it stays a local flag beside the
+    system write — which is also how Finder behaves. See <b>D-42</b>.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="promises">
+  <span class="sec-tag">§4</span>
+  <h2>The file that lies</h2>
+  <p class="sec-intro">One finding, but it is the largest single thing in this audit and it undermines a decision the project has already made.</p>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-30</span> Twelve settings are declared, shipped as documentation, and read by nothing <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-settings/src/schema.rs · default-settings.json · consumers in ferret-ui</p>
+    <p><code>D-12</code> says the settings file is the source of truth and the settings UI is a
+    view over it, and <code>schema.rs</code>'s header adds that "a hand-edited file must never
+    be able to brick the app". Both hold. What nobody checked is the other direction: that a
+    key the file offers actually does something. Twelve do not.</p>
+
+    <div class="scroller">
+    <table class="wide">
+      <caption>Declared, defaulted, serialised into <code>default-settings.json</code>, never read</caption>
+      <thead><tr><th>Key</th><th>What the user expects</th><th>What happens</th></tr></thead>
+      <tbody>
+        <tr><td class="id">browser.directories_first</td><td>Files and folders interleave when false</td><td>Hard-coded <code>true</code> in <code>cmp_entries</code>; the setting is named only in that function's doc comment</td></tr>
+        <tr><td class="id">browser.natural_sort</td><td><code>file10</code> sorts before <code>file9</code> when false</td><td>Hard-coded; <code>natural_compare</code> is unconditional</td></tr>
+        <tr><td class="id">browser.columns</td><td>Which columns list view shows</td><td>Superseded by <code>FolderView::hidden_columns</code>; still validated on load, still never read</td></tr>
+        <tr><td class="id">browser.confirm_permanent_delete</td><td>No dialog before a permanent delete when false</td><td>The dialog is unconditional</td></tr>
+        <tr><td class="id">browser.enter_opens</td><td>Enter renames instead of opening, for Finder muscle memory</td><td>Enter always opens</td></tr>
+        <tr><td class="id">appearance.ui_font_size</td><td>A larger interface</td><td>Clamped and warned about on load, then discarded</td></tr>
+        <tr><td class="id">appearance.row_density</td><td>Compact rows</td><td><code>ROW_HEIGHT</code> is a <code>const</code></td></tr>
+        <tr><td class="id">appearance.alternate_row_colors</td><td>Zebra striping</td><td>Striping was deliberately removed; the setting was not</td></tr>
+        <tr><td class="id">sidebar.show_places</td><td>Hide the Places group</td><td>Always drawn</td></tr>
+        <tr><td class="id">sidebar.show_volumes</td><td>Hide the Volumes group</td><td>Always drawn when non-empty</td></tr>
+        <tr><td class="id">window.restore_session</td><td>Reopen with the previous tabs and geometry</td><td>Nothing is ever saved; the window is always 1180×760, centred</td></tr>
+        <tr><td class="id">window.default_directory</td><td>Where a new window starts</td><td><code>start_directory()</code> reads <code>FERRET_START_DIR</code> or home</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>A thirteenth, <code>keymap</code>, is worse than unread: it is a
+    <code>BTreeMap&lt;String, Option&lt;String&gt;&gt;</code> with a documented
+    <code>null</code>-unbinds convention and a passing test proving the convention parses,
+    while every binding in the app is hard-coded in <code>main.rs</code>. The test asserts
+    that a feature which does not exist is parsed correctly.</p>
+
+    <div class="note warn">
+      <strong>Why this is critical and not cosmetic</strong>
+      <p>These are not internal constants. They are serialised into
+      <code>default-settings.json</code>, which the crate ships, which a test asserts is
+      accurate, and which the module header calls "documentation the user reads and copies
+      from". A user who sets <code>confirm_permanent_delete: false</code> has been told by the
+      project's own documentation that the confirmation is gone. It is not. That is a worse
+      failure than the setting not existing — and for that particular key, it is a failure in
+      the direction of destroying data the user thought they had guarded.</p>
+    </div>
+
+    <p class="fix"><b>Fix</b> — Each one either works or goes, and the split is not close:
+    six are a handful of lines each (<code>directories_first</code>,
+    <code>confirm_permanent_delete</code>, <code>enter_opens</code>,
+    <code>show_places</code>, <code>show_volumes</code>, <code>ui_font_size</code>), and six
+    are features that have not been built (<code>restore_session</code>,
+    <code>default_directory</code>, <code>keymap</code>, <code>row_density</code>,
+    <code>alternate_row_colors</code>, <code>columns</code>). Wire the first six; delete the
+    second six until the feature lands. See <b>D-41</b>, which also proposes the test that
+    stops this recurring.</p>
   </div>
 </section>
 
 <!-- ==================================================================== -->
 <section id="render">
-  <span class="sec-tag">§3</span>
-  <h2>The render path</h2>
-  <p class="sec-intro">Gate 1 says "point it at <code>flat/</code> and scroll". It passes. These are the things that make it stop passing the moment something is selected.</p>
-
-  <div class="find sev1">
-    <h4><span class="fid">A-01</span> The OS icon is rebuilt from raw bytes on every row, every frame <span class="pill p-risky">critical</span></h4>
-    <p class="where">crates/ferret-ui/src/icons.rs:116–135 · crates/ferret-platform/src/macos.rs:213–217 · called from pane/mod.rs:497–515</p>
-    <p>D-18's whole design is that the OS is never touched on the render path. It isn't — but
-    what replaced it is worse. <code>os_icon()</code> runs once per visible row, and each call:</p>
-    <ul>
-      <li>takes the provider's <code>Mutex</code>;</li>
-      <li><code>clone()</code>s the cached <code>IconBitmap</code> — at <code>ICON_POINTS = 64</code> that is a <b>16 KB <code>Vec&lt;u8&gt;</code> memcpy</b> (macos.rs:202, :216);</li>
-      <li>builds a brand-new <code>image::Frame</code> and a brand-new <code>gpui::RenderImage</code> around it (icons.rs:127–134).</li>
-    </ul>
-    <p>A fresh <code>RenderImage</code> is a fresh identity, so GPUI cannot recognise it as the
-    texture it uploaded last frame. Forty list rows is ~640 KB of memcpy and forty new image
-    handles per frame; icon view with ~200 visible tiles is over 3 MB per frame. At 120 Hz that
-    is hundreds of megabytes a second of pure copying to draw icons that never change.</p>
-    <div class="fix"><b>Fix</b>
-    Cache the <em>decoded, shared</em> handle, not the bytes. Have <code>IconProvider::lookup</code>
-    return something cheap to clone and stable in identity — an <code>Arc&lt;RenderImage&gt;</code>
-    built once at <code>resolve</code> time, behind an <code>ArcSwap</code> so the read path
-    takes no lock at all (<a href="#libraries">§9</a>). The <code>is_well_formed</code> guard (icon.rs:33–38)
-    then runs once per type instead of once per row per frame, which is also where it belongs.
-    This is a small, contained change with the largest single payoff in the document.</div>
-  </div>
-
-  <div class="find sev1">
-    <h4><span class="fid">A-02</span> Drag payloads are built eagerly, and building one scans the whole listing <span class="pill p-risky">critical</span></h4>
-    <p class="where">crates/ferret-ui/src/pane/list.rs:320–324 · icon_view.rs:119–124 · folder/mod.rs:254–264</p>
-    <p><code>render_tr</code> decides the drag payload before knowing whether a drag will ever
-    happen, and for a selected row that payload is <code>folder.selected_paths()</code>. That
-    function walks <em>every</em> display row (<code>visible_entries()</code> is
-    <code>(0..order.len()).filter_map(entry_at)</code>), tests each against the selection set,
-    and clones the matching <code>VfsPath</code>s.</p>
-    <p>So the cost is <em>rows on screen × rows in the directory</em>. With <kbd>Cmd-A</kbd> on
-    <code>flat/</code> and forty visible rows that is 8,000,000 index-and-hash steps and
-    8,000,000 <code>PathBuf</code> heap allocations — per frame. Icon view is five times worse
-    because five times as many tiles are visible.</p>
-    <div class="fix"><b>Fix</b>
-    Two independent halves. <b>(a)</b> Move the payload construction inside the
-    <code>on_drag</code> closure, which only runs when a drag actually begins — the closure
-    already captures the folder entity in the external-drag path (list.rs:361–363), so this is
-    a re-shuffle rather than new machinery. <b>(b)</b> Keep an ordered selection vector on
-    <code>Folder</code>, rebuilt by the selection mutators rather than derived by scanning.
-    Do both: (a) removes it from the frame, (b) makes it cheap even when a drag does start.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-07</span> The status bar recounts the directory every frame <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/browser/render.rs:42–71 · folder/mod.rs:271–290</p>
-    <p><code>render_status_bar</code> calls <code>selection_count()</code> and
-    <code>selection_size()</code>, and both are <code>visible_entries()</code> scans over the
-    whole listing. The comment at folder/mod.rs:273–277 correctly explains <em>why</em> the
-    count must be visible-only; it is the <em>how</em> that costs — two full passes over
-    200,000 entries to render one line of text, every frame, whether or not anything changed.</p>
-    <div class="fix"><b>Fix</b>
-    Maintain <code>selected_visible_count</code> and <code>selected_visible_bytes</code> as
-    fields, updated by <code>select_only</code>, <code>toggle_select</code>,
-    <code>extend_select</code>, <code>select_rows</code>, <code>select_all</code>,
-    <code>clear_selection</code> and <code>rebuild_index_and_order</code>. The invariant is
-    small enough to hold in one place and worth a unit test that asserts the incremental value
-    matches a full recount after a scripted sequence of selections and a filter change.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-08</span> Every cell clones its <code>Entry</code>, every frame <span class="pill p-warn">major</span></h4>
-    <p class="where">pane/list.rs:320, :390 · pane/icon_view.rs:87 · pane/column_view.rs:136, :182 · pane/rename.rs</p>
-    <p>The pattern is <code>folder.read(cx).entry_at(row).cloned()</code>, used because the
-    borrow of the folder cannot outlive the element being built. Each clone is a
-    <code>PathBuf</code> allocation, a <code>String</code> allocation and an
-    <code>Option&lt;PathBuf&gt;</code> allocation. A list row costs four of them (one per
-    <code>render_tr</code>, three per <code>render_td</code>); forty rows is 160 clones and
-    ~480 allocations per frame, before icons.</p>
-    <div class="fix"><b>Fix</b>
-    Structural, and it is <a href="#architecture">D-35</a>: make <code>Entry.path</code> an
-    <code>Arc&lt;Path&gt;</code> and <code>Entry.name</code> a <code>SharedString</code>. The
-    clone becomes two refcount bumps and every call site above stays exactly as written. The
-    doc comment at vfs/entry.rs:61–63 already says the name is held separately "because deriving
-    it from <code>path</code> on every frame shows up when 200,000 rows are in play" — the same
-    reasoning applies one level further down.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-16</span> The column view's metadata panel scans the listing twice per frame <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/pane/column_view.rs:326–337</p>
-    <p><code>render_metadata_column</code> calls <code>selected_paths()</code> (one O(n) scan,
-    A-02) and then <code>(0..folder.row_count()).find_map(...)</code> to locate the row that
-    path belongs to — a second O(n) scan, to find something the model can already answer in
-    O(1).</p>
-    <div class="fix"><b>Fix</b>
-    <code>folder.row_of(&amp;path)</code> exists for exactly this (folder/mod.rs:309–311).
-    Combined with A-02's ordered selection vector the whole block becomes two lookups.</div>
-  </div>
-
-  <div class="find sev3">
-    <h4><span class="fid">A-19</span> <code>tabular_numerals()</code> allocates three times per call <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/theme.rs:189–191 · called from pane/list.rs:503, :526 · column_view.rs:385 · browser/render.rs:70</p>
-    <p><code>FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))</code> — a <code>String</code>,
-    a <code>Vec</code> and an <code>Arc</code>, constructed fresh for every Date cell and every
-    Size cell on screen, every frame.</p>
-    <div class="fix"><b>Fix</b>
-    <code>static TNUM: OnceLock&lt;FontFeatures&gt;</code>; return a clone, which is one
-    refcount bump. Three lines.</div>
-  </div>
-
-  <div class="find sev3">
-    <h4><span class="fid">A-20</span> The bundled icon path is formatted fresh per row <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/icons.rs:82–109</p>
-    <p><code>asset_path</code> returns <code>String</code> and gets there through up to three
-    <code>clone()</code>s of the mapped name plus a <code>format!</code>. It runs for every row
-    that has no OS icon yet — which, for the first quarter-second of every listing and forever
-    on a platform where the provider is unavailable, is every row.</p>
-    <div class="fix"><b>Fix</b>
-    Store the finished asset path in the table (<code>HashMap&lt;Box&lt;str&gt;, SharedString&gt;</code>)
-    so lookup returns a <code>SharedString</code> and the <code>format!</code> happens once at
-    startup. The test at icons.rs:269–287 that proves every mapped icon exists keeps working
-    unchanged, and gets faster.</div>
-  </div>
-
-  <div class="find sev3">
-    <h4><span class="fid">A-21</span> The column list is rebuilt and locked on every delegate call <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/pane/list.rs:79–88, :122–124, :136–141</p>
-    <p><code>visible_columns()</code> allocates a <code>Vec</code>; <code>visible()</code> takes
-    the <code>hidden_columns</code> mutex to call it; <code>column_at()</code> calls
-    <code>visible()</code>. Between <code>columns_count</code>, <code>column</code>,
-    <code>render_th</code>, <code>render_tr</code> and <code>render_td</code> that is roughly
-    five allocations and five lock acquisitions per row per frame, to answer a question with at
-    most four possible answers.</p>
-    <div class="fix"><b>Fix</b>
-    Cache the resolved order on the delegate — a <code>SmallVec&lt;[FileColumn; 4]&gt;</code>
-    never allocates at all — and invalidate it in <code>toggle_column</code>, which already
-    calls <code>table.refresh</code> for exactly this reason (pane/mod.rs:310–316).
-    The unit tests at list.rs:704–736 test <code>visible_columns</code> as a pure function and
-    stay valid.</div>
-  </div>
-</section>
-
-<!-- ==================================================================== -->
-<section id="listing">
-  <span class="sec-tag">§4</span>
-  <h2>The listing pipeline</h2>
-  <p class="sec-intro">The name tier is fast and measured. The metadata tier is neither.</p>
-
-  <div class="find sev1">
-    <h4><span class="fid">A-03</span> The metadata backfill is one blocking-pool round trip per entry, in series <span class="pill p-risky">critical</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/expansion.rs:236–278 · crates/ferret-vfs/src/local.rs:95–104</p>
-    <p>The loop is chunked into 256s, but the chunking only controls how often the UI is
-    notified. Inside it:</p>
-<pre><code>for chunk in targets.chunks(CHUNK) {
-    for path in chunk {
-        <span class="c">// one smol::unblock — a task spawn onto the blocking pool,</span>
-        <span class="c">// one symlink_metadata, and a wake back — per entry.</span>
-        if let Ok(md) = fs.metadata(path).await { ... }
-    }
-    ...
-}</code></pre>
-    <p>On macOS <code>metadata_in_listing</code> is <code>false</code> (local.rs:42), so this
-    runs for every entry of every listing. For <code>flat/</code> that is <b>200,000 sequential
-    round trips</b> through the blocking pool: 200,000 task spawns, 200,000 thread wakeups, and
-    a stat that never overlaps with the next one. One core busy, the rest idle, and the Size and
-    Date columns stay blank the whole time.</p>
-    <p>It is also the one hot path <code>xtask bench</code> does not measure (§11), which is
-    presumably why it survived.</p>
-    <div class="fix"><b>Fix</b>
-    Two levels. <b>Cheap and immediate:</b> move the inner loop <em>inside</em> a single
-    <code>smol::unblock</code> so one chunk is one round trip — 800 hops instead of 200,000, for
-    about ten lines. <b>Correct:</b> resolve metadata during the walk itself with a parallel
-    walker, which deletes this function on both platforms. That is <a href="#jwalk">D-33</a>.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-10</span> The listing channel carries one entry per message <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-vfs/src/local.rs:53, :83 · config.rs:17 · folder/listing.rs:64–86</p>
-    <p>The producer sends each <code>Entry</code> individually into a
-    <code>bounded(LISTING_BUFFER)</code> channel; the consumer receives them one at a time and
-    then re-buffers them into batches of <code>BATCH_SIZE = 4_096</code> anyway. So the
-    per-entry granularity buys nothing at all — 200,000 sends and 200,000 receives, each a
-    potential park and wake when the consumer falls behind, to produce fifty model updates.</p>
-    <div class="fix"><b>Fix</b>
-    Batch at the source: have the producer accumulate and send <code>Vec&lt;Entry&gt;</code>,
-    and let the stream item become a batch. The consumer's buffering loop then collapses to
-    "forward what arrived". <code>LISTING_BUFFER</code>'s doc comment (vfs/config.rs:11–17) is
-    still the right policy — it just needs to be denominated in batches. The cancel-by-drop
-    contract is unaffected, and the test at local.rs:456–470 still proves it.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-11</span> Resolving icons clones the whole listing to find a handful of keys <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/expansion.rs:219–234 · icons.rs:141–159</p>
-    <p><code>request_os_icons</code> does
-    <code>entries.iter().chain(children…).cloned().collect()</code> — a full copy of every
-    <code>Entry</code> in the directory, 200,000 <code>PathBuf</code> and <code>String</code>
-    allocations — and hands it to <code>resolve_os_icons</code>, whose first act is to reduce it
-    to a deduplicated set of <code>IconKey</code>s bounded by the number of <em>file types</em>
-    present. The doc comment two lines above is right that the OS calls are deduplicated; it is
-    the transport that isn't.</p>
-    <p>It runs on every <code>finish_loading</code> <em>and</em> on every folder expansion
-    (expansion.rs:104).</p>
-    <div class="fix"><b>Fix</b>
-    Build the <code>Vec&lt;(IconKey, PathBuf)&gt;</code> inside the model update, where the
-    entries are already borrowed, and move only that across. The moved payload goes from
-    200,000 entries to a few dozen.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-14</span> Ancestor columns run the full listing lifecycle for a column that draws names <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/pane/column_view.rs:42–77 · folder/listing.rs:125–145</p>
-    <p><code>build_ancestor_columns</code> creates up to <code>MAX_ANCESTOR_COLUMNS = 3</code>
-    real <code>Folder</code>s and calls <code>start_loading</code> on each.
-    <code>finish_loading</code> then unconditionally runs <code>attach_watch</code>,
-    <code>reload_expanded_children</code>, <code>start_metadata_backfill</code> and
-    <code>request_os_icons</code> — for columns that render only an icon, a name and a chevron
-    (column_view.rs:259–321).</p>
-    <p>So pressing <kbd>Cmd-2</kbd> in <code>~/Downloads</code> attaches three extra OS
-    watchers, starts three extra full metadata backfills (A-03) and clones three more listings
-    for icons (A-11). In a deep path under a large directory that is a visible stall on a
-    keystroke that should be instant.</p>
-    <div class="fix"><b>Fix</b>
-    Give <code>Folder</code> a listing profile — <code>{ metadata, watch, icons }</code> — set
-    to browse-only for ancestor columns and for the path bar's completion listing (A-15). It is
-    one struct and four <code>if</code>s, and it is the same seam Phase 2 will want when the
-    terminal asks for a directory it is not displaying.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-15</span> The path bar materialises the whole directory on every keystroke <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/browser/path_bar.rs:93–129</p>
-    <p><code>refresh_completions</code> re-lists on every <code>InputEvent::Change</code> —
-    correct, and correctly generation-guarded. But it collects <em>every</em> entry into a
-    <code>Vec</code> first and only then filters:</p>
-<pre><code>while let Some(Ok(entry)) = ...next(&amp;mut stream).await {
-    entries.push(entry);          <span class="c">// 200,000 Entry allocations…</span>
-}
-let matches = matching_directories(&amp;entries, &amp;prefix);   <span class="c">// …to keep ~8</span></code></pre>
-    <p>The module header says a popover taller than a handful of rows stops being a hint. The
-    filter agrees; the collection does not.</p>
-    <div class="fix"><b>Fix</b>
-    Filter inside the loop and <code>break</code> at the popover's cap. Dropping the stream
-    cancels the walk, so a completion in a huge directory stops after a few entries instead of
-    reading all of it.</div>
-  </div>
-
-  <div class="find sev3">
-    <h4><span class="fid">A-22</span> <code>convert()</code> rebuilds the same path three times <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-vfs/src/local.rs:257–301</p>
-    <p><code>entry.path()</code> is called at :258, :269 and :291 — each one allocates a fresh
-    <code>PathBuf</code> by joining the parent to the name. The symlink and broken-link branches
-    are guarded, so the second and third only fire for links, but the first fires for
-    everything. <code>entry.file_name().to_string_lossy().into_owned()</code> at :259 then
-    allocates a second copy of a name the <code>PathBuf</code> already contains.</p>
-    <div class="fix"><b>Fix</b>
-    Hoist <code>let local = entry.path();</code> once. With <a href="#architecture">D-35</a>'s
-    <code>Arc&lt;Path&gt;</code> the name can be a <code>SharedString</code> built from the same
-    buffer, removing the duplicate too.</div>
-  </div>
-</section>
-
-<!-- ==================================================================== -->
-<section id="model">
   <span class="sec-tag">§5</span>
-  <h2>Model bookkeeping &amp; correctness</h2>
-  <p class="sec-intro">Two of these are bugs, not slowness. Both are in the watcher path, which is the part a test suite is least likely to cover and a user is most likely to hit.</p>
+  <h2>The render path, again</h2>
+  <p class="sec-intro">Rev 1 cleared the file list and stopped there. The shell around it was never read, and the same three mistakes are in it.</p>
 
   <div class="find sev1">
-    <h4><span class="fid">A-04</span> <code>apply_probes</code> uses indices it has already invalidated <span class="pill p-risky">critical · correctness</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/expansion.rs:114–172</p>
-    <p>Within one loop over a watcher burst, the function both inserts into and removes from
-    <code>self.entries</code>:</p>
-<pre><code>for (path, result) in probed {
-    match result {
-        Ok(entry) =&gt; match self.top_index.get(&amp;vp).copied() {
-            Some(ix) =&gt; { *self.entries.get_mut(ix) = entry; }
-            None     =&gt; { self.entries.insert(pos, entry); }   <span class="del">// shifts every index ≥ pos</span>
-        },
-        Err(err) if err.is_gone() =&gt; {
-            if let Some(ix) = self.top_index.get(&amp;vp).copied() {
-                self.entries.remove(ix);                        <span class="del">// shifts every index &gt; ix</span>
-            }
-        }
-        ...
+    <h4><span class="fid">A-28</span> The sidebar does seven syscalls per frame <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-ui/src/browser/sidebar.rs:168 · browser/mutations.rs:422–437 · platform/macos.rs:41–51, :84–128</p>
+    <p>This is <code>A-25</code>, which rev 1 fixed, sitting untouched in the function
+    immediately above the one that was fixed. <code>volumes()</code> was moved to a background
+    timer so render only reads a cached value. <code>places()</code> — one line away, called
+    from the same <code>render_sidebar</code> — was not:</p>
+    <pre><code>// browser/sidebar.rs, inside render_sidebar
+let places  = self.places(cx);      // → platform.places(), every frame
+let favorites = self.favorites(cx); // → clones the Vec&lt;PathBuf&gt;, every frame
+let volumes = self.volumes();       // → cached (A-25)</code></pre>
+    <p>And <code>places()</code> is not a lookup. Each call walks the well-known folders and
+    asks the filesystem whether each one exists, because a folder the user deleted should not
+    appear:</p>
+    <pre><code>fn place(kind: PlaceKind, name: &amp;str, path: PathBuf) -&gt; Option&lt;Place&gt; {
+    if path.is_dir() {                       // ← a stat, per call
+        Some(Place { name: name.to_string(), kind, path })   // ← an allocation, per call
+    } else { None }
+}</code></pre>
+    <p>Seven of those — Desktop, Documents, Downloads, Music, Pictures, Movies, Applications —
+    plus <code>dirs::home_dir()</code>, plus seven <code>String</code>s and eight
+    <code>PathBuf</code>s, every time the sidebar draws. On a warm cache that is cheap enough
+    to have gone unnoticed. On a Mac where <code>~/Documents</code> is in iCloud Drive and has
+    been evicted, or on a machine where the home directory is an SMB mount that has gone away,
+    <code>is_dir()</code> is the call that blocks — and it blocks the window, at frame
+    rate.</p>
+    <p>The audit that fixed <code>volumes()</code> said the reason in one line: "a stale
+    network mount stalls that call, and stalls the window with it". Exactly the same sentence
+    applies here, and <code>places()</code> is the one called unconditionally on every frame
+    rather than once per fifteen seconds.</p>
+    <p class="fix"><b>Fix</b> — The same one, and the machinery already exists.
+    <code>Browser::start_volume_refresh</code> is a background loop that probes and stores;
+    give places the same treatment, or better, fold both into one probe task since they are
+    the same kind of work on the same schedule. Render reads the last known list. Favourites
+    do not need a probe at all — they come from settings — but they should stop being cloned
+    per frame.</p>
+  </div>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-29</span> The selection summary is rebuilt in O(the directory), per selection change <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-ui/src/folder/mod.rs:610–629 — <code>refresh_selection_summary</code></p>
+    <p>Rev 1's <code>A-07</code> made the status bar O(1) per frame by caching the selected
+    paths and their byte total. The cache is correct and the status bar is fast. What was
+    never examined is <em>how often the cache is rebuilt</em>, and the answer is: on every
+    single mutation of the selection.</p>
+    <pre><code>pub(super) fn refresh_selection_summary(&amp;mut self) {
+    // ...
+    for (id, entry) in self.visible_entries() {   // ← every row in `order`
+        if self.selection.contains(&amp;id) { paths.push(entry.path.clone()); ... }
     }
-}
-self.rebuild_index_and_order();   <span class="c">// the index is only repaired here, after the loop</span></code></pre>
-    <p><code>top_index</code> maps path → index into <code>entries</code>. After the first
-    insert or remove, every index above the edit point is off by one — but the loop keeps
-    consulting the stale map. So a burst carrying two deletions <b>removes the wrong entry the
-    second time</b>, and a burst mixing a create with a delete <b>overwrites an unrelated
-    row</b>. The listing then disagrees with the disk until a manual refresh, silently.</p>
-    <p>Bursts carrying several paths are the normal case, not the edge case — the debounce and
-    drain at folder/listing.rs:163–179 exists precisely to coalesce them.</p>
-    <div class="fix"><b>Fix</b>
-    Resolve every probe against the pre-loop index first, then apply the mutations in one pass:
-    collect the set of paths to drop and do a single <code>entries.retain(...)</code>, collect
-    the new entries and insert them in one merge, then reindex once. That also removes the
-    O(n) <code>Vec::remove</code> memmove per deletion. <b>Add a test</b>: two files deleted in
-    one probe batch, assert both are gone and nothing else moved. The existing
-    <code>folder/tests.rs</code> already has the machinery to build one.</div>
-  </div>
-
-  <div class="find sev1">
-    <h4><span class="fid">A-06</span> The watcher drops events when its channel fills, and nothing resyncs <span class="pill p-risky">critical · correctness</span></h4>
-    <p class="where">crates/ferret-vfs/src/watch.rs:52, :74</p>
-    <p>The channel is <code>bounded(64)</code> and the callback is
-    <code>let _ = tx.try_send(kind);</code>. The doc comment (watch.rs:47–50) reasons that
-    dropping a new event costs freshness while blocking the watcher thread costs the backend —
-    which is the right trade. But it is only right if someone is told that a drop happened.
-    Nobody is.</p>
-    <p>Sixty-four events is very little. A <code>git checkout</code>, an
-    <code>npm install</code>, an unarchive or a build all blow through it in milliseconds. The
-    events past the sixty-fourth are gone, the consumer never learns that its picture is
-    incomplete, and the listing stays wrong <em>indefinitely</em> — there is no periodic
-    reconciliation to catch it.</p>
-    <p>The model already knows how to handle this shape: <code>WATCH_RELOAD_THRESHOLD</code>
-    (folder/mod.rs:49–54) says a burst above 512 paths is answered with one clean walk. Overflow
-    is the same situation arriving through a different door and deserves the same answer.</p>
-    <div class="fix"><b>Fix</b>
-    On a failed <code>try_send</code>, set an <code>overflowed</code> flag; when the channel
-    next has room, send a single <code>WatchEvent::Desynced</code>. The consumer turns that into
-    <code>reload_preserving_state</code>. Roughly fifteen lines, and it converts a silent
-    wrong-forever into a re-list.</div>
-  </div>
-
-  <div class="find sev1">
-    <h4><span class="fid">A-05</span> Every watcher burst triggers a full O(n) reindex <span class="pill p-risky">critical</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/sort.rs:127–164</p>
-    <p><code>rebuild_index_and_order</code> clears and refills three hash maps —
-    <code>row_of_path</code>, <code>top_index</code> and <code>known_paths</code> — each keyed
-    by a <em>cloned</em> <code>VfsPath</code>. That is roughly <b>3n <code>PathBuf</code>
-    allocations plus 3n hashes of a full path string</b>, and it is called from
-    <code>resort</code>, <code>rebuild_order</code>, <code>toggle_expanded</code>,
-    <code>load_children</code> and — the one that matters — <code>apply_probes</code>.</p>
-    <p>So saving one file in <code>flat/</code> costs ~600,000 allocations and ~600,000 hashes
-    of ~60-byte strings. That is not a frame; that is several.</p>
-    <div class="fix"><b>Fix</b>
-    Three layers, each independently worthwhile.
-    <b>(1)</b> <code>Arc&lt;Path&gt;</code> keys (D-35) turn every clone into a refcount bump.
-    <b>(2)</b> Key the top-level maps by <em>name</em>, not by full path — every entry in
-    <code>entries</code> shares one parent, so the name is already unique within the map and is
-    an order of magnitude shorter to hash. Swap the hasher too: SipHash on 60-byte paths is
-    ~36 MB hashed per rebuild, for a threat model Ferret does not have
-    (<a href="#libraries">§9</a>).
-    <b>(3)</b> Don't rebuild when nothing structural changed: a probe batch that only refreshed
-    metadata in place needs no reindex at all, and <code>apply_probes</code> already tracks
-    <code>metadata_changed</code> separately from <code>changed</code> (expansion.rs:118–169) —
-    the information is there, it just isn't used to skip the work.</div>
+    self.selected_visible_paths = paths.into();   // ← a fresh Arc&lt;[VfsPath]&gt;
+}</code></pre>
+    <p>Every one of <code>select_only</code>, <code>toggle_select</code>,
+    <code>extend_select</code>, <code>select_rows</code>, <code>select_all</code> and
+    <code>clear_selection</code> ends in that call. Two of them are not one-shot user
+    actions:</p>
+    <ul>
+      <li><b>A marquee drag</b> calls <code>select_rows</code> from
+      <code>update_marquee</code>, which runs on <em>every mouse-move event</em> — at display
+      rate while the band is moving.</li>
+      <li><b>Shift + arrow</b> calls <code>extend_select</code> once per key repeat, roughly
+      thirty times a second once the repeat starts.</li>
+    </ul>
+    <p><b>Measured</b>, on a 200,000-entry listing, release build:</p>
+    <div class="scroller">
+    <table class="wide">
+      <caption>Cost of one selection change (<code>selection_summary_cost</code>, 200,000 rows)</caption>
+      <thead><tr><th>Situation</th><th class="key">Per change</th><th>Share of a 120 Hz frame</th></tr></thead>
+      <tbody>
+        <tr><td>A small band — 200 rows selected</td><td class="key">691 µs</td><td>8%</td></tr>
+        <tr><td>Everything selected (Cmd-A, then any arrow key)</td><td class="key">1.37 ms</td><td>16%</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>The scan dominates the small case; in the large one the <code>Arc&lt;[VfsPath]&gt;</code>
+    is itself 200,000 elements — 4.8 MB allocated and thrown away per mouse-move.</p>
+    <p class="fix"><b>Fix</b> — Rev 1's <code>A-02</code> proposed exactly this and only half
+    of it was done: "keep an ordered selection vector on <code>Folder</code>, rebuilt by the
+    selection mutators rather than derived by scanning". It is still derived by scanning; the
+    change was only that it is scanned once per <em>change</em> rather than once per
+    <em>row per frame</em>. The mutators know what they touched — <code>select_only</code>
+    changes one row, <code>extend_select</code> knows its old and new bounds — so the summary
+    can be maintained incrementally. <code>select_all</code> and <code>clear_selection</code>
+    stay O(n) because they genuinely are.</p>
   </div>
 
   <div class="find sev2">
-    <h4><span class="fid">A-12</span> The Kind comparator allocates a <code>String</code> per comparison <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/sort.rs:268–272 · crates/ferret-vfs/src/path.rs:114–124</p>
-    <p><code>cmp_entries</code> for <code>SortKey::Kind</code> calls
-    <code>a.path.extension()</code>, and <code>VfsPath::extension</code> ends in
-    <code>to_ascii_lowercase()</code> — a fresh <code>String</code>. Inside a comparator. Sorting
-    200,000 entries is ~3.4 million comparisons, so one click on the Kind header is roughly
-    <b>6.8 million heap allocations</b>.</p>
-    <p>The same call is on the render path via <code>FileIcons::asset_path</code>
-    (icons.rs:96), once per row per frame.</p>
-    <div class="fix"><b>Fix</b>
-    Cache the lowercased extension on <code>Entry</code> at listing time — it is needed by icon
-    dispatch anyway, so it pays for itself twice. Failing that, decorate-sort-undecorate. While
-    in the file: <code>sort_by</code> → <code>sort_unstable_by</code>; the comparator already
-    ends in a total-order name tiebreak (sort.rs:281), so stability buys nothing and the
-    scratch buffer is n/2 elements.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-13</span> Filtering lowercases both sides into new <code>String</code>s, per entry <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/sort.rs:223–231, :95–112</p>
-    <p><code>is_visible</code> does
-    <code>e.name.to_lowercase().contains(&amp;f.to_lowercase())</code>. The <em>needle</em> is
-    re-lowercased for every entry, and every name is lowercased into a fresh allocation. That is
-    ~400,000 allocations per keystroke on <code>flat/</code>, and the filter field fires on
-    every keystroke (browser/mod.rs:222–226). <code>select_by_prefix</code> has the same shape
-    per row per type-ahead character.</p>
-    <div class="fix"><b>Fix</b>
-    Build one case-insensitive matcher per keystroke and run it over the names without
-    allocating either side — <code>aho-corasick</code> is already in the lock and does exactly
-    this with SIMD (<a href="#libraries">§9</a>). Keep the behaviour identical; the existing
-    filter tests should not change.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-17</span> One OS watcher per <code>Folder</code> <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-vfs/src/watch.rs:51–86 · folder/listing.rs:147–204</p>
-    <p><code>Watch::start</code> constructs a <code>notify::recommended_watcher</code> per call,
-    and each one is its own FSEvents stream (macOS) or
-    <code>ReadDirectoryChangesW</code> registration (Windows), plus its own thread and its own
-    GPUI task draining it. Every tab has one; column view adds up to three more per tab. Ten
-    tabs in column view is up to forty native watchers and forty tasks — for a handful of
-    distinct directories, several of which are shared between tabs.</p>
-    <div class="fix"><b>Fix</b>
-    A watcher registry in <code>ferret-vfs</code>: one backend watcher, a
-    <code>HashMap&lt;PathBuf, Vec&lt;Sender&gt;&gt;</code> of subscribers, reference-counted so
-    the last unsubscribe unregisters the path. This is what Zed's <code>fs</code> crate does,
-    and it is dramatically easier to add now than after remote mounts introduce a second
-    watching mechanism. See <a href="#architecture">D-36</a>.</div>
+    <h4><span class="fid">A-33</span> <code>IconKey::of</code> allocates per row per frame <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret-platform/src/icon.rs:61–79 · crates/ferret-ui/src/icons.rs:203–210 · called from pane/mod.rs</p>
+    <p><code>entry_icon</code> runs once per visible row in all three views, and starts by
+    building a cache key:</p>
+    <pre><code>let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+// → IconKey::Extension(ext.to_ascii_lowercase())   ← a String, per row, per frame</code></pre>
+    <p>Two things are wrong with it. It allocates a <code>String</code> to look something up
+    in a cache — the classic shape rev 1 spent eleven commits removing. And it re-derives the
+    lowercased extension from the path when <code>Entry</code> has cached exactly that value
+    since <code>D-35</code>, precisely so this would not have to happen. For
+    <code>.app</code> bundles it is worse: <code>IconKey::Application</code> allocates the
+    full path as a <code>String</code>.</p>
+    <div class="note warn">
+      <strong>And the budget cannot see it</strong>
+      <p>This is the part worth dwelling on. <code>just budget</code> asserts two allocations
+      per visible row per frame and passes. It passes because its harness deliberately skips
+      <code>os_icon</code> — which needs a GPUI <code>App</code> the harness does not have —
+      and the module says so. So the one number in the repository whose job is to catch a
+      per-row allocation has a hole in it exactly where a per-row allocation is. See
+      §10.</p>
+    </div>
+    <p class="fix"><b>Fix</b> — <code>IconKey::Extension(SmolStr)</code> and a constructor
+    that takes an <code>&amp;Entry</code>, so the key is built from the cached extension and a
+    short extension never touches the heap at all. <code>smol_str</code> is already a
+    dependency of both crates.</p>
   </div>
 
   <div class="find sev3">
-    <h4><span class="fid">A-23</span> <code>entry_names()</code> copies the directory for a membership test <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/mod.rs:315–317 · browser/mutations.rs:32–34, :174–178, :236</p>
-    <p>It builds a <code>HashSet&lt;String&gt;</code> of every name in the directory — 200,000
-    allocations — and every caller uses it only to ask <code>unique_name</code> whether a
-    candidate is taken (format.rs:136–155). It is called synchronously from
-    <code>new_folder</code>, <code>new_file</code>, <code>transfer</code> and
-    <code>paste_clipboard</code>, all on the UI thread, all right before a filesystem
-    operation.</p>
-    <div class="fix"><b>Fix</b>
-    Pass a predicate instead of a set — <code>unique_name(|name| folder.contains_name(name), …)</code>
-    — and answer it from the existing index. With A-05's name-keyed map that is an O(1) lookup
-    with no allocation at all.</div>
+    <h4><span class="fid">A-37</span> The sidebar allocates a row id and a label per row, per frame <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-ui/src/browser/sidebar.rs:204, :227, :243, :345 · browser/title_bar.rs:215</p>
+    <p><code>SharedString::from(format!("place-{i}"))</code> for every row, plus
+    <code>label.to_string()</code> for every label, plus
+    <code>format!("Ferret — {title}")</code> once for the window title. Fifteen-odd
+    allocations a frame is not a stall and this is not urgent — but the ids are derived from a
+    counter and could be <code>ElementId::NamedInteger</code>, which GPUI provides for this
+    exact case and which does not allocate.</p>
   </div>
 
   <div class="find sev3">
-    <h4><span class="fid">A-24</span> Expanded subtrees are never refreshed, and the code reads as though they are <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/folder/listing.rs:216–221 · vfs/watch.rs:79</p>
-    <p><code>start_watch_apply</code> drops any path whose parent is not <code>self.dir</code>.
-    That filter is harmless but misleading — the watch is registered
-    <code>NonRecursive</code>, so events for expanded children never arrive in the first place.
-    A folder expanded in place (§8) shows a snapshot that never updates until it is collapsed
-    and reopened.</p>
-    <div class="fix"><b>Fix</b>
-    Decide and write it down. Either watch each expanded folder (natural once A-17's registry
-    exists — subscribing to a second path becomes cheap), or keep the current behaviour and
-    replace the filter's implicit claim with a comment saying expanded subtrees are a snapshot
-    by design.</div>
+    <h4><span class="fid">A-38</span> The delegate re-reads the model four times per cell <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-ui/src/pane/list.rs:459–470, :517</p>
+    <p><code>render_td</code> is called once per (row, column). Inside it,
+    <code>self.folder.read(cx)</code> appears four times — for the entry, the selection state,
+    the depth and the expansion — and <code>self.palette(cx)</code> re-resolves the browser
+    palette, which is three <code>Rgba</code>-to-<code>Hsla</code> conversions and a theme
+    lookup. At four columns and forty visible rows that is 640 entity reads and 160 palette
+    resolutions per frame to answer questions that are constant for the row and for the
+    frame.</p>
+    <p class="fix"><b>Fix</b> — Read once at the top of <code>render_td</code>, and hoist the
+    palette to the frame. Neither is O(the directory), which is why this is minor; both are
+    free.</p>
   </div>
 </section>
 
 <!-- ==================================================================== -->
-<section id="blocking">
+<section id="memory">
   <span class="sec-tag">§6</span>
-  <h2>Blocking the UI thread</h2>
-  <p class="sec-intro">The <code>Vfs</code> contract's first promise is "nothing blocks a frame" (vfs/vfs.rs:38–44). Four places break it, one of them on every folder you open.</p>
+  <h2>Memory &amp; the listing</h2>
+  <p class="sec-intro">Three things the listing rework left slightly out of shape.</p>
 
   <div class="find sev2">
-    <h4><span class="fid">A-09</span> Preferences are written synchronously on every navigation — and the debounce for it is dead code <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/browser/tabs.rs:191–209 · state.rs:82–89, :118–139 · ferret-settings/src/config.rs:30</p>
-    <p><code>record_current_view</code> ends in <code>state.save_prefs()</code>, which is
-    <code>write_atomically</code>: a <code>create_dir_all</code>, a full
-    <code>serde_json::to_string_pretty</code> of up to <code>FOLDER_PREFS_CAPACITY = 4_000</code>
-    records (~500 KB by the module's own estimate), a <code>write</code> and a
-    <code>rename</code>. All on the UI thread.</p>
-    <p>It is called from <code>PaneEvent::ViewChanged</code> (tabs.rs:67) <em>and</em> from
-    <code>swap_active_tab</code> (tabs.rs:94) — so every sort click, every column toggle, every
-    view-mode change and <b>every folder you enter</b> serialises and writes half a megabyte
-    before the next frame.</p>
-    <p>The machinery to avoid this already exists and is entirely unused:</p>
+    <h4><span class="fid">A-34</span> <code>Metadata</code> carries two fields nothing reads <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret-vfs/src/entry.rs:46–55</p>
+    <p><b>Measured</b> with <code>size_of</code>: <code>Entry</code> is <b>144 bytes</b>,
+    <code>Option&lt;Entry&gt;</code> is also 144 (the niche packs, which is the good news), and
+    <code>Metadata</code> is 48 of those bytes. Two of its five fields are read by nothing in
+    the workspace:</p>
     <ul>
-      <li><code>ferret_settings::config::SAVE_DEBOUNCE</code> is defined, documented with exactly
-      this failure ("without this, dragging a column edge would write the file on every frame"),
-      and <b>referenced nowhere in the workspace</b>.</li>
-      <li><code>FolderPrefs::is_dirty()</code> (folder_prefs.rs:187) has a passing test proving
-      an idle app can skip writing, and <b>no caller</b>.</li>
+      <li><code>created: Option&lt;SystemTime&gt;</code> — 16 bytes. No column shows it, no
+      sort key uses it, no menu offers it.</li>
+      <li><code>readonly: bool</code> — no row draws it, no operation checks it.</li>
     </ul>
-    <div class="fix"><b>Fix</b>
-    A debounced save task on <code>FerretState</code>: <code>record_current_view</code> marks
-    dirty and (re)arms a <code>SAVE_DEBOUNCE</code> timer; the timer checks
-    <code>is_dirty()</code> and writes on the background executor. Flush synchronously once, on
-    window close. While there: <code>to_json</code> uses
-    <code>serde_json::to_string_pretty</code> (folder_prefs.rs:118) on a file the module header
-    explicitly says is "written by the app rather than by hand" — pretty-printing it is roughly
-    double the bytes and a slower serialiser, for nobody. This is the finding with the best effort-to-relief ratio in the document —
-    everything it needs is already written.</div>
-  </div>
-
-  <div class="find sev2">
-    <h4><span class="fid">A-18</span> Creating a file or folder blocks the window <span class="pill p-warn">major</span></h4>
-    <p class="where">crates/ferret-ui/src/browser/mutations.rs:36–67 · browser/mod.rs:368–370</p>
-    <p><code>smol_block_on(fs.create_dir(&amp;path))</code>. The comment argues a local
-    <code>mkdir</code> is sub-millisecond and that blocking buys a live window to start the
-    inline rename in. The first half is true on APFS and false on an SMB share, a sleeping
-    external disk, or a network mount that has gone away — and the second half is solvable
-    without blocking.</p>
-    <div class="fix"><b>Fix</b>
-    Spawn, and start the rename from the completion. The pane already has a
-    <code>pending_rename</code> slot (pane/mod.rs:126–127) with a render-time hand-off
-    (pane/render.rs:10–12) built for precisely this "I need a <code>&amp;mut Window</code> I
-    don't have" situation — the slow-click rename uses it already.</div>
+    <p>On <code>flat/</code> the slab holds 200,000 × 144 = <b>28.8 MB</b>, of which
+    <b>3.2 MB</b> is a creation time nothing will ever display. Dropping both takes
+    <code>Metadata</code> from 48 bytes to 32 and <code>Entry</code> from 144 to 128 — an
+    11% cut to the resident size of a large listing, for deleting two fields.</p>
+    <p class="fix"><b>Fix</b> — Delete them, and take them out of <code>to_metadata</code>
+    while you are there. The counter-argument is that a Date Created column is a plausible
+    feature; the answer is that <code>st_birthtime</code> comes back in the same
+    <code>stat</code> that is already being made, so re-adding the field later costs one line
+    and no syscalls. Carrying 3.2 MB against that is not a trade.</p>
   </div>
 
   <div class="find sev3">
-    <h4><span class="fid">A-25</span> The volume list can hit the filesystem during render <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/browser/mutations.rs:374–383 · browser/mod.rs:50 · platform/macos.rs:158–187</p>
-    <p><code>volumes()</code> caches for <code>VOLUMES_TTL = 15s</code>, but it is called from
-    the sidebar's render pass, so when the TTL expires the <em>frame</em> pays for a
-    <code>read_dir("/Volumes")</code> plus a <code>metadata()</code> per entry. A stale network
-    mount stalls that call, and stalls the window with it. <code>PROBE_TIMEOUT_MS</code>
-    (platform/config.rs:25) was clearly written for this hazard and is never used.</p>
-    <div class="fix"><b>Fix</b>
-    Refresh the cache from a background task on a timer; render only ever reads the last known
-    value. Then either wire <code>PROBE_TIMEOUT_MS</code> up or delete it.</div>
+    <h4><span class="fid">A-35</span> <code>LISTING_BATCH_SIZE</code> now gates the first row on 4,096 <code>stat</code> calls <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-vfs/src/config.rs:37 · vfs/local.rs — <code>resolve</code></p>
+    <p>4,096 was chosen when a batch was names only, to amortise a channel send and a model
+    update over enough rows to matter. <code>D-33</code> changed what a batch <em>is</em>:
+    every entry in it now carries a resolved <code>stat</code>, so the constant is doing a
+    second job it was never sized for — bounding how long the first row waits.</p>
+    <p><b>Measured</b>, <code>cargo xtask bench</code> on <code>flat/</code>: time to first row
+    went from <b>2.0 ms</b> before D-33 to <b>5.8 ms</b> after. Both are far inside the 50 ms
+    budget, which is why this is minor rather than a regression — but it is three times worse
+    for no reason, and the same constant also sets the ceiling on how much work a cancelled
+    walk leaves in flight.</p>
+    <p class="fix"><b>Fix</b> — Ramp it. A first batch of 128 puts the first row back under a
+    millisecond; doubling to the existing 4,096 over the next few batches keeps the throughput
+    the constant was chosen for. Roughly six lines, and it makes both jobs the constant is now
+    doing explicit instead of coincidental.</p>
   </div>
 
-  <p><b>Also blocking, lower stakes:</b> <code>save_settings</code> is synchronous on the same
-  thread and fires from <code>toggle_hidden</code>, <code>toggle_sidebar</code>,
-  <code>toggle_theme</code> and <code>add_current_to_favorites</code> (mutations.rs:286, :307,
-  :325, :357) — a much smaller file, but it rides the same fix as A-09.
-  <code>go_to_existing_parent</code> (tabs.rs:157–168) walks up the tree with synchronous
-  <code>Path::is_dir</code> calls; it only runs when a folder has vanished, but that is exactly
-  when the parent may be an unresponsive mount.</p>
-</section>
-
-<!-- ==================================================================== -->
-<section id="jwalk">
-  <span class="sec-tag">§7</span>
-  <h2>jwalk: where it belongs</h2>
-  <p class="sec-intro">Yes — but not where you would first reach for it, and not without deciding what it means for the search crate.</p>
-
-  <p><code>jwalk</code> is a rayon-backed parallel directory walker. Its win is <b>many stats
-  and many directories</b>. It is not a faster <code>readdir</code>: reading the names out of
-  one directory is a serial syscall stream and no library changes that. Which is exactly why
-  the obvious place to put it is the wrong one, and the unobvious place is worth several
-  seconds.</p>
-
-  <div class="lanes">
-    <div class="lane">
-      <h4>Use it here</h4>
-      <ul>
-        <li><b>The metadata tier (A-03).</b> The single biggest win in this document.</li>
-        <li><b><code>copy_tree</code></b> — vfs/local.rs:317–355, single-threaded recursion, and it is what a cross-volume move runs.</li>
-        <li><b>Recursive delete</b> — <code>remove_dir_all</code> at local.rs:245 and macos.rs:90 has the same shape.</li>
-        <li><b>Folder size on demand</b> — the Size column deliberately shows nothing for directories (entry.rs:85–91); when "calculate size" arrives it is a parallel walk or it is a hang.</li>
-        <li><b>Trash pre-flight and conflict scanning</b> for the future <code>ferret-ops</code> queue.</li>
-      </ul>
-    </div>
-    <div class="lane no">
-      <h4>Do not use it here</h4>
-      <ul>
-        <li><b>The Phase-1 single-directory listing, as it stands.</b> The name tier is already measured at ~0.3 ms to first row and ~143 ms for 200,000 entries (xtask/config.rs:52–64). It is not the bottleneck. Dropping jwalk in without also fixing A-10 just moves the queue.</li>
-        <li><b>Search (F-40s).</b> <code>plan.html</code> already commits to <code>ignore</code> + <code>grep-searcher</code>, and <code>ignore::WalkBuilder</code> <em>is</em> a parallel walker with gitignore semantics. Adopting jwalk there too means two parallel walkers and two thread pools for one job.</li>
-      </ul>
-    </div>
-  </div>
-
-  <div class="dec">
-    <h4><span class="did">D-33</span> Resolve metadata during the walk, with jwalk, and make <code>metadata_in_listing</code> true on both platforms.</h4>
-    <p>Replace <code>LocalFs::read_dir</code>'s <code>std::fs::read_dir</code> loop with
-    <code>jwalk::WalkDir::new(dir).max_depth(1).skip_hidden(false)</code> over a Ferret-owned
-    rayon pool, reading <code>DirEntry::metadata()</code> — which the walker has already
-    resolved on its worker threads — and emitting <code>Entry</code> batches (A-10) with
-    <code>metadata: Some(_)</code> filled in.</p>
-    <p><code>Folder::start_metadata_backfill</code> then deletes itself: it already returns
-    early when <code>capabilities().metadata_in_listing</code> is set (expansion.rs:237–240),
-    which is the Windows path today. One code path on both platforms, and the Size and Date
-    columns are populated the moment a row appears instead of minutes later.</p>
-    <div class="because"><b>Because</b>
-    The <code>Capabilities</code> doc comment (vfs/vfs.rs:18–25) already anticipates this —
-    "assuming two would throw away the Windows win, and assuming one would stall macOS on a
-    200,000-entry directory". The right resolution is to stop having two tiers on the local
-    backend at all, and keep the flag for remote mounts where a second round trip is genuinely
-    expensive.</div>
-  </div>
-
-  <div class="dec">
-    <h4><span class="did">D-34</span> jwalk for bulk file work; <code>ignore</code> for search. One walker per job, never both for the same job.</h4>
-    <p>jwalk owns metadata resolution, tree copy, tree delete and directory sizing — jobs with
-    no ignore semantics, where the lower overhead matters. <code>ignore</code> owns filename and
-    content search, where honouring <code>.gitignore</code> is the entire feature. Neither is
-    used for the other's job.</p>
-    <div class="because"><b>Because</b>
-    Both crates are parallel walkers and it is very easy to end up with both doing the same job
-    in different parts of the codebase, at which point nobody can reason about how many threads
-    are walking the disk. Writing the split down now costs a paragraph; discovering it in Phase 5
-    costs a refactor.</div>
-  </div>
-
-  <h3>What to price in before adopting it</h3>
-  <div class="scroller">
-  <table>
-    <caption>jwalk adoption hazards</caption>
-    <thead><tr><th>Hazard</th><th>Why it matters here</th><th>What to do</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>A third thread pool</td>
-        <td>rayon joins smol's blocking pool and GPUI's background executor. Three pools sizing themselves to the core count independently will oversubscribe.</td>
-        <td>Construct one Ferret-owned rayon pool at startup, sized from <code>available_parallelism()</code>, and pass it with <code>Parallelism::RayonExistingPool</code>. Never build one per listing.</td>
-      </tr>
-      <tr>
-        <td><code>skip_hidden</code> defaults to <code>true</code></td>
-        <td>Ferret's hidden logic is richer than a leading dot — <code>platform_hidden</code> reads <code>UF_HIDDEN</code> and <code>FILE_ATTRIBUTE_HIDDEN</code> (local.rs:357–370) — and hidden files are a user toggle.</td>
-        <td><code>.skip_hidden(false)</code>, unconditionally, with a comment saying why. Otherwise <kbd>Cmd-Shift-.</kbd> silently stops working and the test at local.rs:488–499 catches it only if it is run.</td>
-      </tr>
-      <tr>
-        <td>Cancellation is by drop, but a worker finishes its current stat</td>
-        <td>The <code>Vfs</code> contract is explicit that dropping the stream stops the work (vfs/vfs.rs:49–50), and the test at local.rs:456–470 asserts it.</td>
-        <td>Bound the parallelism so a cancelled walk leaves at most <em>n</em> stats in flight, and keep that test green.</td>
-      </tr>
-      <tr>
-        <td>Windows already gets metadata free</td>
-        <td><code>FindFirstFileEx</code> returns size, times and attributes with the name (local.rs:38–43). Re-stating them would be a regression.</td>
-        <td>Use <code>DirEntry::metadata()</code>, which is served from the walk, not a fresh <code>symlink_metadata</code>.</td>
-      </tr>
-      <tr>
-        <td>Symlink semantics</td>
-        <td>Ferret resolves a link's target far enough to know whether it is broken (local.rs:266–276) and reads the target only for broken ones — deliberate, and the reason the link tests exist.</td>
-        <td>Keep <code>follow_links(false)</code> and keep the existing resolution logic; jwalk supplies the <code>file_type</code>, not the policy.</td>
-      </tr>
-      <tr>
-        <td>Cyclic links</td>
-        <td>The bench sweep includes <code>links</code> specifically because "a cyclic symlink must not hang the walk" (xtask/config.rs:66–70).</td>
-        <td><code>max_depth(1)</code> makes this trivially safe for listing. For <code>copy_tree</code> it does not — keep the existing "copy links as links, never follow" rule (local.rs:313–338).</td>
-      </tr>
-    </tbody>
-  </table>
-  </div>
-
-  <div class="note ok">
-    <strong>The honest expectation</strong>
-    <p>On a warm cache, jwalk will not make <code>flat/</code>'s names arrive faster — they
-    already arrive in 0.3 ms. What it changes is that <em>the row is complete when it appears</em>.
-    That is the difference between a file list and a file list that fills in for the next two
-    minutes, and it is worth more than any number in the bench table.</p>
-  </div>
-</section>
-
-<!-- ==================================================================== -->
-<section id="architecture">
-  <span class="sec-tag">§8</span>
-  <h2>Architectural changes</h2>
-  <p class="sec-intro">Three reshapes. The first two are the ones that make most of §3 and §5 unreachable rather than fixed; the third is the one that gets harder every phase you leave it.</p>
-
-  <div class="dec">
-    <h4><span class="did">D-35</span> <code>Entry</code> holds shared handles, not owned buffers.</h4>
-<pre><code>pub struct Entry {
-    <span class="del">pub path: VfsPath,          // PathBuf inside — heap alloc per clone</span>
-    <span class="del">pub name: String,           // second heap alloc per clone</span>
-    <span class="add">pub path: VfsPath,          // Arc&lt;Path&gt; inside</span>
-    <span class="add">pub name: SharedString,     // SmolStr: inline to 22 bytes, then Arc&lt;str&gt;</span>
-    pub kind: EntryKind,
-    pub metadata: Option&lt;Metadata&gt;,
-    pub link_target: Option&lt;Arc&lt;Path&gt;&gt;,
+  <div class="find sev3">
+    <h4><span class="fid">A-36</span> <code>Assets::list</code> ignores the path it is given <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-ui/src/assets.rs:27–31</p>
+    <pre><code>fn list(&amp;self, path: &amp;str) -&gt; gpui::Result&lt;Vec&lt;gpui::SharedString&gt;&gt; {
+    let mut out = FerretAssets::iter().map(Into::into).collect::&lt;Vec&lt;_&gt;&gt;();
+    //                          ^ every embedded asset, whatever `path` said
+    out.extend(gpui_component_assets::Assets.list(path)?);
+    Ok(out)
 }</code></pre>
-    <p>Mechanical, wide, and it does not change a single call site's shape — every
-    <code>.cloned()</code> in the render path stays exactly as written and becomes a refcount
-    bump and a short memcpy. It is the precondition for A-02, A-05, A-08, A-11 and A-22.</p>
-    <p><code>SharedString</code> specifically, not <code>Arc&lt;str&gt;</code>: it is built on
-    <code>smol_str</code>, which stores up to 22 bytes inline, so most filenames cost
-    <em>no allocation and no atomic at all</em>. <a href="#libraries">§9</a> has the detail and
-    the even-cheaper variant that derives the name from an offset into the path.</p>
-    <div class="because"><b>Because</b>
-    Do it <em>before</em> Phase 2, not after. <code>ferret-terminal</code> will hold paths for
-    cwd sync, and <code>ferret-ops</code> will hold them for the operation queue; converting two
-    crates is cheaper than converting four. It is also the kind of change that is trivial while
-    the tests are green and miserable in the middle of a feature.</div>
+    <p>The contract is "list the assets under <code>path</code>". This lists all of Ferret's
+    assets under every path, and only delegates the filter to the library half. Nothing
+    currently depends on the answer being right, which is why it has gone unnoticed — but
+    "nothing currently calls this correctly" is a poor thing to be relying on, and the fix is
+    a <code>filter</code>.</p>
   </div>
 
-  <div class="dec">
-    <h4><span class="did">D-36</span> Rows get a stable id. Selection, cursor, anchor and expansion key on it instead of on a path.</h4>
-    <p>Introduce <code>EntryId(u32)</code> — an index into a per-<code>Folder</code> slab that
-    is <em>not</em> invalidated by sorting or filtering. Then:</p>
-    <ul>
-      <li><code>selection: HashSet&lt;EntryId&gt;</code>, <code>anchor</code>/<code>cursor</code>:
-      <code>Option&lt;EntryId&gt;</code>, <code>expanded: HashSet&lt;EntryId&gt;</code> — u32 hashing, zero allocation.</li>
-      <li><code>order: Vec&lt;Row&gt;</code> stays; <code>row_of_path</code> becomes
-      <code>Vec&lt;EntryId&gt;</code> plus one <code>HashMap&lt;SharedString, EntryId&gt;</code>
-      built once per listing rather than once per watcher burst.</li>
-      <li><code>rebuild_index_and_order</code> stops allocating entirely — it permutes u32s.</li>
-    </ul>
-    <p>The module header's rule ("selection is stored as paths, never indices, because a
-    watcher reload reshuffles rows") is <em>right</em> and is preserved: an <code>EntryId</code>
-    is not a display row and not an index into <code>entries</code>. It is a stable identity
-    that survives re-sorting, which is what the rule was actually protecting.</p>
-    <div class="because"><b>Because</b>
-    This collapses A-05, most of A-02 and all of A-23 into one change, and it is the single
-    hardest thing in this document to retrofit — every one of the ~40 call sites that touches
-    <code>selection</code>, <code>cursor</code> or <code>row_of_path</code> gets touched, and
-    that number only grows.</div>
-  </div>
-
-  <div class="dec">
-    <h4><span class="did">D-37</span> One watcher registry in <code>ferret-vfs</code>, not one watcher per <code>Folder</code>.</h4>
-    <p>A registry owning a single backend watcher per <em>backend</em>, with reference-counted
-    subscriptions per path. <code>Watch</code> stays exactly what it is from the caller's point
-    of view — a handle whose drop unsubscribes — so nothing above it changes. Add the
-    overflow-and-resync signal from A-06 here, once, rather than per watcher.</p>
-    <div class="because"><b>Because</b>
-    Remote mounts (Phase 7) will need a completely different change-detection mechanism —
-    polling for SFTP, notifications for nothing at all on S3 — and a registry is the seam where
-    that plugs in. Adding it while there is exactly one backend is a refactor of one file.</div>
-  </div>
-
-  <h3>Two structural things worth saying that are not decisions yet</h3>
-
-  <h4>The listing profile</h4>
-  <p>A-14 and A-15 are the same problem: <code>Folder</code> has one lifecycle and every
-  consumer pays for all of it. Ancestor columns want names and icons; the path bar wants
-  directory names and nothing else; the browsed directory wants everything. A
-  <code>ListingProfile { metadata, watch, icons }</code> passed to <code>Folder::new</code> is
-  three fields and four branches, and Phase 2's terminal — which will want to know about a
-  directory it is not rendering — is the third consumer that makes it obviously right.</p>
-
-  <h4>The operations queue is load-bearing sooner than Phase 6</h4>
-  <p><code>plan.html</code> schedules <code>ferret-ops</code> late, which is defensible. But
-  <code>transfer</code> and <code>paste_clipboard</code> (mutations.rs:180–221, :240–279) are
-  today a detached task looping <code>await</code>s, with no progress, no cancellation and no
-  undo. Copying 40 GB is currently invisible and unstoppable — the only feedback is a toast if
-  it fails. A-18's fix and jwalk's parallel <code>copy_tree</code> (D-34) both want somewhere to
-  live, and that somewhere is the queue. Consider pulling a minimal version of it forward: a
-  job list, progress, and cancel. Undo and conflict policy can stay in Phase 6.</p>
-
-  <div class="note">
-    <strong>On <code>ferret-core</code></strong>
-    <p><code>plan.html</code>'s rule — do not create a crate before there is code for it — is
-    right and this audit does not propose breaking it. But note the trigger condition has nearly
-    arrived: <code>ferret-terminal</code> will want <code>VfsPath</code> and nothing else from
-    <code>ferret-vfs</code>. That is the second consumer the rule was waiting for. Extract
-    <code>ferret-core</code> when Phase 2 starts, and fold D-35's representation change into the
-    same commit — one wide mechanical change instead of two.</p>
-  </div>
-</section>
-
-<!-- ==================================================================== -->
-<section id="libraries">
-  <span class="sec-tag">§9</span>
-  <h2>Libraries worth adopting</h2>
-  <p class="sec-intro">Adding crates is fine. Some are more than fine — most of what would help here is <em>already compiled into this workspace</em> as a transitive dependency of GPUI, so declaring an edge to it costs nothing at all: no new maintainer to trust, no new audit surface, no extra second of cold build.</p>
-
-  <p>So the section runs in three parts. First <b>seven free ones</b> — already in
-  <code>Cargo.lock</code>, most pulled directly by <code>gpui</code>, where the only question
-  is whether the swap is worth the diff. Then <b>four genuinely new ones</b>:
-  <code>jwalk</code> for the metadata tier, and three measurement crates that make §11's
-  budgets real instead of hand-rolled. Then <b>what to leave alone</b> — those rejections are
-  on merit rather than on dependency cost, so they stand unchanged now that adding is
-  unrestricted.</p>
-
-  <div class="scroller">
-  <table class="wide">
-    <caption>Verified against Cargo.lock · 870 packages</caption>
-    <thead>
-      <tr><th class="key">Crate</th><th class="key">In lock</th><th class="key">Pulled by</th><th>What it fixes here</th><th>Verdict</th></tr>
-    </thead>
-    <tbody>
-      <tr><td class="key">parking_lot</td><td class="key">0.12.5</td><td class="key">gpui</td><td>Every <code>Mutex</code> in the workspace; removes the poison-swallowing paths</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">rustc-hash</td><td class="key">1.1.0</td><td class="key">collections (Zed's)</td><td>A-05 — SipHash on 60-byte path keys, 3n times per watcher burst</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">foldhash</td><td class="key">0.2.0</td><td class="key">hashbrown</td><td>Same, with a random seed — the choice if remote mounts worry you</td><td><span class="pill p-core">consider</span></td></tr>
-      <tr><td class="key">smol_str</td><td class="key">0.3.6</td><td class="key">gpui_shared_string</td><td>D-35 — this is what <code>gpui::SharedString</code> is made of, and it is better than <code>Arc&lt;str&gt;</code> here</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">smallvec</td><td class="key">1.15.2</td><td class="key">gpui</td><td>A-21, <code>ancestor_chain</code>, <code>WatchEvent::Changed</code>, drag payloads</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">arc-swap</td><td class="key">1.9.2</td><td class="key">triomphe</td><td>A-01 — a lock-free read path for the icon cache</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">aho-corasick</td><td class="key">1.1.5</td><td class="key">regex</td><td>A-13 — allocation-free, SIMD, case-insensitive filtering</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">memchr</td><td class="key">2.8.3</td><td class="key">regex, aho-corasick</td><td>The substring primitive under the same</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">rayon</td><td class="key">1.12.0</td><td class="key">image, sum_tree</td><td>A-12 parallel sort; and it is jwalk's engine anyway (D-33)</td><td><span class="pill p-core">adopt</span></td></tr>
-      <tr><td class="key">slotmap</td><td class="key">1.1.1</td><td class="key">gpui, taffy</td><td>D-36 — generational <code>EntryId</code>s, if you want the safety belt</td><td><span class="pill p-later">optional</span></td></tr>
-      <tr><td class="key">bytemuck</td><td class="key">1.25.2</td><td class="key">wgpu, image</td><td>The per-byte BGRA swizzle in <code>icon_for_path</code></td><td><span class="pill p-later">optional</span></td></tr>
-      <tr><td class="key">indexmap</td><td class="key">2.14.0</td><td class="key">many</td><td>Nothing that a <code>Vec</code> plus a map does not already do here</td><td><span class="pill p-later">skip</span></td></tr>
-      <tr><td class="key">triomphe</td><td class="key">0.1.16</td><td class="key">rust-i18n-support</td><td>A one-word-smaller <code>Arc</code>. Marginal, and it does not interoperate with the <code>std::sync::Arc</code> everything else speaks</td><td><span class="pill p-later">skip</span></td></tr>
-      <tr><td class="key">ignore</td><td class="key">0.4.33</td><td class="key">globwalk</td><td>Already here. Reserved for search (D-34), not for listing</td><td><span class="pill p-later">later</span></td></tr>
-      <tr><td class="key">jwalk</td><td class="key"><span class="no">absent</span></td><td class="key">—</td><td>A-03 — the metadata tier (D-33)</td><td><span class="pill p-warn">the one new dep</span></td></tr>
-    </tbody>
-  </table>
-  </div>
-
-  <h3>parking_lot — for correctness first, speed second</h3>
-  <p>Ferret holds <code>std::sync::Mutex</code> in eleven places, every one of them guarding a
-  critical section of a few nanoseconds: read a <code>Vec</code> of at most four columns
-  (list.rs:123), read a <code>Point</code> (icon_view.rs:270), take an
-  <code>Option</code> (pane/render.rs:15–22), look up an icon (macos.rs:216). Short critical
-  sections are exactly where <code>parking_lot</code>'s adaptive spin-then-park wins, and where
-  its one-byte lock word matters against std's larger inner state.</p>
-  <p>But the better argument is that poisoning is doing active harm here:</p>
-<pre><code><span class="c">// icons.rs:130 — a poisoned cache silently becomes "no icons, forever"</span>
-self.cache.lock().ok()?.get(key)?.clone()
-
-<span class="c">// pane/list.rs:130 — same shape: a poisoned width map silently reverts to defaults</span>
-self.widths.lock().ok().and_then(|w| w.get(&amp;column).copied())</code></pre>
-  <p>Both swallow a poisoned lock into an indistinguishable "no value". <code>parking_lot</code>
-  has no poisoning, so <code>lock()</code> returns the guard directly — the <code>.ok()?</code>
-  disappears along with the failure mode it was hiding, and the twenty-odd
-  <code>.lock().unwrap()</code> calls elsewhere lose their panic path.</p>
-  <div class="note warn">
-    <strong>Do not let this substitute for the real fix</strong>
-    <p><code>parking_lot</code> makes A-01's per-row lock cheaper. It does not make it correct
-    to take a lock once per row per frame. Do the <code>ArcSwap</code> change below; adopt
-    <code>parking_lot</code> for the locks that remain.</p>
-  </div>
-
-  <h3>Hashing — the largest library-level win in the document</h3>
-  <p>Rust's default hasher is SipHash-1-3, chosen to be HashDoS-resistant against
-  attacker-supplied keys. Ferret's index keys are paths from the user's own local disk. It is
-  paying a cryptographic-ish hash for a threat model it does not have.</p>
-  <p>The arithmetic on A-05: <code>rebuild_index_and_order</code> fills three maps of
-  <em>n</em> entries keyed by full <code>VfsPath</code>. On <code>flat/</code> with ~60-byte
-  paths that is 3 × 200,000 × 60 ≈ <b>36 MB hashed per rebuild</b> — and it rebuilds on every
-  watcher burst. At SipHash's ~1.5 GB/s that is roughly 24 ms of pure hashing to react to one
-  file being saved. Fx or foldhash on short keys runs several times faster, and A-05's
-  name-keying (~15-byte keys) cuts the input by four again.</p>
-  <div class="note">
-    <strong>Two caveats, both real</strong>
-    <p><b>Version split.</b> The lock has <code>rustc-hash 1.1.0</code> (via Zed's
-    <code>collections</code>). Declaring <code>rustc-hash = "2"</code> compiles a
-    <em>second</em> copy rather than unifying. That is a real duplicate but a trivial one —
-    the crate is a few hundred lines with no dependencies — and 2.x's <code>FxHasher</code> is
-    meaningfully better than 1.1's on longer keys. Take the duplicate; do not contort the
-    version to avoid it.
-    <b>Adversarial keys.</b> This is the caveat that actually matters. Local paths are the
-    user's own, but Phase 7's S3 and WebDAV mounts return keys chosen by a remote server, and
-    Fx is trivially collidable on purpose. Either use Fx for the local indices only and a
-    seeded hasher for anything keyed on remote-derived names — or use <code>foldhash</code>
-    everywhere and take a slightly smaller win with no caveat and no duplicate at all. That is
-    still the option I would pick.</p>
-  </div>
-
-  <h3><code>SharedString</code> is better than the <code>Arc&lt;str&gt;</code> D-35 asked for</h3>
-  <p>Worth stating precisely, because it upgrades <a href="#architecture">D-35</a>:
-  <code>gpui::SharedString</code> is backed by <code>gpui_shared_string</code>, which is backed
-  by <code>smol_str</code>. <code>SmolStr</code> stores strings of up to 22 bytes
-  <em>inline</em> and falls back to <code>Arc&lt;str&gt;</code> above that.</p>
-  <p>Most filenames are under 22 bytes. So for the common case <code>Entry.name</code> becomes
-  <b>zero heap allocation and zero atomic refcount</b> — a 24-byte memcpy on clone, which is
-  strictly better than <code>Arc&lt;str&gt;</code>, and it degrades gracefully to shared
-  ownership for the long ones. D-35 should say <code>SharedString</code>, not
-  <code>Arc&lt;str&gt;</code>, and it costs nothing to say so.</p>
-  <p>The path still wants <code>Arc&lt;Path&gt;</code> — paths are long and genuinely shared.
-  The best version stores only the path and derives the name from a byte offset into it:</p>
-<pre><code>pub struct Entry {
-    path: Arc&lt;Path&gt;,
-    name_at: u16,            <span class="c">// byte offset of the final component</span>
-    ...
-}
-impl Entry {
-    <span class="c">// O(1) slice, no parse, no allocation — which is what the</span>
-    <span class="c">// comment at vfs/entry.rs:61–63 was actually asking for.</span>
-    pub fn name(&amp;self) -&gt; &amp;str { &amp;self.path_str()[self.name_at as usize..] }
-}</code></pre>
-  <p>That removes the duplicate storage A-22 notes without giving up the property the existing
-  comment defends. If the borrow lifetimes make it awkward at the call sites,
-  <code>SharedString</code> is the pragmatic answer and is still a large improvement.</p>
-
-  <h3>arc-swap — the right shape for the icon cache</h3>
-  <p>A-01's access pattern is read-mostly to an extreme degree: read once per row per frame,
-  written a few dozen times in the life of a directory. That is what <code>ArcSwap</code> is
-  for.</p>
-<pre><code>pub struct MacIcons {
-    <span class="del">cache: Mutex&lt;HashMap&lt;IconKey, Option&lt;IconBitmap&gt;&gt;&gt;,</span>
-    <span class="add">cache: ArcSwap&lt;FxHashMap&lt;IconKey, Option&lt;Arc&lt;RenderImage&gt;&gt;&gt;&gt;,</span>
-}</code></pre>
-  <p>The render path becomes a lock-free atomic load plus a map lookup plus an
-  <code>Arc</code> clone — no mutex, no 16 KB memcpy, no <code>RenderImage</code>
-  reconstruction, and a stable image identity so GPUI reuses the texture. The resolver clones
-  the map, inserts, and swaps; with a few dozen entries that copy is irrelevant and happens off
-  the render path.</p>
-  <p>One wrinkle worth planning for: <code>RenderImage</code> lives in <code>gpui</code>, and
-  <code>ferret-platform</code> is a service crate. <code>plan.html</code>'s layering rule
-  permits service crates to depend on <code>gpui</code> itself (only <code>gpui-component</code>
-  is restricted to <code>ferret-ui</code>), so this is allowed. If you would rather not, keep
-  the provider returning bitmaps and put the <code>ArcSwap&lt;…, Arc&lt;RenderImage&gt;&gt;</code>
-  cache in <code>ferret-ui</code> in front of it — the render path ends up identical.</p>
-
-  <h3>aho-corasick for filtering</h3>
-  <p>A-13's fix has an obvious hand-rolled form (lowercase the needle once, ASCII fast path).
-  But <code>aho-corasick</code> is already in the tree and does it better:</p>
-<pre><code><span class="c">// built once per keystroke, not once per entry</span>
-let matcher = AhoCorasick::builder()
-    .ascii_case_insensitive(true)
-    .build([needle])?;
-<span class="c">// then, per entry: SIMD, no allocation, no lowercasing of either side</span>
-matcher.is_match(entry.name())</code></pre>
-  <p>200,000 allocation-free SIMD searches instead of 400,000 <code>String</code>
-  allocations, and it is the same engine that will do the work when search lands.</p>
-
-  <h3>rayon — already here, and A-12 wants it</h3>
-  <p>Sorting 200,000 entries on a Kind or Size header click is <em>embarrassingly</em>
-  parallel. <code>rayon::slice::ParallelSliceMut::par_sort_unstable_by</code> is a one-line
-  swap for <code>sort_by</code> once A-12's comparator stops allocating (a comparator that
-  allocates is a comparator you must not run on eight threads). Use the same Ferret-owned pool
-  D-33 constructs, so the sort and the walker share one set of workers rather than each
-  sizing itself to the core count.</p>
-
-  <h3>The four new ones</h3>
-  <p>These are not in the lock. Each is here because it does a job nothing already present
-  does, and three of the four are development-only — feature-gated or
-  <code>[dev-dependencies]</code>, so none of them ships in the binary a user runs.</p>
-
-  <div class="scroller">
-  <table class="wide">
-    <caption>Genuinely new dependencies</caption>
-    <thead><tr><th class="key">Crate</th><th>Job</th><th>Where it lives</th><th>Brings with it</th></tr></thead>
-    <tbody>
-      <tr><td class="key">jwalk</td><td>Parallel metadata resolution during the walk (D-33), parallel tree copy and delete (D-34)</td><td><code>ferret-vfs</code>, shipped</td><td><code>crossbeam-channel</code> (new), <code>rayon</code> (already here)</td></tr>
-      <tr><td class="key">tracy-client</td><td>Frame-level spans, through GPUI's <em>existing</em> instrumentation</td><td><code>ferret</code>, behind a feature</td><td>Nothing at runtime unless the feature is on</td></tr>
-      <tr><td class="key">dhat</td><td>§11's allocation-per-frame budget, as an assertion rather than an eyeball</td><td><code>[dev-dependencies]</code> + feature</td><td>Nothing shipped</td></tr>
-      <tr><td class="key">divan</td><td>A real harness for the three budgets <code>xtask</code> currently hand-rolls</td><td><code>[dev-dependencies]</code></td><td>Nothing shipped</td></tr>
-    </tbody>
-  </table>
-  </div>
-
-  <h4>tracy-client is nearly free, because the instrumentation already exists</h4>
-  <p>This is the find of the section. <code>profiling 1.0.18</code> is in the lock, pulled
-  <b>directly by <code>gpui</code></b> (and by <code>wgpu</code> beneath it). The
-  <code>profiling</code> crate is a facade: the <code>scope!</code> macros compile to nothing
-  until a backend feature is turned on, and GPUI's render pipeline is <em>already sprinkled
-  with them</em>.</p>
-  <p>So enabling <code>profiling/profile-with-tracy</code> and adding
-  <code>tracy-client</code> gives you GPUI's own frame, layout and paint spans without writing
-  a line of instrumentation — and Ferret's own <code>profiling::scope!</code> calls slot into
-  the same timeline. For a document whose top three findings are all "this runs once per row
-  per frame", that is exactly the instrument required, and it turns §3 from arithmetic into a
-  flame graph.</p>
-  <div class="note">
-    <strong>Pick the backend deliberately</strong>
-    <p><code>tracy-client</code> needs the external Tracy profiler application, which is a
-    superb tool and an extra thing to install. <code>puffin</code> is self-contained and
-    renders in-process, which is friendlier for contributors but far less capable. Either is a
-    one-line feature swap since both sit behind the same <code>profiling</code> facade — so
-    this is not a decision that has to be got right first time, which is the best kind.</p>
-  </div>
-
-  <h4>dhat turns §11's third budget from a number into a test</h4>
-  <p>§11 proposes an allocations-per-frame measurement and suggests hand-rolling a counting
-  global allocator. <code>dhat</code> already is one, with a better story:</p>
-<pre><code><span class="c">// behind a feature, never in a release build</span>
-#[global_allocator]
-static ALLOC: dhat::Alloc = dhat::Alloc;
-
-let _p = dhat::Profiler::builder().testing().build();
-scripted_scroll_of_flat_with_everything_selected();
-let stats = dhat::HeapStats::get();
-<span class="c">// the budget, as an assertion CI can fail on</span>
-assert!(stats.total_blocks &lt; BUDGET, "{} allocations per frame", ...);</code></pre>
-  <p>The difference between a printed number and a failing assertion is the difference between
-  a regression someone notices and a regression someone ships. A-01, A-02 and A-08 all leave
-  wall-clock timings on a fast machine essentially untouched; none of them survives an
-  allocation assertion.</p>
-
-  <h4>divan for the budgets themselves</h4>
-  <p><code>xtask bench</code> currently times one run and compares against a constant, which is
-  honest but noisy — it is why <code>FIRST_ROW_BUDGET</code> had to be set at 50 ms to catch a
-  0.3 ms operation "in kind rather than machine-to-machine variation" (xtask/config.rs:47–52).
-  A real harness gives distributions instead, which lets the budgets tighten enough to catch a
-  2× regression rather than only a 100× one. <code>divan</code> is the light option;
-  <code>criterion</code> is the thorough one and costs noticeably more build time. Either is
-  fine — <code>divan</code> is the one I would reach for on a workspace that already takes a
-  long time to compile.</p>
-
-  <h3>What not to add</h3>
-  <p>These rejections are on merit. None of them was a dependency-budget call, so none of them
-  changes now that adding crates is unrestricted.</p>
-  <div class="scroller">
-  <table>
-    <caption>Rejected, with the reason</caption>
-    <thead><tr><th class="key">Crate</th><th>Why not</th></tr></thead>
-    <tbody>
-      <tr><td class="key">dashmap</td><td>Sharded concurrent maps solve write contention. Ferret has none — the model is single-writer on the UI thread, and the icon cache has one background writer. <code>ArcSwap</code> is the correct tool and is already in the lock.</td></tr>
-      <tr><td class="key">mimalloc / jemalloc</td><td><b>Not yet</b>, rather than no. Genuinely faster than macOS's system allocator under multithreaded churn, and a one-line change — but it is a <em>multiplier on a problem you should be deleting</em>. Adopt it before step 2 of §12 and it masks A-01, A-02 and A-08 instead of revealing them, and the <code>dhat</code> budget above becomes much harder to reason about. Revisit once the allocation count is flat; then it is a free win on what remains.</td></tr>
-      <tr><td class="key">simd-json / sonic-rs</td><td>The settings file is tiny and the prefs file is written once per navigation — which is A-09, a scheduling bug, not a parsing one. Fix the scheduling and the parse cost disappears with it.</td></tr>
-      <tr><td class="key">compact_str</td><td>Solves exactly what <code>smol_str</code> already solves, and <code>smol_str</code> is what <code>SharedString</code> is built on. Two small-string types would be worse than one.</td></tr>
-      <tr><td class="key">crossbeam-channel</td><td>Not in the lock today; <code>jwalk</code> will bring it. <code>async-channel</code> is the right choice for the listing stream because the consumer is async — A-10 is about batching, not about the channel.</td></tr>
-      <tr><td class="key">notify-debouncer-full</td><td>Would replace the hand-rolled debounce, which is not the problem. A-06 (silent overflow) and D-37 (one watcher, many subscribers) are, and neither is what that crate offers.</td></tr>
-    </tbody>
-  </table>
-  </div>
-
-  <div class="note">
-    <strong>One free byte-level win while you are in there</strong>
-    <p><code>icon_for_path</code> converts AppKit's RGBA to GPUI's BGRA one pixel at a time
-    (macos.rs:284–288) — 4,096 iterations of <code>extend_from_slice</code> per icon. It runs
-    once per file type, not per frame, so it is not urgent. But the real fix is not a faster
-    loop: ask <code>NSBitmapImageRep</code> for the byte order you want via its
+  <div class="find sev3">
+    <h4><span class="fid">A-39</span> The macOS icon conversion swizzles one pixel at a time <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-platform/src/macos.rs — <code>icon_for_path</code></p>
+    <p>Carried forward unchanged from rev 1, which called it "one free byte-level win" and was
+    right to rank it last. AppKit hands back RGBA and GPUI wants BGRA, so the code walks
+    <code>chunks_exact(4)</code> and pushes four bytes at a time — 4,096 iterations per icon at
+    <code>ICON_POINTS = 64</code>. It runs once per file <em>type</em>, off the render path, so
+    it is genuinely not urgent.</p>
+    <p class="fix"><b>Fix</b> — Rev 1 named the right one and it is still right: ask
+    <code>NSBitmapImageRep</code> for the byte order you want via its
     <code>bitmapFormat</code> and do no conversion at all. Failing that, a <code>u32</code>
     swizzle over <code>bytemuck::cast_slice</code> is four times fewer iterations and three
     lines.</p>
   </div>
+</section>
 
-  <div class="dec">
-    <h4><span class="did">D-38</span> Take the crates that are already in the lock without debate. Give the new ones a stated job and the narrowest scope that does it.</h4>
-    <p><b>Free, adopt now:</b> <code>parking_lot</code> for locks,
-    <code>rustc-hash</code> or <code>foldhash</code> for internal indices,
-    <code>SharedString</code> for names, <code>smallvec</code> for bounded collections,
-    <code>arc-swap</code> for read-mostly caches, <code>aho-corasick</code> for text matching,
-    <code>rayon</code> for data parallelism. Seven crates, zero packages added to the build —
-    there is nothing to weigh.</p>
-    <p><b>New, and worth it:</b> <code>jwalk</code> ships;
-    <code>tracy-client</code> sits behind a feature; <code>dhat</code> and <code>divan</code>
-    are <code>[dev-dependencies]</code>. Scope each so it cannot leak into a release binary,
-    and say in the commit what job it does — not as a gate to pass, but so the next person
-    knows what would justify removing it again.</p>
-    <div class="because"><b>Because</b>
-    The workspace already compiles 870 packages, so the marginal cost of one more is small and
-    the marginal cost of an edge to one already present is zero. What is <em>not</em> free is a
-    dependency nobody can later delete because nobody recorded what it was for. Write the job
-    down; that is the whole discipline.</div>
+<!-- ==================================================================== -->
+<section id="regression">
+  <span class="sec-tag">§7</span>
+  <h2>The gap rev 1 opened</h2>
+  <p class="sec-intro">Not a new finding — an open one, carried here because it is the only thing in the workspace that is worse than it was before the last audit, and because there is now a concrete way to close it.</p>
+
+  <p><code>D-37</code> replaced one <code>notify</code> watcher per <code>Folder</code> with a
+  single shared backend and reference-counted subscriptions. That was right — ten tabs in
+  column view was up to forty native streams — and it came with a cost that was documented in
+  <code>ferret_vfs::watch</code>'s module header at the time rather than discovered later:</p>
+
+  <div class="note risk">
+    <strong>The cost, restated</strong>
+    <p><code>notify</code>'s FSEvents backend calls <code>stop()</code>, edits its path list,
+    and calls <code>run()</code> again on <em>every</em> <code>watch</code> and
+    <code>unwatch</code>. With one stream per folder that was invisible. With one shared
+    stream, every registration change is a window in which every <em>other</em> watched
+    directory loses events outright — and a lost event is a row that stays stale until
+    something else happens, which is the failure <code>A-06</code> exists to prevent.</p>
+  </div>
+
+  <p>Two things have been checked since, and both matter:</p>
+  <ul>
+    <li><b>Upgrading does not fix it.</b> <code>notify</code> 8.2.0 —
+    two majors ahead of the pinned 7 — has byte-identical <code>watch_inner</code> and
+    <code>unwatch_inner</code>, and still sets <code>since_when</code> to
+    <code>kFSEventStreamEventIdSinceNow</code> once at construction and never advances it. So
+    every rebuilt stream starts from "now" and the events during the rebuild are genuinely
+    gone.</li>
+    <li><b>The fix needs no new package.</b> <code>fsevent-sys</code> 4.1.0 is
+    <em>already in <code>Cargo.lock</code></em>, pulled by <code>notify</code> itself, and it
+    exposes <code>FSEventStreamGetLatestEventId</code>
+    (<code>fsevent-sys-4.1.0/src/fsevent.rs:102</code>) — which is precisely the value that
+    would have to be threaded through for a rebuild to lose nothing.</li>
+  </ul>
+
+  <p>The mitigation already in place — parking idle registrations so navigating away and back
+  costs no rebuild — reduces how often the window opens. It does not close it. See
+  <b>D-40</b>.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="libraries">
+  <span class="sec-tag">§8</span>
+  <h2>Libraries worth adopting</h2>
+  <p class="sec-intro">One that is not optional, two that are already paid for, and one that is a feature rather than a fix.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Recommended</caption>
+    <thead><tr><th>Crate</th><th>Job</th><th class="key">Cost</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td class="id">jiff</td><td>Local time and DST for every date the app displays (A-27)</td><td class="key">New, shipped</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="id">fsevent-sys</td><td>Own the FSEvents stream so a rebuild resumes rather than restarts (§7)</td><td class="key">Already in the lock</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="id">bytemuck</td><td>The RGBA→BGRA swizzle, if the <code>bitmapFormat</code> route does not pan out (A-39)</td><td class="key">Already in the lock, via wgpu</td><td><span class="pill p-later">optional</span></td></tr>
+      <tr><td class="id">nucleo</td><td>Fuzzy matching for the filter and the path bar</td><td class="key">New, shipped</td><td><span class="pill p-later">later</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>jiff — the only one that is not a choice</h3>
+  <p>A-27 needs a tz database, and a tz database is not something to hand-roll. The offset for
+  a given instant depends on the user's zone, on whether that instant was in daylight saving,
+  and on a rules file that IANA updates several times a year as governments change their
+  minds. Getting it wrong is exactly as bad as the bug being fixed.</p>
+  <p><code>jiff</code> is the one to reach for over <code>chrono</code> or <code>time</code>:
+  it is the newest of the three, it was written by the author of <code>regex</code> and
+  <code>ripgrep</code> specifically to make the correct thing the easy thing, and it reads the
+  system zoneinfo directly rather than needing a companion crate the way
+  <code>chrono</code> + <code>chrono-tz</code> or <code>time</code> + <code>time-tz</code>
+  do. It is also the only one whose API makes "this instant, in the user's zone, as a civil
+  date" a single call.</p>
+  <div class="note">
+    <strong>What survives</strong>
+    <p><code>civil_from_days</code> and its tests do not need to be deleted. They are correct
+    for what they compute; they were simply asked the wrong question. The smallest honest
+    change is to keep the formatting and replace the <em>input</em> — resolve the
+    <code>SystemTime</code> to a local civil date with <code>jiff</code>, then format that.
+    <code>plan.html</code>'s "no date library, civil-from-days is thirty lines" note should be
+    amended rather than deleted: it was right about formatting and wrong about zones, and
+    saying so is more useful to the next reader than quietly reversing it.</p>
+  </div>
+
+  <h3>fsevent-sys — the registry is already the seam</h3>
+  <p><code>D-37</code>'s own justification was that a registry is where a different
+  change-detection mechanism plugs in when remote mounts arrive. That seam is what makes this
+  cheap now: the local backend can own an <code>FSEventStream</code> directly, store
+  <code>FSEventStreamGetLatestEventId</code> before every <code>stop()</code>, and pass it as
+  <code>since_when</code> on the next <code>run()</code>. Nothing above
+  <code>ferret_vfs::watch</code> changes, because nothing above it knows what a stream is.</p>
+  <p>The honest counter-argument is that this is <code>unsafe</code> FFI in exchange for
+  closing a window measured in milliseconds, on macOS only, and that Windows'
+  <code>ReadDirectoryChangesW</code> has no equivalent problem because notify registers each
+  directory independently there. That is a real argument for deferring it. It is not an
+  argument for leaving the module header's warning as the only mitigation forever.</p>
+
+  <h3>nucleo — a feature, and it should be labelled as one</h3>
+  <p>The filter is a substring match and type-ahead is a prefix match. Both are correct and
+  both are now fast (<code>A-13</code>). <code>nucleo</code> — the matcher behind Helix and
+  Zed's pickers — would make the filter fuzzy, which is a better filter and a
+  <em>different</em> one. It belongs in <code>plan.html</code> as a feature with a decision
+  behind it, not in an audit as an optimisation. Noted here only so the option is on record;
+  the current implementation is not a finding.</p>
+
+  <h3>What not to add</h3>
+  <div class="scroller">
+  <table class="wide">
+    <caption>Rejected, with the reason</caption>
+    <thead><tr><th>Crate</th><th>Why not</th></tr></thead>
+    <tbody>
+      <tr><td class="id">notify 8</td><td>Two majors of churn for byte-identical FSEvents behaviour. Checked, not assumed — see §7. Upgrade when there is a reason, not as a fix for this.</td></tr>
+      <tr><td class="id">chrono / time</td><td>Both need a companion crate for zones. <code>jiff</code> does not. One dependency beats two.</td></tr>
+      <tr><td class="id">humansize</td><td><code>format_size</code> is twenty lines, matches Finder's rounding exactly, and now allocates once. A crate would be a behaviour change dressed as a cleanup.</td></tr>
+      <tr><td class="id">arboard</td><td>The obvious answer to A-32, and unnecessary: GPUI already has <code>ClipboardEntry::ExternalPaths</code> and its platform layer is already linked. A second clipboard implementation in one process is a way to have two of them disagree.</td></tr>
+      <tr><td class="id">mimalloc</td><td>Still "not yet", and for a better reason than last time: the allocation budget now exists and passes at 2.00 per row. Swapping the allocator would make that number incomparable across the change for a win on work that has already been deleted.</td></tr>
+      <tr><td class="id">config / figment</td><td>A-30 is not a parsing problem. The parser is careful, degrades per section, preserves unknown keys and has ten tests. The settings are unread, which no configuration crate fixes.</td></tr>
+    </tbody>
+  </table>
   </div>
 </section>
 
 <!-- ==================================================================== -->
-<section id="hygiene">
-  <span class="sec-tag">§10</span>
-  <h2>Hygiene &amp; build</h2>
-  <p class="sec-intro">Small things. Grouped as A-26 in the table because none of them is worth its own row, and all of them are worth ten minutes.</p>
+<section id="decisions">
+  <span class="sec-tag">§9</span>
+  <h2>Decisions</h2>
+  <p class="sec-intro">Four, continuing from <code>D-38</code>. The first is a reversal of a decision <code>plan.html</code> made, and says so.</p>
 
-  <h3>Dependency declarations</h3>
-  <ul>
-    <li><code>crates/ferret-settings/Cargo.toml</code> declares <code>dirs = "6"</code> and
-    <code>thiserror = "2"</code> literally instead of <code>.workspace = true</code> — the only
-    crate that does. Two versions of the same dependency is a matter of one careless bump.</li>
-    <li><code>crates/ferret/Cargo.toml</code> declares <code>trash = "5"</code> literally, and
-    the binary does not appear to reference <code>trash</code> at all — the trash goes through
-    <code>ferret-platform</code>. Check and remove.</li>
-    <li><code>xtask/Cargo.toml</code> declares <code>futures</code> and <code>smol</code>
-    literally. Same fix.</li>
-  </ul>
+  <div class="dec">
+    <h4><span class="did">D-39</span> Dates are local, and a library owns the conversion.</h4>
+    <p>Every displayed timestamp is resolved to the user's zone before it is formatted, using
+    <code>jiff</code> and the system tz database. <code>civil_from_days</code> stays and keeps
+    its tests; what changes is that it is handed a local civil datetime rather than a UTC
+    one.</p>
+    <p class="because"><b>Because</b> <code>plan.html</code> decided against a date library on
+    the grounds that formatting is thirty lines. That was true and it is still true — but
+    formatting was never the hard part, and the document did not notice that the easy part was
+    the only part being done. A file manager that reports the wrong modification day is not
+    usefully fast.</p>
+  </div>
 
-  <h3>Git dependencies are unpinned</h3>
-  <p><code>gpui</code>, <code>gpui_platform</code>, <code>gpui-component</code> and
-  <code>gpui-component-assets</code> are all tracked from git with no <code>rev</code>.
-  Reproducibility comes from <code>Cargo.lock</code>, which is correct for a binary — but a
-  routine <code>cargo update</code> moves all four independently, and the failure mode the
-  workspace manifest's own comment warns about (two <code>gpui</code> instances, "confusing type
-  mismatch errors") is exactly what that produces. Pin a <code>rev</code> on all four and bump
-  them together, deliberately, in their own commit.</p>
+  <div class="dec">
+    <h4><span class="did">D-40</span> The macOS watcher resumes from its last event id rather than restarting.</h4>
+    <p>The local backend owns an <code>FSEventStream</code> through <code>fsevent-sys</code>
+    instead of going through <code>notify</code> on macOS. Before every rebuild it stores
+    <code>FSEventStreamGetLatestEventId</code>; the next stream starts from there rather than
+    from <code>kFSEventStreamEventIdSinceNow</code>. <code>notify</code> stays for Windows,
+    where the problem does not exist.</p>
+    <p class="because"><b>Because</b> the registry closed forty native streams and opened one
+    delivery gap, and the gap is the kind of bug that is invisible until someone loses work to
+    it. Doing this behind the registry is a change to one file; doing it after remote mounts
+    have added a second mechanism is a change to a design.</p>
+    <p class="because"><b>Deferrable if</b> the <code>unsafe</code> surface is judged too much
+    for the size of the window. In that case the parked-registration mitigation stands and the
+    module header stays the record — but that is a decision to take deliberately, not by
+    default.</p>
+  </div>
 
-  <h3>Repository</h3>
-  <ul>
-    <li><code>.DS_Store</code> is committed at the repository root, and <code>.gitignore</code>
-    is 39 bytes. Add it.</li>
-    <li>Dev-profile link time: <code>split-debuginfo = "unpacked"</code> on macOS and
-    <code>debug = "line-tables-only"</code> are both large wins on a workspace that links GPUI,
-    and neither costs anything a backtrace needs.</li>
-  </ul>
+  <div class="dec">
+    <h4><span class="did">D-41</span> Every setting either works or is deleted, and a test enforces it.</h4>
+    <p>The six cheap ones are wired up. The six that need a feature are removed from the schema
+    and from <code>default-settings.json</code> until that feature lands, and
+    <code>keymap</code> goes with them. A test asserts that every field the schema serialises
+    is named somewhere outside <code>ferret-settings</code>.</p>
+    <p class="because"><b>Because</b> <code>D-12</code> made the file the source of truth, and
+    a source of truth that is ignored is worse than no file at all — it is documentation that
+    lies. The test is the part that matters: this class of drift is invisible to every other
+    check in the repository, and it will recur the moment a setting is added ahead of the code
+    that reads it.</p>
+    <div class="note">
+      <strong>The test is cheap and slightly unusual</strong>
+      <p>It cannot be a compile-time check, because "is read" is not a property the type system
+      sees. But <code>Settings::default().to_json()</code> already enumerates every shipped key,
+      and a test can walk that list and grep the workspace source for each name. Crude, and it
+      would have caught all twelve of these on the day each was written.</p>
+    </div>
+  </div>
 
-  <h3>Declared and never used</h3>
-  <p>Each of these is a small honest TODO, but two of them are findings above and should not be
-  left looking cosmetic:</p>
-  <div class="scroller">
-  <table>
-    <caption>Dead tunables and APIs</caption>
-    <thead><tr><th class="key">Item</th><th class="key">Declared</th><th>Verdict</th></tr></thead>
-    <tbody>
-      <tr><td class="key">SAVE_DEBOUNCE</td><td class="key">settings/config.rs:30</td><td><b>Wire it up</b> — this is A-09, not cosmetic.</td></tr>
-      <tr><td class="key">FolderPrefs::is_dirty</td><td class="key">folder_prefs.rs:187</td><td><b>Wire it up</b> — same, and it already has a passing test.</td></tr>
-      <tr><td class="key">PROBE_TIMEOUT_MS</td><td class="key">platform/config.rs:25</td><td>Wire it up (A-25) or delete it.</td></tr>
-      <tr><td class="key">SNIFF_BUDGET</td><td class="key">vfs/config.rs:23</td><td>Legitimately waiting for previews. Leave.</td></tr>
-      <tr><td class="key">Folder::total_entries, show_hidden, filter, has_selection, toggle_sort_order</td><td class="key">folder/mod.rs, sort.rs</td><td><code>#[allow(dead_code)]</code> with an honest note on each. Fine as is; revisit if any is still unused after Phase 2.</td></tr>
-      <tr><td class="key">OptionExt::retain</td><td class="key">folder/mod.rs:408–418</td><td>A private trait on <code>Option&lt;T&gt;</code> used three times. <code>Option::take_if</code> in std does the same with inverted polarity. Optional.</td></tr>
-    </tbody>
-  </table>
+  <div class="dec">
+    <h4><span class="did">D-42</span> The clipboard is the system's, not the browser's.</h4>
+    <p>Copy and cut write <code>ClipboardEntry::ExternalPaths</code> to the system pasteboard
+    through GPUI. Paste reads it. The cut flag stays a process-local hint beside the system
+    write, because macOS has no pasteboard representation for it.</p>
+    <p class="because"><b>Because</b> a file manager whose copy does not reach Finder is not a
+    file manager the user can adopt, and "Finished when" in <code>AGENTS.md</code> is
+    explicitly "you can set Ferret as your default file manager and not miss the system one".
+    Copy and paste between the two is table stakes for that sentence, and the fact that it also
+    fails between two Ferret windows means the current design cannot be extended into
+    working — it has to be replaced.</p>
   </div>
 </section>
 
 <!-- ==================================================================== -->
 <section id="measuring">
-  <span class="sec-tag">§11</span>
-  <h2>Measuring it</h2>
-  <p class="sec-intro">The bench is good and it guards the wrong thing — or rather, it guards the one thing that is already fine.</p>
+  <span class="sec-tag">§10</span>
+  <h2>What the budgets miss</h2>
+  <p class="sec-intro">Rev 1 added three budgets and a profiler. They work — and this audit found four things none of them can see, which is worth writing down while it is fresh.</p>
 
-  <p><code>xtask bench</code> measures time-to-first-row and total listing time against
-  <code>FIRST_ROW_BUDGET</code> and <code>FLAT_TOTAL_BUDGET</code>, and its own header says the
-  first is "the one that decides whether the app feels alive". That was true when the name tier
-  was the risk. It is not where the regressions in this document live — every one of A-01
-  through A-05 would leave those two numbers untouched.</p>
+  <p>The budgets caught something real on their first run: the allocation budget failed at 4.00
+  per row against a predicted floor of 2, and the cause was <code>format!</code> reallocating
+  its buffer in both <code>format_size</code> and <code>format_date</code>. That is exactly
+  the job. But three of this audit's four largest findings sailed past all of them.</p>
 
-  <h3>Three budgets to add</h3>
   <div class="scroller">
   <table class="wide">
-    <caption>Proposed additions to xtask</caption>
-    <thead><tr><th>Measurement</th><th>Why</th><th>Guards</th></tr></thead>
+    <caption>Why each budget missed what it missed</caption>
+    <thead><tr><th>Finding</th><th>Which budget should have caught it</th><th>Why it did not</th></tr></thead>
     <tbody>
-      <tr>
-        <td><b>Time to a fully populated listing</b> — first row to last <code>Metadata</code> filled, on <code>flat/</code>.</td>
-        <td>This is the number A-03 destroys and D-33 fixes, and nothing currently watches it.</td>
-        <td class="id">A-03 · D-33</td>
-      </tr>
-      <tr>
-        <td><b>Watcher burst settle time</b> — write 5,000 files into <code>flat/</code>, time until the model is consistent with disk, and assert consistency.</td>
-        <td>Catches A-04 (wrong row edited), A-05 (reindex stall) and A-06 (dropped events) in one test. The correctness assertion matters as much as the timing.</td>
-        <td class="id">A-04 · A-05 · A-06</td>
-      </tr>
-      <tr>
-        <td><b>Allocations per rendered frame</b> — <code>dhat</code> behind a feature flag (§9), around a scripted scroll of <code>flat/</code> with everything selected, asserted rather than printed.</td>
-        <td>The whole of §3 is invisible to a wall-clock benchmark on a fast machine and glaring in an allocation count. This is the one number that would have caught A-01 and A-02 the day they were written — and as a <code>dhat</code> assertion it fails CI instead of scrolling past in a log.</td>
-        <td class="id">A-01 · A-02 · A-07 · A-08 · A-19 · A-20 · A-21</td>
-      </tr>
+      <tr><td class="id">A-33</td><td>Allocations per frame</td><td>The harness skips <code>os_icon</code> because it needs a GPUI <code>App</code>. The gap is documented in the module — and a documented hole in the one check whose job is to have no holes is still a hole.</td></tr>
+      <tr><td class="id">A-29</td><td>Allocations per frame</td><td>It measures a <em>scroll</em>. Nothing in the harness changes the selection, so the one path that is O(the directory) is never exercised.</td></tr>
+      <tr><td class="id">A-28</td><td>Nothing</td><td>No budget covers the shell. Every measurement in the repository points at the file list, because that is where rev 1 was looking.</td></tr>
+      <tr><td class="id">A-27</td><td>Nothing — correctly</td><td>A timezone bug is not a budget's job. It is a test's, and there was no test that formatted a known instant and asserted a local result, because the function has only ever been asked for a UTC one.</td></tr>
     </tbody>
   </table>
   </div>
 
-  <div class="note ok">
-    <strong>And one thing to turn on before any of it</strong>
-    <p><code>gpui</code> is already instrumented with the <code>profiling</code> facade
-    (§9). Enabling a backend costs one feature flag and gives frame, layout and paint spans
-    through GPUI's own pipeline — so §3's findings stop being arithmetic and start being a
-    flame graph you can point at. Do this first; it will change which of the twenty-six you
-    care about most, and it may well disagree with my ordering.</p>
-  </div>
+  <h3>Three additions, in the same spirit as rev 1's</h3>
+  <ul>
+    <li><b>Close the icon hole.</b> The allocation harness skips <code>os_icon</code> for a
+    real reason, but <code>gpui::TestAppContext</code> can supply the <code>App</code> it
+    needs. Moving the budget to a <code>#[gpui::test]</code> is a smaller change than the hole
+    is a risk.</li>
+    <li><b>Script a selection, not just a scroll.</b> One marquee-drag's worth of
+    <code>select_rows</code> calls in the same budget would have put A-29 on the first run,
+    and it is four lines.</li>
+    <li><b>A date test with a zone in it.</b> Set <code>TZ</code>, format a known instant,
+    assert the local result. It is the only way this class of bug is ever caught, and it is
+    the test that should land in the same commit as D-39.</li>
+  </ul>
 
-  <div class="note">
-    <strong>Gate 7</strong>
-    <p>Worth adding to <code>AGENTS.md</code>'s gate list, in the same spirit as the six that
-    are there: <b>no per-frame work may be O(the directory).</b> It is checkable by reading a
-    diff, it is the single rule that would have prevented six of these findings, and unlike a
-    timing budget it does not depend on how fast the reviewer's machine is.</p>
+  <div class="note ok">
+    <strong>What is genuinely working</strong>
+    <p>Worth saying, because an audit that only lists faults gives a false impression. The
+    watcher burst budget is the strongest thing in the repository: 5,000 creates and 5,000
+    deletes, asserting the model matches the disk <em>exactly</em>, converging in 87.5 ms and
+    26.6 ms. It covers three findings at once and it would fail loudly if any of them
+    regressed. Gate 7 — no per-frame work may be O(the directory) — is the right rule, and
+    A-29 is a reminder that it needs to be applied to <em>per-interaction</em> work too.</p>
   </div>
 </section>
 
 <!-- ==================================================================== -->
 <section id="order">
-  <span class="sec-tag">§12</span>
+  <span class="sec-tag">§11</span>
   <h2>The order to do this in</h2>
-  <p class="sec-intro">Sequenced so each step is independently shippable and the app runs at the end of every one. Steps 1 and 2 are worth doing before Phase 2 starts; the rest can interleave with it.</p>
-
-  <p><b>Before step 1:</b> turn on the <code>profiling</code> backend (§9) and stand up the
-  <code>dhat</code> allocation budget (§11). Both are an afternoon, neither changes any
-  behaviour, and together they mean every step below lands with a number attached instead of
-  an argument. It is also the only honest way to check whether my ordering is right — see
-  §13.</p>
+  <p class="sec-intro">Sequenced so each step is independently shippable, with the correctness bugs first — because unlike rev 1, most of this is not about speed.</p>
 
   <div class="step">
-    <span class="pn">1</span>
+    <span class="part">1</span>
     <div>
-      <h3>The three correctness bugs</h3>
-      <p class="dep">A-04 · A-06 · A-24 · no dependencies · small</p>
+      <h4>The wrong answers</h4>
+      <p class="mono">A-27 · A-31 · D-39 · jiff · small</p>
       <ul>
-        <li>Rewrite <code>apply_probes</code> to resolve against the pre-loop index and apply removals as one retain pass. Add the two-deletion test.</li>
-        <li>Add <code>WatchEvent::Desynced</code> on channel overflow; consumer re-lists.</li>
-        <li>Decide and document the expanded-subtree behaviour.</li>
+        <li>Local dates, with the <code>TZ</code>-setting test that proves it.</li>
+        <li><code>observe_window_appearance</code>, so the default theme setting means what it says.</li>
       </ul>
-      <p class="accept"><b>Done when</b> a scripted burst of mixed creates and deletes leaves the model exactly matching disk, and a 5,000-file burst that overflows the channel still converges.</p>
+      <p class="accept">Done when a file saved a minute ago reads as a minute ago in a
+      non-UTC zone, and switching macOS to dark mode with Ferret open changes the
+      window.</p>
     </div>
   </div>
 
   <div class="step">
-    <span class="pn">2</span>
+    <span class="part">2</span>
     <div>
-      <h3>The render path, without changing any representation</h3>
-      <p class="dep">A-01 · A-02(a) · A-07 · A-19 · A-21 · <span class="mono">arc-swap · parking_lot · smallvec</span> · independent of everything else · small</p>
+      <h4>The settings file</h4>
+      <p class="mono">A-30 · D-41 · no dependencies · medium</p>
       <ul>
-        <li>Cache <code>Arc&lt;RenderImage&gt;</code> behind an <code>ArcSwap</code> in the icon provider (A-01) — the biggest single win, and contained to two files.</li>
-        <li>Move drag-payload construction into the <code>on_drag</code> closure (A-02a).</li>
-        <li>Incremental selection counters (A-07).</li>
-        <li><code>OnceLock</code> the font features (A-19); cache the column list as a <code>SmallVec</code> (A-21).</li>
-        <li>Sweep the remaining <code>std::sync::Mutex</code> to <code>parking_lot</code>, which removes the two <code>.lock().ok()</code> paths that silently swallow poisoning (§9).</li>
+        <li>Wire the six that are a handful of lines each.</li>
+        <li>Delete the six that need a feature, and <code>keymap</code> with them.</li>
+        <li>Add the coverage test, so this is the last time.</li>
       </ul>
-      <p class="accept"><b>Done when</b> the allocation-per-frame counter from §11 is flat while scrolling <code>flat/</code> with everything selected.</p>
+      <p class="accept">Done when every key in <code>default-settings.json</code> changes
+      something observable, and the test fails if one stops doing so.</p>
     </div>
   </div>
 
   <div class="step">
-    <span class="pn">3</span>
+    <span class="part">3</span>
     <div>
-      <h3>Stop blocking the UI thread</h3>
-      <p class="dep">A-09 · A-18 · A-25 · independent · small</p>
+      <h4>The shell's render path</h4>
+      <p class="mono">A-28 · A-29 · A-33 · A-37 · A-38 · independent · small</p>
       <ul>
-        <li>Debounced, dirty-checked preference saving — <code>SAVE_DEBOUNCE</code> and <code>is_dirty()</code> both already exist.</li>
-        <li>Spawn <code>create_dir</code>/<code>create_file</code>; start the rename from the completion via <code>pending_rename</code>.</li>
-        <li>Refresh the volume cache from a background timer.</li>
+        <li>Probe places on the same background timer as volumes; render reads the last answer.</li>
+        <li>Maintain the selection summary incrementally in the mutators.</li>
+        <li><code>IconKey</code> from the cached extension, and close the budget's icon hole in the same commit.</li>
+        <li>The two minors while in the files.</li>
       </ul>
-      <p class="accept"><b>Done when</b> no <code>block_on</code> and no <code>std::fs</code> call remains reachable from a <code>Render</code> impl or an action handler.</p>
+      <p class="accept">Done when the allocation budget covers <code>os_icon</code> and a
+      scripted marquee, and both pass.</p>
     </div>
   </div>
 
   <div class="step">
-    <span class="pn">4</span>
+    <span class="part">4</span>
     <div>
-      <h3>The representation change</h3>
-      <p class="dep">D-35 + D-36 · <span class="mono">smol_str · foldhash</span> · wide and mechanical · do it in one go, with green tests</p>
-      <ul>
-        <li><code>Arc&lt;Path&gt;</code> / <code>SharedString</code> in <code>Entry</code> and <code>VfsPath</code>.</li>
-        <li><code>EntryId</code> for selection, cursor, anchor, expansion and the row index.</li>
-        <li>Fold in A-05's name-keyed index and A-23's predicate-based <code>unique_name</code>.</li>
-        <li>Swap the internal maps off SipHash while you are rewriting their keys anyway — doing it in the same change means measuring the reindex once, not twice.</li>
-        <li>If <code>ferret-core</code> is being extracted for Phase 2, do it in the same change.</li>
-      </ul>
-      <p class="accept"><b>Done when</b> <code>rebuild_index_and_order</code> performs no heap allocation, and the full test suite passes unchanged.</p>
+      <h4>The clipboard</h4>
+      <p class="mono">A-32 · D-42 · no dependencies · small</p>
+      <p class="accept">Done when copying in Ferret and pasting in Finder moves a file, and
+      the reverse works too.</p>
     </div>
   </div>
 
   <div class="step">
-    <span class="pn">5</span>
+    <span class="part">5</span>
     <div>
-      <h3>jwalk, and the end of the second metadata tier</h3>
-      <p class="dep">D-33 · D-34 · <span class="mono">jwalk (new) · rayon</span> · depends on step 4 for the <code>Entry</code> shape · medium</p>
+      <h4>The listing's remaining shape</h4>
+      <p class="mono">A-34 · A-35 · A-36 · A-39 · small</p>
       <ul>
-        <li>One Ferret-owned rayon pool at startup — shared with A-12's parallel sort, not a second pool.</li>
-        <li>Batched <code>read_dir</code> (A-10) with metadata resolved during the walk.</li>
-        <li><code>metadata_in_listing = true</code> on both platforms; delete <code>start_metadata_backfill</code>.</li>
-        <li>Parallel <code>copy_tree</code> and recursive delete.</li>
-        <li>Add the "fully populated listing" budget from §11 <em>first</em>, so the improvement is a number.</li>
+        <li>Drop the two dead <code>Metadata</code> fields; re-measure <code>Entry</code>.</li>
+        <li>Ramp the batch size; re-measure time to first row.</li>
+        <li><code>Assets::list</code> honours its argument; the swizzle gets its
+        <code>bitmapFormat</code>.</li>
       </ul>
-      <p class="accept"><b>Done when</b> every row in <code>flat/</code> shows its size and date the moment it first appears, and the hidden-file and cyclic-symlink tests are still green.</p>
+      <p class="accept">Done when <code>Entry</code> is 128 bytes and time to first row is
+      back under a millisecond.</p>
     </div>
   </div>
 
   <div class="step">
-    <span class="pn">6</span>
+    <span class="part">6</span>
     <div>
-      <h3>The remaining structure</h3>
-      <p class="dep">D-37 · listing profiles · the rest of the minors · medium</p>
-      <ul>
-        <li>Watcher registry (A-17), with A-06's overflow signal moved into it.</li>
-        <li><code>ListingProfile</code> for ancestor columns and path completion (A-14, A-15).</li>
-        <li>Cached lowercase extension plus <code>par_sort_unstable_by</code> (A-12); <code>aho-corasick</code> filtering (A-13); icon-key derivation in place (A-11).</li>
-        <li>Hygiene sweep (§10).</li>
-      </ul>
-      <p class="accept"><b>Done when</b> entering column view in a deep path attaches no new watchers and starts no metadata work.</p>
+      <h4>The watcher gap</h4>
+      <p class="mono">D-40 · fsevent-sys · unsafe · medium</p>
+      <p class="accept">Done when opening a second directory does not cost the first one any
+      events — which needs a test that writes to directory A while subscribing to directory B,
+      and that test is most of the work.</p>
     </div>
   </div>
 </section>
 
 <!-- ==================================================================== -->
 <section id="limits">
-  <span class="sec-tag">§13</span>
+  <span class="sec-tag">§12</span>
   <h2>What this did not check</h2>
   <p class="sec-intro">Stated plainly, so nothing here is mistaken for a clean bill of health it did not earn.</p>
-
   <ul>
-    <li><b>Nothing was profiled.</b> No build was run, no instrument was attached. Every
-    complexity claim comes from reading the call graph; every wall-clock figure is arithmetic
-    from the sizes involved. §11 exists to convert the important ones into measurements the
-    repository owns.</li>
-    <li><b>Windows was read, not run.</b> <code>ferret-platform/src/windows.rs</code> was read
-    for shape and for the <code>metadata_in_listing</code> claim. The <code>unsafe</code> icon
-    path there was not audited with the care the macOS one received.</li>
-    <li><b>GPUI's own behaviour is assumed, not verified.</b> A-01 rests on GPUI keying its
-    texture cache on <code>RenderImage</code> identity. That is the standard behaviour and the
-    fix is correct either way, but the <em>magnitude</em> should be confirmed against the pinned
-    revision before it is cited as the top finding in a commit message.</li>
-    <li><b>The theme, the icon assets and the settings schema were not reviewed</b> beyond what
-    the performance path touches. Gate 3 (both themes) was not re-checked.</li>
-    <li><b>No security review.</b> The <code>unsafe</code> AppKit block in <code>macos.rs</code>
-    has a well-written safety comment and a well-formedness guard at the boundary; it was read,
-    not verified against the AppKit threading rules it claims.</li>
-    <li><b>The library claims were verified against <code>Cargo.lock</code>, not against a
-    build.</b> Every version and every "pulled by" in §9 was read out of the lockfile, so the
-    crates are certainly present — but no benchmark compared SipHash to foldhash on Ferret's
-    own keys, and the 36 MB figure is arithmetic. Do the swap behind the §11 counter, not on
-    my say-so.</li>
-    <li><b>The tests were not run.</b> <code>terminal.html</code> reports 122 passing; this
-    audit takes that at face value. Several findings above propose new tests, and three of them
-    (A-04, A-06, the §11 allocation counter) would likely fail today.</li>
+    <li><b>Windows was read, not run.</b> Again. <code>windows.rs</code> was read for the
+    <code>places()</code> shape (identical to macOS, so A-28 applies to both) and for the
+    icon cache. The <code>unsafe</code> <code>SHGetFileInfo</code> path was not audited with
+    the care the macOS one received, and no finding here has been reproduced on Windows.</li>
+    <li><b>No profiler was attached.</b> The measured figures come from
+    <code>cargo xtask bench</code>, <code>just budget</code>, and three
+    <code>#[ignore]</code>d measurements run in release. Tracy is wired up
+    (<code>--features profile</code>) and was not used; a flame graph might well disagree
+    with the ordering of §5.</li>
+    <li><b>The correctness bugs were reasoned, not reproduced.</b> A-27 and A-31 are read
+    from the code and are not in doubt — there is no timezone conversion and no appearance
+    observer to find. But neither was demonstrated by running the app in a non-UTC zone or
+    toggling the system appearance, and doing so is the first step of fixing them.</li>
+    <li><b>The terminal phase was not considered.</b> <code>terminal.html</code> is a plan,
+    not code. Where a finding here interacts with it — the shared worker pool, the clipboard,
+    the settings schema — this document assumes Phase 2 has not started.</li>
+    <li><b>Nothing was checked for security.</b> The <code>unsafe</code> AppKit block, the
+    path handling around symlinks, and the new <code>fsevent-sys</code> proposal in D-40 all
+    deserve a pass that this is not.</li>
+    <li><b>Rev 1's own work was re-read, not re-derived.</b> A-29, A-33 and A-35 are all
+    places where rev 1's fixes stopped one step short, which suggests the same is true
+    somewhere this pass did not look.</li>
   </ul>
-
-  <div class="note ok">
-    <strong>The overall read</strong>
-    <p>This is a well-built Phase 1. The hard structural calls — streaming listings,
-    cancel-by-drop, path-keyed selection surviving a re-sort, an icon provider that never
-    touches the OS on the render path, capabilities declared rather than assumed — are all
-    right, and every one of them is right for a reason written down beside it. What the audit
-    found is almost entirely <em>constant factors on top of correct structure</em>: an icon
-    cache that returns bytes where it should return a handle, a payload built eagerly where it
-    should be built lazily, a metadata tier that is asynchronous but not concurrent. Those are
-    the good kind of finding. The two watcher bugs are not, and they are step 1.</p>
-  </div>
 </section>
 
 <footer>
-  <p>Ferret · performance &amp; architecture audit · rev 1 · 28 August 2026 · GPL-3.0-or-later<br>
+  <p>Ferret · second audit · rev 2 · 29 August 2026 · GPL-3.0-or-later<br>
   Companion to <a href="plan.html">plan.html</a> (whole product), <a href="ui-base.html">ui-base.html</a> (phase 1)
   and <a href="terminal.html">terminal.html</a> (phase 2).
-  New IDs A-01…A-26 and D-33…D-37 continue those documents' numbering and should be folded into them.</p>
+  New IDs A-27…A-39 and D-39…D-42 continue the numbering of rev 1, whose A-01…A-26 and D-33…D-38 are cited
+  throughout the source and must not be reused. D-39 amends <code>plan.html</code>'s "no date library" note.</p>
 </footer>
 
 </main>
