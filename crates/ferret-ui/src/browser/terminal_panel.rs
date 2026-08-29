@@ -1,8 +1,4 @@
-//! The docked terminal panel shell.
-//!
-//! This is the F-10/F-11 UI boundary: chrome, focus, resizing and the current
-//! directory follow the active file-pane tab. The PTY/grid engine will replace
-//! the body behind this module once `ferret-terminal` lands.
+//! The docked terminal panel and its bridge to `ferret-terminal`.
 
 use super::*;
 
@@ -21,6 +17,9 @@ impl Browser {
             state.save_settings();
         }
         if self.terminal_visible {
+            if self.terminal_session.is_none() {
+                self.restart_terminal(cx);
+            }
             window.focus(&self.terminal_focus, cx);
         } else {
             use gpui::Focusable as _;
@@ -54,7 +53,53 @@ impl Browser {
 
     pub(super) fn toggle_terminal_sync(&mut self, cx: &mut Context<Self>) {
         self.terminal_sync = self.terminal_sync.toggle();
+        if self.terminal_sync.is_enabled() {
+            let dir = self.active().folder.read(cx).dir.clone();
+            self.sync_terminal_to(&dir, cx);
+        }
         cx.notify();
+    }
+
+    pub(super) fn restart_terminal(&mut self, cx: &mut Context<Self>) {
+        let dir = self.active().folder.read(cx).dir.clone();
+        let Some(local) = dir.as_local() else {
+            self.terminal_session = None;
+            self.terminal_error =
+                Some("Terminal sessions currently require a local folder.".into());
+            cx.notify();
+            return;
+        };
+        match TerminalSession::spawn(local) {
+            Ok(session) => {
+                self.terminal_session = Some(session);
+                self.terminal_error = None;
+                self.terminal_generation = 0;
+            }
+            Err(error) => {
+                self.terminal_session = None;
+                self.terminal_error = Some(error.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Forward sync is an explicit command injected into the one persistent
+    /// shell (F-11). This first slice does not expose keyboard input yet, so
+    /// injection cannot overwrite a partially typed command.
+    pub(super) fn sync_terminal_to(&mut self, dir: &VfsPath, cx: &mut Context<Self>) {
+        if !self.terminal_sync.is_enabled() || self.terminal_session.is_none() {
+            return;
+        }
+        let Some(local) = dir.as_local() else {
+            return;
+        };
+        if let Some(session) = &self.terminal_session
+            && let Err(error) = session.change_directory(local)
+        {
+            self.terminal_error = Some(error.to_string());
+            self.terminal_sync = TerminalSyncState::Off;
+            cx.notify();
+        }
     }
 
     pub(super) fn update_terminal_drag(&mut self, y: gpui::Pixels, cx: &mut Context<Self>) {
@@ -142,8 +187,8 @@ impl Browser {
                             .small()
                             .icon(Icon::new(gpui_component::IconName::Plus))
                             .tooltip("New Terminal")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_current_in_terminal(window, cx);
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.restart_terminal(cx);
                             })),
                     )
                     .child(
@@ -174,7 +219,7 @@ impl Browser {
                     .when(focused, |el| {
                         el.border_1().border_color(palette.cursor.opacity(0.55))
                     })
-                    .child(self.render_terminal_preview(cwd, palette)),
+                    .child(self.render_terminal_content(cwd, palette)),
             )
     }
 
@@ -215,28 +260,42 @@ impl Browser {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal_sync(cx)))
     }
 
-    fn render_terminal_preview(
+    fn render_terminal_content(
         &self,
         cwd: SharedString,
         palette: crate::theme::TerminalPalette,
     ) -> impl IntoElement {
-        let prompt = SharedString::from(format!("ferret {} % ", cwd));
-        v_flex()
-            .gap(px(3.))
-            .child(
+        let snapshot = self
+            .terminal_session
+            .as_ref()
+            .map(TerminalSession::snapshot);
+        let mut body = v_flex().gap(px(1.)).font_family("monospace");
+        if let Some(error) = &self.terminal_error {
+            return body.child(
                 div()
-                    .child("$ cd ")
-                    .child(cwd)
-                    .text_color(palette.bright_black),
-            )
-            .child(
-                h_flex().items_center().child(div().child(prompt)).child(
+                    .text_color(palette.bright_red)
+                    .child(SharedString::from(error.clone())),
+            );
+        }
+        if let Some(snapshot) = snapshot {
+            for line in snapshot.lines {
+                body = body.child(
                     div()
-                        .ml(px(1.))
-                        .w(px(7.))
                         .h(px(16.))
-                        .bg(palette.cursor.opacity(0.85)),
-                ),
-            )
+                        .whitespace_nowrap()
+                        .child(SharedString::from(if line.is_empty() {
+                            " "
+                        } else {
+                            &line
+                        })),
+                );
+            }
+            return body;
+        }
+        body.child(
+            div()
+                .text_color(palette.bright_black)
+                .child(SharedString::from(format!("Starting terminal in {cwd}…"))),
+        )
     }
 }

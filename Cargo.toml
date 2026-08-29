@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ferret", "crates/ferret-platform",
     "crates/ferret-settings",
+    "crates/ferret-terminal",
     "crates/ferret-ui",
     "crates/ferret-vfs",
     "xtask",
@@ -44,14 +45,17 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 ferret-platform = { path = "crates/ferret-platform" }
 ferret-ui = { path = "crates/ferret-ui" }
 ferret-settings = { path = "crates/ferret-settings" }
+ferret-terminal = { path = "crates/ferret-terminal" }
 ferret-vfs = { path = "crates/ferret-vfs" }
 
 anyhow = "1"
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 async-trait = "0.1"
 async-channel = "2"
 dirs = "6"
 futures = "0.3"
 notify = "7"
+portable-pty = "=0.9.0"
 rust-embed = "8"
 smol = "2"
 thiserror = "2"

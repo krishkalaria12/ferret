@@ -91,6 +91,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let terminal_dir = dir.clone();
         self.record_current_view(cx);
         let current = self.active().folder.read(cx).dir.clone();
         let (folder, pane, mode, subscriptions) = self.build_tab_entities(dir, window, cx);
@@ -120,6 +121,7 @@ impl Browser {
         self.filter_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
+        self.sync_terminal_to(&terminal_dir, cx);
         cx.notify();
     }
 

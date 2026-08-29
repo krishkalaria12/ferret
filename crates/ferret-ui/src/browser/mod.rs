@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use ferret_platform::Place;
 use ferret_settings::{FolderView, SortKey, SortOrder, ThemeChoice, ViewMode};
+use ferret_terminal::TerminalSession;
 use ferret_vfs::{Vfs as _, VfsPath};
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
@@ -163,6 +164,10 @@ pub struct Browser {
     terminal_drag: Option<TerminalDrag>,
     terminal_sync: TerminalSyncState,
     terminal_focus: gpui::FocusHandle,
+    terminal_session: Option<TerminalSession>,
+    terminal_error: Option<String>,
+    terminal_generation: u64,
+    _terminal_poll: Option<gpui::Task<()>>,
     /// Index of the tab currently being dragged, if any.
     tab_drag: Option<usize>,
     /// Index of the favourite currently being dragged, if any.
@@ -291,6 +296,10 @@ impl Browser {
             terminal_drag: None,
             terminal_sync: TerminalSyncState::from_default(terminal_settings.sync_default),
             terminal_focus: cx.focus_handle(),
+            terminal_session: None,
+            terminal_error: None,
+            terminal_generation: 0,
+            _terminal_poll: None,
             tab_drag: None,
             favorite_drag: None,
             tab_lefts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -302,6 +311,35 @@ impl Browser {
             sidebar_focus: cx.focus_handle(),
         };
         this.push_tab(start_directory(), window, cx);
+        if this.terminal_visible {
+            this.restart_terminal(cx);
+        }
+        this._terminal_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if !this.terminal_visible {
+                            return;
+                        }
+                        let generation = this
+                            .terminal_session
+                            .as_ref()
+                            .map(|session| session.snapshot().generation)
+                            .unwrap_or(0);
+                        if generation != this.terminal_generation {
+                            this.terminal_generation = generation;
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        }));
         this
     }
 

@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ferret-platform.workspace = true
 ferret-settings.workspace = true
+ferret-terminal.workspace = true
 ferret-vfs.workspace = true
 futures.workspace = true
 gpui.workspace = true
