@@ -103,6 +103,16 @@ pub trait Vfs: Send + Sync + 'static {
         })
     }
 
+    /// Whether anything is at `path` — a file, a directory, or a broken
+    /// symlink, which is still something.
+    ///
+    /// Its own method rather than `metadata(..).is_ok()` so a backend can
+    /// answer it more cheaply than a full stat, and so callers do not have to
+    /// pretend they wanted the metadata.
+    async fn exists(&self, path: &VfsPath) -> bool {
+        self.metadata(path).await.is_ok()
+    }
+
     /// Resolve symlinks and relative segments to a stable identity.
     ///
     /// Used for the per-folder preference key, so two routes to one directory

@@ -290,16 +290,67 @@ impl Browser {
         // Both directories are watched, so the rows follow on their own.
     }
 
+    /// Copy or cut the selection to the **system** pasteboard (D-42).
+    ///
+    /// Two entries are written. `ExternalPaths` is the one that means "these
+    /// are files" to another application; the newline-joined string is what
+    /// makes pasting into a terminal, a Save dialog or a text field give you
+    /// the paths. See [`read_clipboard_paths`] for which of the two survives
+    /// on the pinned GPUI revision.
+    ///
+    /// Whether this was a cut stays a process-local flag beside the write:
+    /// macOS has no pasteboard representation for it, and Finder does the same
+    /// thing — a "cut" there is a copy plus a move-on-paste decided by the
+    /// receiving side.
     pub(super) fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) {
         let paths = self.active().pane.read(cx).selected_paths(cx);
-        if !paths.is_empty() {
-            self.clipboard = Some((paths, cut));
+        if paths.is_empty() {
+            return;
         }
+
+        let locals: Vec<std::path::PathBuf> = paths
+            .iter()
+            .filter_map(|p| p.as_local().map(Path::to_path_buf))
+            .collect();
+        if !locals.is_empty() {
+            let text = locals
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n");
+            cx.write_to_clipboard(gpui::ClipboardItem {
+                entries: vec![
+                    gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                        locals.into_iter().collect(),
+                    )),
+                    gpui::ClipboardEntry::String(gpui::ClipboardString::new(text)),
+                ],
+            });
+        }
+
+        // Kept alongside, not instead: the pasteboard cannot carry the cut
+        // flag, and a remote path has nothing to put on it at all.
+        self.clipboard = Some((paths, cut));
     }
 
     pub(super) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((sources, cut)) = self.clipboard.take() else {
-            return;
+        // The system pasteboard wins when it holds something newer than our
+        // own last copy — which is how a copy in Finder, in another Ferret
+        // window, or in any application that puts files on the pasteboard
+        // becomes a paste here (D-42). Falling back to the local clipboard
+        // covers a remote path, which has no pasteboard representation.
+        let from_system = read_clipboard_paths(cx);
+        let (sources, cut) = match (from_system, self.clipboard.take()) {
+            (Some(system), local) => {
+                // A cut is only ours to know about, and only if the pasteboard
+                // still holds the same paths we put there.
+                let cut = local
+                    .filter(|(paths, _)| *paths == system)
+                    .is_some_and(|(_, cut)| cut);
+                (system, cut)
+            }
+            (None, Some((local, cut))) => (local, cut),
+            (None, None) => return,
         };
         let restore_on_copy = (!cut).then(|| sources.clone());
         let dest_dir = self.active().folder.read(cx).dir.clone();
@@ -316,6 +367,12 @@ impl Browser {
         cx.spawn(async move |_, cx| {
             let mut failures = Vec::new();
             for (src, target) in planned {
+                // Checked here rather than on the window thread: a pasteboard
+                // full of prose produces lines that look like paths, and this
+                // is where a `stat` is allowed to be slow.
+                if !fs.exists(&src).await {
+                    continue;
+                }
                 let dest = dest_dir.join(&target);
 
                 let result = match fs.copy(&src, &dest).await {
@@ -491,4 +548,52 @@ impl Browser {
             }
         }));
     }
+}
+
+/// Whatever files the system pasteboard is holding.
+///
+/// Two shapes are accepted because only one of them round-trips today:
+///
+/// * `ExternalPaths` is what Finder and every other well-behaved application
+///   writes, and GPUI reads it correctly — so **copying in Finder and pasting
+///   in Ferret works**.
+/// * The newline-joined string is the fallback, and it is what makes
+///   **Ferret → Ferret** work. The pinned GPUI revision's macOS pasteboard
+///   *write* for `ExternalPaths` is an empty match arm
+///   (`gpui_macos/src/pasteboard.rs`), so what Ferret puts on the pasteboard
+///   today is only the string half. Ferret → Finder therefore does not yet
+///   move files; the entry is written anyway, so it starts working the day
+///   that arm is implemented.
+///
+/// Lines are filtered structurally — absolute, non-empty — and **not** by
+/// asking the filesystem whether they exist. This runs on the window thread
+/// from an action handler, and a `stat` there is the thing A-25 was about: one
+/// pasted path pointing into a dropped network mount would block the window.
+/// The paste task checks existence instead, where the I/O belongs, so pasting
+/// a paragraph of prose still does nothing.
+fn read_clipboard_paths(cx: &App) -> Option<Vec<VfsPath>> {
+    let item = cx.read_from_clipboard()?;
+
+    for entry in item.entries() {
+        if let gpui::ClipboardEntry::ExternalPaths(paths) = entry {
+            let paths: Vec<VfsPath> = paths.paths().iter().map(VfsPath::local).collect();
+            if !paths.is_empty() {
+                return Some(paths);
+            }
+        }
+    }
+
+    let text = item.entries().iter().find_map(|entry| match entry {
+        gpui::ClipboardEntry::String(s) => Some(s.text()),
+        _ => None,
+    })?;
+    let paths: Vec<VfsPath> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(std::path::Path::new)
+        .filter(|path| path.is_absolute())
+        .map(VfsPath::local)
+        .collect();
+    (!paths.is_empty()).then_some(paths)
 }

@@ -412,6 +412,37 @@ mod tests {
         assert!(message.contains("a failed"), "the first error survives");
     }
 
+    /// The string half of the clipboard, which is what actually round-trips
+    /// on the pinned GPUI revision (D-42).
+    fn paths_from_text(text: &str) -> Vec<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(std::path::Path::new)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn pasted_text_is_only_taken_as_paths_when_it_looks_like_paths() {
+        // What Ferret itself writes, and what a terminal would paste back.
+        assert_eq!(
+            paths_from_text("/a/one.txt\n/a/two.txt"),
+            ["/a/one.txt", "/a/two.txt"]
+        );
+        // Blank lines and stray indentation survive a trip through a text
+        // editor without becoming empty paths.
+        assert_eq!(paths_from_text("\n  /a/one.txt  \n\n"), ["/a/one.txt"]);
+
+        // Ordinary prose is not a file list. Relative fragments are dropped
+        // here; anything that survives and is not real is dropped by the
+        // paste task's existence check, off the window thread.
+        assert!(paths_from_text("Dear Sir or Madam,\n\nI write to you").is_empty());
+        assert!(paths_from_text("notes.txt").is_empty(), "not absolute");
+        assert!(paths_from_text("").is_empty());
+    }
+
     #[test]
     fn success_produces_no_toast() {
         assert_eq!(summarize_failures("paste", &[]), None);
