@@ -35,6 +35,7 @@
 //! when a second service crate needs them — not before.
 
 pub mod config;
+pub mod pool;
 pub mod watch;
 
 mod entry;

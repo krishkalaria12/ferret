@@ -5,6 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::stream::StreamExt;
+use rayon::prelude::*;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -35,11 +36,15 @@ impl Vfs for LocalFs {
             permissions: true,
             atomic_rename: true,
             watch: true,
-            // `std::fs::DirEntry::metadata` costs an extra stat on Unix, but on
-            // Windows it is served from the data `FindFirstFileEx` already
-            // returned. We fill it inline either way and let the platform
-            // decide what that costs — see the module tests.
-            metadata_in_listing: cfg!(windows),
+            // True on both platforms now (D-33). On Windows it always was:
+            // `FindFirstFileEx` returns size, times and attributes with the
+            // name. On Unix it is an extra `stat` per entry, but those stats
+            // run in parallel on Ferret's own pool as each batch is read, so
+            // the row is complete when it appears instead of filling in for
+            // the next two minutes. The flag stays because a remote backend,
+            // where a second round trip is genuinely expensive, will want to
+            // say `false` and let the file pane chase metadata separately.
+            metadata_in_listing: true,
         }
     }
 
@@ -51,7 +56,6 @@ impl Vfs for LocalFs {
         };
 
         let (tx, rx) = async_channel::bounded::<Result<DirEntryBatch>>(LISTING_BUFFER);
-        let fill_metadata = cfg!(windows);
 
         // The walk is blocking, so it runs on the blocking pool. `send_blocking`
         // parks when the consumer is behind and fails once the receiver drops —
@@ -66,13 +70,13 @@ impl Vfs for LocalFs {
                     }
                 };
 
-                let mut batch = Vec::with_capacity(LISTING_BATCH_SIZE);
+                let mut pending = Vec::with_capacity(LISTING_BATCH_SIZE);
                 for item in iter {
                     let entry = match item {
                         Ok(entry) => entry,
                         Err(source) => {
-                            if !batch.is_empty()
-                                && tx.send_blocking(Ok(std::mem::take(&mut batch))).is_err()
+                            if !pending.is_empty()
+                                && tx.send_blocking(Ok(resolve(&mut pending))).is_err()
                             {
                                 return;
                             }
@@ -86,17 +90,17 @@ impl Vfs for LocalFs {
                         }
                     };
 
-                    batch.push(convert(entry, fill_metadata));
-                    if batch.len() < LISTING_BATCH_SIZE {
+                    pending.push(entry);
+                    if pending.len() < LISTING_BATCH_SIZE {
                         continue;
                     }
-                    if tx.send_blocking(Ok(std::mem::take(&mut batch))).is_err() {
+                    if tx.send_blocking(Ok(resolve(&mut pending))).is_err() {
                         return; // consumer went away: stop walking.
                     }
                 }
 
-                if !batch.is_empty() {
-                    let _ = tx.send_blocking(Ok(batch));
+                if !pending.is_empty() {
+                    let _ = tx.send_blocking(Ok(resolve(&mut pending)));
                 }
             })
             .await;
@@ -283,7 +287,26 @@ impl Vfs for LocalFs {
     }
 }
 
-fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
+/// Turn one batch of directory entries into rows, resolving every syscall
+/// they need in parallel (D-33).
+///
+/// This is where `metadata_in_listing` becomes true on Unix. Each entry needs
+/// up to three calls — `stat` for size and dates, a second `stat` to tell a
+/// working symlink from a broken one, and `readlink` for the broken ones — and
+/// they are independent, so they run across Ferret's pool rather than one
+/// after another on this thread.
+///
+/// Batch-at-a-time rather than whole-listing-at-a-time keeps two promises: the
+/// first rows still arrive after `LISTING_BATCH_SIZE` names rather than after
+/// the whole directory, and a dropped stream leaves at most one batch of
+/// stats in flight rather than a directory's worth.
+fn resolve(entries: &mut Vec<fs::DirEntry>) -> DirEntryBatch {
+    let batch = std::mem::take(entries);
+    entries.reserve(LISTING_BATCH_SIZE);
+    crate::pool::install(move || batch.into_par_iter().map(convert).collect())
+}
+
+fn convert(entry: fs::DirEntry) -> Entry {
     // `DirEntry::path` joins the parent and file name. Keep that allocation
     // alive for every path-dependent operation below rather than rebuilding it
     // for symlink resolution and broken-link reporting.
@@ -314,11 +337,10 @@ fn convert(entry: fs::DirEntry, fill_metadata: bool) -> Entry {
         None => EntryKind::Other,
     };
 
-    let metadata = if fill_metadata {
-        entry.metadata().ok().map(|md| to_metadata(&md, &path))
-    } else {
-        None
-    };
+    // Always, on both platforms (D-33). On Windows this is served from what
+    // `FindFirstFileEx` already returned; on Unix it is a `stat`, running here
+    // on a pool thread rather than on the file pane's second pass.
+    let metadata = entry.metadata().ok().map(|md| to_metadata(&md, &path));
 
     // One `readlink`, and only for links that resolve to nothing — the row
     // has to name what it is pointing at.

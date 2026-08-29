@@ -1875,6 +1875,7 @@ dependencies = [
  "futures",
  "notify",
  "parking_lot",
+ "rayon",
  "serde",
  "serde_json",
  "smol",

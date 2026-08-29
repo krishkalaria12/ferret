@@ -36,6 +36,23 @@ pub const WATCH_EVENT_BUFFER: usize = 64;
 /// for a complete directory walk.
 pub const LISTING_BATCH_SIZE: usize = 4_096;
 
+/// Threads in Ferret's own worker pool ([`crate::pool`]).
+///
+/// Sized from the machine rather than fixed, but bounded: the work on this
+/// pool is `stat`-bound rather than CPU-bound, so past a point more threads
+/// only add contention with smol's blocking pool and GPUI's executor, which
+/// are also sized from the core count.
+pub fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .clamp(2, MAX_WORKER_THREADS)
+}
+
+/// Ceiling for [`worker_threads`]. A 64-core machine gains nothing from 64
+/// threads issuing `stat` calls at one disk.
+pub const MAX_WORKER_THREADS: usize = 16;
+
 /// Paths resolved by one [`crate::Vfs::metadata_batch`] call.
 ///
 /// A batch amortises the dispatch to a blocking pool without holding back so

@@ -174,7 +174,12 @@ impl Folder {
         // stability buys nothing but an n/2 scratch buffer.
         let slab: &[Option<Entry>] = &self.slab;
         if ids.len() >= PARALLEL_SORT_THRESHOLD {
-            ids.par_sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order));
+            // On Ferret's pool, not rayon's global one: a bare `par_sort`
+            // would spin up a second pool alongside the one the listing walk
+            // uses (`ferret_vfs::pool`).
+            ferret_vfs::pool::install(|| {
+                ids.par_sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order))
+            });
         } else {
             ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order));
         }

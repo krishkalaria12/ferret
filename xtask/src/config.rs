@@ -61,8 +61,13 @@ pub const FLAT_TOTAL_BUDGET: Duration = Duration::from_secs(3);
 /// is a file list or a file list that fills itself in for the next two minutes
 /// (`docs/audit.html` §11). It is what A-03 destroyed and what D-33 fixes, and
 /// on a backend that resolves metadata during the walk it collapses into
-/// [`FLAT_TOTAL_BUDGET`].
-pub const FLAT_POPULATED_BUDGET: Duration = Duration::from_secs(5);
+/// [`FLAT_TOTAL_BUDGET`], which is what `LocalFs` does since D-33.
+///
+/// Measured at ~290 ms warm. Set to match [`FLAT_TOTAL_BUDGET`] rather than
+/// tighter: it has to survive a cold cache on a slow disk, where the stats
+/// this now does inline are the whole cost. It stays a separate number because
+/// a remote backend will make the two diverge again.
+pub const FLAT_POPULATED_BUDGET: Duration = Duration::from_secs(3);
 
 /// Runs per fixture; the reported figure is the median.
 ///

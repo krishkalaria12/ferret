@@ -279,6 +279,13 @@ impl Folder {
         .detach();
     }
 
+    /// Chase whatever the listing did not fill in.
+    ///
+    /// Dead against `LocalFs` since D-33: it resolves metadata during the walk
+    /// and reports `metadata_in_listing`, so this returns immediately. It stays
+    /// for the backend that will not — a remote mount, where a second round
+    /// trip per entry is expensive enough that the `Vfs` contract lets the
+    /// backend decline and hand the work here instead.
     pub(super) fn start_metadata_backfill(&mut self, cx: &mut Context<Self>) {
         if !self.profile.metadata {
             // Nothing on screen draws a size or a date, so nothing is worth a
@@ -287,7 +294,7 @@ impl Folder {
         }
         let fs = cx.global::<crate::state::FerretState>().fs;
         if fs.capabilities().metadata_in_listing {
-            return; // Windows filled it during the walk.
+            return; // The walk already filled it.
         }
 
         let generation = self.generation;
