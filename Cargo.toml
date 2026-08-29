@@ -82,6 +82,14 @@ dirs = "6"
 # server-supplied names, that map wants a seeded hasher instead — see §9.
 foldhash = "0.2"
 futures = "0.3"
+# A-27 / D-39. Every date the app shows is a *local* civil date, and the
+# offset for a given instant depends on the user's zone and on whether that
+# instant was in daylight saving — a rules file IANA revises several times a
+# year. `jiff` reads the system zoneinfo directly, where chrono and time each
+# need a companion crate to do the same. Formatting is still Ferret's own
+# (`format::format_date`); this owns the conversion, which is the part that
+# cannot be hand-rolled correctly.
+jiff = "0.2"
 # D-34. Parallel enumeration for bulk file work — the tree copy today, and
 # folder-size-on-demand and the operations queue's conflict scan when those
 # land. Deliberately *not* used for the single-directory listing (one directory

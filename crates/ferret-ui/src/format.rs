@@ -1,9 +1,15 @@
 //! Display formatting: sizes, dates and natural name order.
 //!
-//! No date library — civil-from-days is thirty lines (Howard Hinnant's
-//! algorithm) and keeps the dependency tree honest. Tabular alignment comes
-//! from the caller's font styling, not from padding here.
+//! The layout of a date is Ferret's own — `25 Aug 2026 at 12:34`, thirty lines
+//! of Howard Hinnant's civil-from-days, no library needed. Working out *which*
+//! civil date an instant falls on is not, and that is what `jiff` is here for
+//! (D-39): the answer depends on the user's zone and on whether that instant
+//! was in daylight saving, and the rules change several times a year.
+//!
+//! Tabular alignment comes from the caller's font styling, not from padding
+//! here.
 
+use jiff::{Timestamp, tz::TimeZone};
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,15 +55,43 @@ pub fn format_size(len: u64) -> String {
     out
 }
 
-/// `25 Aug 2026 at 12:34` — the mockup's status format.
+/// `25 Aug 2026 at 12:34`, in the user's own time zone.
+///
+/// A file saved a minute ago has to read as a minute ago. Formatting the UTC
+/// civil date instead — which is what this did until D-39 — puts every row in
+/// the Date Modified column hours out, and in half the world's zones on the
+/// wrong day (A-27).
 pub fn format_date(t: SystemTime) -> String {
+    format_date_in(t, &TimeZone::system())
+}
+
+/// [`format_date`] against an explicit zone.
+///
+/// Exists so the tests can assert a real offset without touching the process
+/// environment: `TimeZone::system()` resolves `TZ` once and caches it, so a
+/// test that set the variable would be both racy under a threaded runner and
+/// unable to check a second zone.
+fn format_date_in(t: SystemTime, tz: &TimeZone) -> String {
+    // Seconds since the epoch, which is what both the UTC fallback and jiff
+    // want. `duration_since` fails only for a pre-1970 timestamp, which no
+    // filesystem in play produces; that falls back to the epoch as before.
     let secs = t
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
+    // The local wall-clock reading of that instant. A timestamp jiff cannot
+    // represent — beyond year 9999 — keeps the old UTC arithmetic rather than
+    // failing to draw a row.
+    let (days, rem) = match Timestamp::from_second(secs) {
+        Ok(ts) => {
+            let zoned = ts.to_zoned(tz.clone());
+            let local = zoned.timestamp().as_second() + i64::from(zoned.offset().seconds());
+            (local.div_euclid(86_400), local.rem_euclid(86_400))
+        }
+        Err(_) => (secs.div_euclid(86_400), secs.rem_euclid(86_400)),
+    };
+
     let (h, m) = (rem / 3600, (rem % 3600) / 60);
     let (y, mo, d) = civil_from_days(days);
 
@@ -249,16 +283,64 @@ mod tests {
         assert_eq!(format_size(1024 * 1024 * 3), "3 MB");
     }
 
+    /// 2026-08-25 12:34:00 UTC.
+    fn noon() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_787_661_240)
+    }
+
+    fn zone(name: &str) -> TimeZone {
+        TimeZone::get(name).expect("the system tz database must know this zone")
+    }
+
     #[test]
     fn dates_render_in_civil_time() {
-        // 2026-08-25 12:34 UTC
-        let t = UNIX_EPOCH + Duration::from_secs(1_787_661_240);
-        assert_eq!(format_date(t), "25 Aug 2026 at 12:34");
+        assert_eq!(
+            format_date_in(noon(), &TimeZone::UTC),
+            "25 Aug 2026 at 12:34"
+        );
         // The epoch itself.
-        assert_eq!(format_date(UNIX_EPOCH), " 1 Jan 1970 at 00:00");
+        assert_eq!(
+            format_date_in(UNIX_EPOCH, &TimeZone::UTC),
+            " 1 Jan 1970 at 00:00"
+        );
         // Leap year day: 2024-02-29.
         let leap = UNIX_EPOCH + Duration::from_secs(1_709_164_800);
-        assert_eq!(format_date(leap), "29 Feb 2024 at 00:00");
+        assert_eq!(format_date_in(leap, &TimeZone::UTC), "29 Feb 2024 at 00:00");
+    }
+
+    #[test]
+    fn dates_are_shown_in_the_users_own_zone() {
+        // The A-27 bug: this read 12:34 everywhere on earth. An offset does
+        // not just move the clock — east of Greenwich it can move the *date*,
+        // which is what made the old behaviour worth calling critical.
+        assert_eq!(
+            format_date_in(noon(), &zone("Asia/Kolkata")),
+            "25 Aug 2026 at 18:04",
+            "+05:30, and a half-hour offset at that"
+        );
+        assert_eq!(
+            format_date_in(noon(), &zone("America/Los_Angeles")),
+            "25 Aug 2026 at 05:34",
+            "-07:00 in August"
+        );
+        assert_eq!(
+            format_date_in(noon(), &zone("Pacific/Kiritimati")),
+            "26 Aug 2026 at 02:34",
+            "+14:00 rolls the date over into the next day"
+        );
+    }
+
+    #[test]
+    fn daylight_saving_is_not_a_fixed_offset() {
+        // The reason this cannot be a constant, and the reason it cannot be
+        // hand-rolled: the same zone is +01:00 in January and +02:00 in July.
+        let berlin = zone("Europe/Berlin");
+        // 2026-01-15 12:00 UTC → 13:00 CET
+        let winter = UNIX_EPOCH + Duration::from_secs(1_768_478_400);
+        assert_eq!(format_date_in(winter, &berlin), "15 Jan 2026 at 13:00");
+        // 2026-07-15 12:00 UTC → 14:00 CEST
+        let summer = UNIX_EPOCH + Duration::from_secs(1_784_116_800);
+        assert_eq!(format_date_in(summer, &berlin), "15 Jul 2026 at 14:00");
     }
 
     #[test]

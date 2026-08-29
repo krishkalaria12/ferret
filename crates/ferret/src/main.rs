@@ -254,6 +254,36 @@ fn apply_startup_theme(cx: &mut App) {
     }
 }
 
+/// Keep the window's theme in step with the OS while Ferret runs (A-31).
+///
+/// `apply_startup_theme` reads the appearance once, which is not what
+/// `theme: "system"` promises — and "system" is the default, so before this
+/// every user on macOS's own Auto appearance had a window that was the wrong
+/// colour for half of each day.
+///
+/// Guarded on the setting rather than always following: someone who has
+/// explicitly chosen Light or Dark has said they do not want the OS deciding,
+/// and that has to survive sunset. The check is inside the callback, not
+/// outside it, so changing the setting at runtime takes effect without
+/// re-registering anything.
+fn follow_system_appearance(window: &mut gpui::Window, _cx: &mut App) -> gpui::Subscription {
+    use ferret_settings::ThemeChoice;
+    use gpui_component::Theme;
+
+    window.observe_window_appearance(|window, cx| {
+        let follows = matches!(
+            cx.global::<FerretState>().settings.appearance.theme,
+            ThemeChoice::System
+        );
+        if follows {
+            // `Some(window)` rather than `None`: the library reads the
+            // window's own appearance when it has one, which is the value
+            // that just changed.
+            Theme::sync_system_appearance(Some(window), cx);
+        }
+    })
+}
+
 /// Whether to draw the window translucent over a blurred desktop.
 ///
 /// Requested in settings *and* supported by the platform. Blur is a macOS
@@ -323,6 +353,14 @@ fn open_main_window(cx: &mut App) {
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open the Ferret window");
+
+        // Detached rather than held: the observer lives in the window's own
+        // subscriber set, so it is dropped when the window is. Holding the
+        // handle here would only add a second thing to keep alive for exactly
+        // as long.
+        let _ = window.update(cx, |_, window, cx| {
+            follow_system_appearance(window, cx).detach();
+        });
 
         // Asked for a second time, after the renderer exists. This does not
         // currently change anything — see `vibrancy` — but it is the call the
