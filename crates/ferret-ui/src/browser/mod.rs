@@ -36,7 +36,7 @@ use gpui_component::{
 };
 
 use crate::actions;
-use crate::folder::{Folder, FolderEvent};
+use crate::folder::{Folder, FolderEvent, ListingProfile};
 use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
 use crate::state::FerretState;

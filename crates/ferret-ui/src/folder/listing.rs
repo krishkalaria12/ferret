@@ -202,6 +202,12 @@ impl Folder {
     }
 
     fn attach_watch(&mut self, cx: &mut Context<Self>) {
+        if !self.profile.watch {
+            // A listing nobody is working in does not hold a subscription
+            // (A-14) — and on macOS every registration costs the directories
+            // that *are* being worked in a gap in delivery.
+            return;
+        }
         let fs = cx.global::<crate::state::FerretState>().fs;
         let watch = match fs.watch(&self.dir) {
             Ok(watch) => watch,

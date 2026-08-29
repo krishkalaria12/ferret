@@ -94,6 +94,51 @@ pub enum FolderEvent {
     Gone,
 }
 
+/// What a consumer of a listing actually needs from it (A-14).
+///
+/// A `Folder` had one lifecycle and every consumer paid for all of it.
+/// Pressing Cmd-2 in a large directory built three ancestor `Folder`s and each
+/// one attached an OS watcher, started a full metadata backfill and resolved
+/// platform icons — for a column that draws an icon, a name and a chevron, and
+/// that is thrown away the moment you leave column view.
+///
+/// The same seam is what Phase 2's terminal will want when it needs to know
+/// about a directory it is not rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListingProfile {
+    /// Fill in size and modification dates. The Size and Date columns need
+    /// this; a listing that draws neither does not, and on macOS it is one
+    /// `stat` per entry.
+    pub metadata: bool,
+    /// Keep the listing live against the filesystem. Every watch is a
+    /// subscription in the registry, and on macOS registering one briefly
+    /// interrupts delivery to every other watched directory
+    /// (`ferret_vfs::watch`), so a listing nobody is editing should not hold
+    /// one.
+    pub watch: bool,
+    /// Ask the platform for real Finder/Explorer icons. Deduplicated by type,
+    /// but still a pass over the listing.
+    pub icons: bool,
+}
+
+impl ListingProfile {
+    /// Everything: the directory the user is actually browsing.
+    pub const BROWSING: Self = Self {
+        metadata: true,
+        watch: true,
+        icons: true,
+    };
+
+    /// Names and icons, no metadata and no watch — an ancestor column in
+    /// column view, which exists to be read as a path rather than worked in.
+    /// Icons stay because the column draws them.
+    pub const NAVIGATING: Self = Self {
+        metadata: false,
+        watch: false,
+        icons: true,
+    };
+}
+
 /// The stable identity of one loaded entry within one [`Folder`] (D-36).
 ///
 /// Not a display row, and not an index into any listing: it is a slot in the
@@ -203,6 +248,8 @@ pub struct Folder {
     sort_order: SortOrder,
     show_hidden: bool,
     filter: Option<sort::NameFilter>,
+    /// Which parts of the listing lifecycle this folder runs (A-14).
+    profile: ListingProfile,
 
     selection: FastSet<EntryId>,
     /// Selected paths in display order. This is kept separately from
@@ -229,9 +276,16 @@ pub struct Folder {
 }
 
 impl Folder {
-    pub fn new(dir: VfsPath, sort_key: SortKey, sort_order: SortOrder, show_hidden: bool) -> Self {
+    pub fn new(
+        dir: VfsPath,
+        sort_key: SortKey,
+        sort_order: SortOrder,
+        show_hidden: bool,
+        profile: ListingProfile,
+    ) -> Self {
         Self {
             dir,
+            profile,
             slab: Vec::new(),
             free: Vec::new(),
             entries: Vec::new(),

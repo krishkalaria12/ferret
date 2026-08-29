@@ -48,7 +48,19 @@ impl FilePane {
         });
 
         for (parent, on_path) in ancestor_chain(&dir, MAX_ANCESTOR_COLUMNS) {
-            let folder = cx.new(|_| Folder::new(parent, sort_key, sort_order, show_hidden));
+            // Navigating, not browsing: an ancestor column draws an icon, a
+            // name and a chevron, and is thrown away when column view is left.
+            // It has no Size or Date column to fill, and nothing is edited in
+            // it, so it pays for neither (A-14).
+            let folder = cx.new(|_| {
+                Folder::new(
+                    parent,
+                    sort_key,
+                    sort_order,
+                    show_hidden,
+                    ListingProfile::NAVIGATING,
+                )
+            });
             folder.update(cx, |f, cx| f.start_loading(cx));
             let scroll = gpui::UniformListScrollHandle::new();
             // Repaint as each ancestor's rows land, and bring the on-path

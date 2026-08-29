@@ -258,6 +258,9 @@ impl Folder {
     /// calls even for a 200,000-entry directory, and it runs off the render
     /// path — a row draws the bundled icon until the real one lands.
     pub(super) fn request_os_icons(&mut self, cx: &mut Context<Self>) {
+        if !self.profile.icons {
+            return;
+        }
         let provider = cx.global::<crate::state::FerretState>().os_icons.clone();
         let wanted = crate::icons::collect_os_icon_requests(
             self.slab.iter().filter_map(Option::as_ref),
@@ -277,6 +280,11 @@ impl Folder {
     }
 
     pub(super) fn start_metadata_backfill(&mut self, cx: &mut Context<Self>) {
+        if !self.profile.metadata {
+            // Nothing on screen draws a size or a date, so nothing is worth a
+            // `stat` per entry (A-14).
+            return;
+        }
         let fs = cx.global::<crate::state::FerretState>().fs;
         if fs.capabilities().metadata_in_listing {
             return; // Windows filled it during the walk.

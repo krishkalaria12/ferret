@@ -47,7 +47,15 @@ impl Browser {
             )
         };
 
-        let folder = cx.new(|_| Folder::new(dir.clone(), sort_key, sort_order, show_hidden));
+        let folder = cx.new(|_| {
+            Folder::new(
+                dir.clone(),
+                sort_key,
+                sort_order,
+                show_hidden,
+                ListingProfile::BROWSING,
+            )
+        });
         folder.update(cx, |f, cx| f.start_loading(cx));
 
         let pane = cx.new(|cx| FilePane::new(folder.clone(), mode, &hidden_columns, window, cx));

@@ -43,6 +43,7 @@ fn populated() -> Folder {
         SortKey::Name,
         SortOrder::Ascending,
         false,
+        ListingProfile::BROWSING,
     );
     plant(
         &mut f,
@@ -117,6 +118,7 @@ fn kind_sort_groups_by_the_cached_extension() {
         SortKey::Kind,
         SortOrder::Ascending,
         true,
+        ListingProfile::BROWSING,
     );
     plant(
         &mut f,
@@ -207,6 +209,7 @@ fn a_non_ascii_needle_still_folds_case() {
         SortKey::Name,
         SortOrder::Ascending,
         true,
+        ListingProfile::BROWSING,
     );
     plant(
         &mut f,
@@ -550,6 +553,7 @@ fn extending_in_an_empty_folder_is_harmless() {
         SortKey::Name,
         SortOrder::Ascending,
         false,
+        ListingProfile::BROWSING,
     );
     f.loading = false;
     assert_eq!(f.extend_cursor(1), None);
@@ -726,6 +730,7 @@ fn symlinked_directories_sort_as_directories() {
         SortKey::Name,
         SortOrder::Ascending,
         true,
+        ListingProfile::BROWSING,
     );
     plant(
         &mut f,
@@ -759,6 +764,7 @@ fn reindex_cost_on_a_large_listing() {
         SortKey::Name,
         SortOrder::Ascending,
         true,
+        ListingProfile::BROWSING,
     );
     plant(
         &mut f,
@@ -788,6 +794,7 @@ fn sort_and_filter_cost_on_a_large_listing() {
         SortKey::Name,
         SortOrder::Ascending,
         true,
+        ListingProfile::BROWSING,
     );
     plant(
         &mut f,

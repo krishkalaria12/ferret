@@ -36,7 +36,7 @@ use gpui_component::{
 };
 
 use crate::actions;
-use crate::folder::{Folder, FolderEvent};
+use crate::folder::{Folder, FolderEvent, ListingProfile};
 use crate::format::{format_date, format_size};
 use crate::state::FerretState;
 use crate::theme::BrowserPalette;
