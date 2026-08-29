@@ -6,6 +6,13 @@
 //! from `cx.theme()`, and only what `gpui-component` has no concept of lives
 //! in [`theme`].
 
+// The allocations-per-frame budget's counting allocator (`docs/audit.html`
+// §11). Test builds only, and only with `--features dhat-heap`; a release
+// binary never sees it.
+#[cfg(all(test, feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 pub mod actions;
 mod assets;
 mod browser;

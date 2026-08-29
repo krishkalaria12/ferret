@@ -36,6 +36,15 @@ pub const WATCH_EVENT_BUFFER: usize = 64;
 /// for a complete directory walk.
 pub const LISTING_BATCH_SIZE: usize = 4_096;
 
+/// Paths resolved by one [`crate::Vfs::metadata_batch`] call.
+///
+/// A batch amortises the dispatch to a blocking pool without holding back so
+/// many results that Size and Date appear frozen on a large directory. It
+/// lives here rather than beside the file pane because it is a property of how
+/// `metadata_batch` should be called, and the benchmark has to make the same
+/// call the pane does or it is measuring something else.
+pub const METADATA_BATCH_SIZE: usize = 256;
+
 /// Bytes read when sniffing a file's type or building a preview.
 ///
 /// Nothing may read a whole file speculatively: arrow-keying down a directory

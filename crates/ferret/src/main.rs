@@ -8,6 +8,11 @@ use gpui_component::Root;
 actions!(ferret, [Quit]);
 
 fn main() {
+    // Names the main thread in the profiler timeline. Compiles to nothing
+    // without `--features profile`; see that feature's comment in Cargo.toml.
+    #[cfg(feature = "profile")]
+    profiling::register_thread!("main");
+
     // `Assets` supplies the SVGs behind `IconName` and Ferret's own icons;
     // without it every icon renders blank.
     gpui_platform::application()

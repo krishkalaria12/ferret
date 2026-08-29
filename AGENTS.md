@@ -62,6 +62,12 @@ cheaper to satisfy now than to retrofit.
    back to permanent deletion.
 6. **Run it.** `cargo check` passing proves nothing about GPUI: every failure
    mode in the bootstrap contract below is silent at compile time.
+7. **No per-frame work may be O(the directory).** A `Render` impl, a table
+   delegate method, or anything they call may not scan, clone or re-derive
+   something proportional to the number of entries. Six of the twenty-six
+   findings in `docs/audit.html` were this one rule, and unlike a timing
+   budget it is checkable by reading a diff rather than by how fast the
+   reviewer's machine is. `just budget` is the mechanical backstop.
 
 ### Finished when
 
@@ -170,7 +176,9 @@ Windows.
 | `just lint` | `fmt --check` plus `clippy -D warnings`. | Before a PR or after non-trivial changes. |
 | `just test` | Run workspace tests. | When behavior changes or tests are added. |
 | `cargo xtask fixture` | Build the performance fixture. | Once, before benchmarking or testing the file pane. |
-| `cargo xtask bench` | Measure listing performance against budget. | After touching `ferret-vfs` or the file pane. Exits non-zero past budget. |
+| `cargo xtask bench` | Measure listing performance against budget — time to first row, to a full listing, and to one where every row can draw its size and date. | After touching `ferret-vfs` or the file pane. Exits non-zero past budget. |
+| `just budget` | Assert the allocations-per-frame budget (`docs/audit.html` §11) with dhat. Runs alone; installs a global allocator. | After touching anything a `Render` impl or a table delegate calls. |
+| `cargo run --release --features profile` | Frame, layout and paint spans in the Tracy profiler, through GPUI's own instrumentation. | When a stall needs locating rather than guessing at. |
 
 Do not claim a command passed unless you actually ran it. If a command cannot run
 because of the local environment, report the command and the exact blocker.

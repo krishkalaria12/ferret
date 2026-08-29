@@ -4,7 +4,13 @@
 //! algorithm) and keeps the dependency tree honest. Tabular alignment comes
 //! from the caller's font styling, not from padding here.
 
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Widest a formatted size gets: `1023.9 KB` and a terminator's worth of slack.
+const SIZE_CAPACITY: usize = 12;
+/// Widest a formatted date gets: `31 Dec 2026 at 23:59` is 20.
+const DATE_CAPACITY: usize = 24;
 
 /// Human size: `512 B`, `12 KB`, `1.5 MB`, `174 GB`. One decimal only when
 /// the value is fractional and small, matching what Finder shows.
@@ -14,6 +20,12 @@ pub fn format_size(len: u64) -> String {
     const GB: f64 = MB * 1024.0;
     const TB: f64 = GB * 1024.0;
 
+    // Written into a pre-sized buffer rather than `format!`ed. `format!`
+    // guesses a capacity from the format string and reallocates when it is
+    // short, which it is for both of these — two allocations per cell instead
+    // of one, once per visible cell per frame. The §11 allocation budget is
+    // what noticed.
+    let mut out = String::with_capacity(SIZE_CAPACITY);
     let n = len as f64;
     let (value, unit) = if n >= TB {
         (n / TB, "TB")
@@ -24,15 +36,17 @@ pub fn format_size(len: u64) -> String {
     } else if n >= KB {
         (n / KB, "KB")
     } else {
-        return format!("{len} B");
+        let _ = write!(out, "{len} B");
+        return out;
     };
 
     let fractional = (value - value.trunc()).abs() > 0.04;
-    if fractional && value < 10.0 {
-        format!("{value:.1} {unit}")
+    let _ = if fractional && value < 10.0 {
+        write!(out, "{value:.1} {unit}")
     } else {
-        format!("{value:.0} {unit}")
-    }
+        write!(out, "{value:.0} {unit}")
+    };
+    out
 }
 
 /// `25 Aug 2026 at 12:34` — the mockup's status format.
@@ -50,10 +64,14 @@ pub fn format_date(t: SystemTime) -> String {
     static MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    format!(
+    // Pre-sized, for the same reason as `format_size`.
+    let mut out = String::with_capacity(DATE_CAPACITY);
+    let _ = write!(
+        out,
         "{d:>2} {month} {y} at {h:02}:{m:02}",
         month = MONTHS[(mo - 1) as usize]
-    )
+    );
+    out
 }
 
 /// Howard Hinnant's `civil_from_days`: days since 1970-01-01 → (y, m, d).

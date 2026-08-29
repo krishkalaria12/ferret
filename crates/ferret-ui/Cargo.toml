@@ -30,5 +30,20 @@ dirs.workspace = true
 serde_json.workspace = true
 serde = { workspace = true }
 
+dhat = { workspace = true, optional = true }
+
+[features]
+# The allocations-per-frame budget (`docs/audit.html` §11).
+#
+# Installs dhat as the global allocator for the test binary, so it must be run
+# on its own thread to keep other tests' allocations out of the count:
+#
+#     cargo test -p ferret-ui --features dhat-heap \
+#         folder::alloc_budget::frame_allocation_budget -- \
+#         --exact --nocapture --test-threads=1
+#
+# `just budget` does that for you.
+dhat-heap = ["dep:dhat"]
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

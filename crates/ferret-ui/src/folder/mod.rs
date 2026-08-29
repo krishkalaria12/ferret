@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use ferret_settings::{SortKey, SortOrder};
+use ferret_vfs::config::METADATA_BATCH_SIZE;
 use ferret_vfs::{Entry, Vfs, VfsError, VfsPath, WatchEvent};
 use futures::StreamExt;
 use gpui::{Context, EventEmitter};
@@ -33,10 +34,14 @@ mod expansion;
 mod listing;
 mod sort;
 
+#[cfg(all(test, feature = "dhat-heap"))]
+mod alloc_budget;
 #[cfg(test)]
 mod streaming_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod watch_tests;
 
 /// The hasher for every index in this module.
 ///
@@ -50,12 +55,6 @@ type FastSet<T> = HashSet<T, foldhash::fast::RandomState>;
 
 /// How often the metadata backfill reports progress to the UI.
 pub const META_NOTIFY_EVERY: Duration = Duration::from_millis(120);
-
-/// Entries resolved by one metadata blocking-pool task.
-///
-/// A chunk amortises task dispatch without holding back so many updates that
-/// Size and Date appear frozen on a large directory.
-pub const METADATA_BATCH_SIZE: usize = 256;
 
 /// How long a listing may produce nothing before the header admits it is
 /// working (`docs/ui-base.html` §9).

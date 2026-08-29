@@ -26,3 +26,12 @@ fmt:
 
 test:
     cargo test --workspace
+
+# The allocations-per-frame budget (docs/audit.html §11).
+#
+# Its own recipe because it installs a global allocator and therefore has to
+# run alone.
+budget:
+    cargo test -p ferret-ui --features dhat-heap \
+        folder::alloc_budget::frame_allocation_budget -- \
+        --exact --nocapture --test-threads=1
