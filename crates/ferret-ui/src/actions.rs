@@ -15,6 +15,8 @@ pub mod context {
     pub const PATH_BAR: &str = "PathBar";
     /// The sidebar has focus.
     pub const SIDEBAR: &str = "Sidebar";
+    /// The terminal panel has focus.
+    pub const TERMINAL: &str = "Terminal";
     /// `gpui-component`'s table installs this inside the file pane. Ferret
     /// rebinds Tab here so focus can leave the pane instead of walking the
     /// table's columns (§8).
@@ -30,6 +32,9 @@ actions!(
         Refresh,
         ToggleHidden,
         ToggleSidebar,
+        ToggleTerminal,
+        FocusTerminalOrPane,
+        ToggleTerminalSync,
         NewTab,
         CloseTab,
         FocusPathBar,

@@ -44,6 +44,7 @@ mod render;
 mod sidebar;
 mod tab_strip;
 mod tabs;
+mod terminal_panel;
 mod title_bar;
 
 /// How long the volumes list stays cached before the sidebar re-probes.
@@ -156,6 +157,12 @@ pub struct Browser {
     sidebar_animation: Option<gpui::Task<()>>,
     /// Live drag state for the sidebar divider.
     sidebar_drag: Option<SidebarDrag>,
+    terminal_visible: bool,
+    /// Logical pixels, clamped to `settings::MIN/MAX_TERMINAL_HEIGHT`.
+    terminal_height: f32,
+    terminal_drag: Option<TerminalDrag>,
+    terminal_sync: TerminalSyncState,
+    terminal_focus: gpui::FocusHandle,
     /// Index of the tab currently being dragged, if any.
     tab_drag: Option<usize>,
     /// Index of the favourite currently being dragged, if any.
@@ -198,6 +205,35 @@ struct SidebarDrag {
     start_width: f32,
 }
 
+struct TerminalDrag {
+    start_y: gpui::Pixels,
+    start_height: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalSyncState {
+    On,
+    Off,
+}
+
+impl TerminalSyncState {
+    fn from_default(enabled: bool) -> Self {
+        if enabled { Self::On } else { Self::Off }
+    }
+
+    fn is_enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    fn toggle(self) -> Self {
+        if self.is_enabled() {
+            Self::Off
+        } else {
+            Self::On
+        }
+    }
+}
+
 struct PathEdit {
     input: Entity<InputState>,
     _subscription: Subscription,
@@ -238,6 +274,7 @@ impl Browser {
         );
 
         let sidebar_visible = cx.global::<FerretState>().settings.sidebar.visible;
+        let terminal_settings = &cx.global::<FerretState>().settings.terminal;
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -249,6 +286,11 @@ impl Browser {
             sidebar_reveal: if sidebar_visible { 1. } else { 0. },
             sidebar_animation: None,
             sidebar_drag: None,
+            terminal_visible: terminal_settings.visible,
+            terminal_height: terminal_settings.height,
+            terminal_drag: None,
+            terminal_sync: TerminalSyncState::from_default(terminal_settings.sync_default),
+            terminal_focus: cx.focus_handle(),
             tab_drag: None,
             favorite_drag: None,
             tab_lefts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -270,11 +312,12 @@ impl Browser {
     /// as to which one it was, so all three are settled together.
     fn end_drags(&mut self, cx: &mut Context<Self>) {
         self.end_sidebar_drag(cx);
+        self.end_terminal_drag(cx);
         self.end_tab_drag(cx);
         self.end_favorite_drag(cx);
     }
 
-    /// Tab cycles sidebar → path bar → file pane (§8).
+    /// Tab cycles sidebar → path bar → file pane → terminal (§8 plus F-10).
     ///
     /// The path bar only holds focus while it is being edited, so Tab opens
     /// the editor when it lands there rather than skipping a region that
@@ -285,23 +328,45 @@ impl Browser {
         let pane_focus = self.active().pane.read(cx).focus_handle(cx);
         let editing_path = self.path_editing.is_some();
         let on_sidebar = self.sidebar_focus.is_focused(window);
+        let on_terminal = self.terminal_focus.is_focused(window);
 
         // Where focus is now decides where it goes; the sidebar drops out of
-        // the cycle entirely when it is hidden.
+        // the cycle entirely when it is hidden, and the terminal does too
+        // while its panel is closed.
         let next = if forward {
             if on_sidebar {
                 Region::PathBar
             } else if editing_path {
                 Region::Pane
+            } else if on_terminal {
+                if self.sidebar_visible {
+                    Region::Sidebar
+                } else {
+                    Region::PathBar
+                }
+            } else if self.terminal_visible {
+                Region::Terminal
             } else if self.sidebar_visible {
                 Region::Sidebar
             } else {
                 Region::PathBar
             }
-        } else if on_sidebar {
+        } else if on_terminal {
             Region::Pane
+        } else if on_sidebar {
+            if self.terminal_visible {
+                Region::Terminal
+            } else {
+                Region::Pane
+            }
         } else if editing_path && self.sidebar_visible {
             Region::Sidebar
+        } else if editing_path {
+            if self.terminal_visible {
+                Region::Terminal
+            } else {
+                Region::Pane
+            }
         } else {
             Region::PathBar
         };
@@ -315,6 +380,10 @@ impl Browser {
             Region::Pane => {
                 self.cancel_path_edit(cx);
                 window.focus(&pane_focus, cx);
+            }
+            Region::Terminal => {
+                self.cancel_path_edit(cx);
+                window.focus(&self.terminal_focus, cx);
             }
         }
         cx.notify();
@@ -353,6 +422,7 @@ enum Region {
     Sidebar,
     PathBar,
     Pane,
+    Terminal,
 }
 
 trait SortKeyAndOrder {

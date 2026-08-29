@@ -29,6 +29,11 @@
     "show_places": true,
     "show_volumes": true
   },
+  "terminal": {
+    "visible": false,
+    "height": 176.0,
+    "sync_default": true
+  },
   "window": {
     "restore_session": true,
     "default_directory": null

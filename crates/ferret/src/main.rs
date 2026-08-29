@@ -71,6 +71,9 @@ fn bind_keys(cx: &mut App) {
         // could only be toggled from the toolbar button.
         KeyBinding::new("cmd-b", browser_actions::ToggleSidebar, None),
         KeyBinding::new("ctrl-b", browser_actions::ToggleSidebar, None),
+        KeyBinding::new("cmd-j", browser_actions::ToggleTerminal, None),
+        KeyBinding::new("ctrl-j", browser_actions::ToggleTerminal, None),
+        KeyBinding::new("ctrl-`", browser_actions::FocusTerminalOrPane, None),
         KeyBinding::new("cmd-shift-.", browser_actions::ToggleHidden, None),
         KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, None),
         // View modes.

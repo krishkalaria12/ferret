@@ -177,6 +177,30 @@ impl Default for Sidebar {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct Terminal {
+    /// Whether the docked panel is visible in a new window.
+    pub visible: bool,
+    /// Height in logical pixels. Clamped on load; see `config`.
+    pub height: f32,
+    /// Initial state of the directory-following toggle.
+    pub sync_default: bool,
+    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
+    pub unknown: Map<String, Value>,
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            height: 176.0,
+            sync_default: true,
+            unknown: Map::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WindowSettings {
     /// Reopen with the previous tabs, geometry and panel sizes.
     pub restore_session: bool,
@@ -210,6 +234,7 @@ pub struct Settings {
     pub appearance: Appearance,
     pub browser: Browser,
     pub sidebar: Sidebar,
+    pub terminal: Terminal,
     pub window: WindowSettings,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keymap: Keymap,

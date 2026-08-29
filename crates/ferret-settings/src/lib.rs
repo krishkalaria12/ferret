@@ -23,13 +23,13 @@ mod schema;
 pub use errors::{Result, SettingsError, Warning};
 pub use folder_prefs::{FolderPrefs, FolderView};
 pub use schema::{
-    Appearance, Browser, Keymap, RowDensity, Settings, Sidebar, SortKey, SortOrder, ThemeChoice,
-    ViewMode, WindowSettings,
+    Appearance, Browser, Keymap, RowDensity, Settings, Sidebar, SortKey, SortOrder, Terminal,
+    ThemeChoice, ViewMode, WindowSettings,
 };
 
 use config::{
-    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_SIDEBAR_WIDTH, MIN_FONT_SIZE, MIN_SIDEBAR_WIDTH,
-    SETTINGS_FILE,
+    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_SIDEBAR_WIDTH, MAX_TERMINAL_HEIGHT,
+    MIN_FONT_SIZE, MIN_SIDEBAR_WIDTH, MIN_TERMINAL_HEIGHT, SETTINGS_FILE,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -75,6 +75,7 @@ impl Settings {
             appearance: take_section(&mut root, "appearance", &mut warnings),
             browser: take_section(&mut root, "browser", &mut warnings),
             sidebar: take_section(&mut root, "sidebar", &mut warnings),
+            terminal: take_section(&mut root, "terminal", &mut warnings),
             window: take_section(&mut root, "window", &mut warnings),
             keymap: take_section(&mut root, "keymap", &mut warnings),
             // Whatever is left is from a version that knows more than this one.
@@ -125,6 +126,24 @@ impl Settings {
                 format!("Using {clamped}."),
             ));
             self.sidebar.width = clamped;
+        }
+
+        let height = self.terminal.height;
+        if !height.is_finite() || !(MIN_TERMINAL_HEIGHT..=MAX_TERMINAL_HEIGHT).contains(&height) {
+            let clamped = if height.is_finite() {
+                height.clamp(MIN_TERMINAL_HEIGHT, MAX_TERMINAL_HEIGHT)
+            } else {
+                Terminal::default().height
+            };
+            warnings.push(Warning::new(
+                "terminal.height",
+                format!(
+                    "{height} is outside the usable range \
+                     {MIN_TERMINAL_HEIGHT}–{MAX_TERMINAL_HEIGHT}."
+                ),
+                format!("Using {clamped}."),
+            ));
+            self.terminal.height = clamped;
         }
 
         // The Name column is not optional: a listing with no names is unusable.
@@ -183,8 +202,8 @@ mod tests {
 
     #[test]
     fn unrecognised_keys_survive_a_round_trip() {
-        // A newer Ferret wrote `terminal`, and a nested key this version has
-        // never heard of. Opening in an older build must not delete either.
+        // A newer Ferret wrote a nested key this version has never heard of.
+        // Opening in this build must not delete it.
         let original = r#"{
             "terminal": { "font_size": 12 },
             "appearance": { "theme": "dark", "future_option": true }
@@ -192,7 +211,7 @@ mod tests {
         let (settings, _) = Settings::from_json(original);
         let round_tripped = settings.to_json();
 
-        assert!(round_tripped.contains("terminal"), "{round_tripped}");
+        assert!(round_tripped.contains("font_size"), "{round_tripped}");
         assert!(round_tripped.contains("future_option"), "{round_tripped}");
     }
 
@@ -245,6 +264,14 @@ mod tests {
         assert_eq!(settings.appearance.ui_font_size, MAX_FONT_SIZE);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].key, "appearance.ui_font_size");
+    }
+
+    #[test]
+    fn an_unusable_terminal_height_is_clamped_with_a_warning() {
+        let (settings, warnings) = Settings::from_json(r#"{ "terminal": { "height": 9000 } }"#);
+        assert_eq!(settings.terminal.height, MAX_TERMINAL_HEIGHT);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].key, "terminal.height");
     }
 
     #[test]
