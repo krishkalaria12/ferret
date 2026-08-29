@@ -69,6 +69,27 @@ cheaper to satisfy now than to retrofit.
    budget it is checkable by reading a diff rather than by how fast the
    reviewer's machine is. `just budget` is the mechanical backstop.
 
+### One walker per job (D-34)
+
+Two parallel directory walkers will end up in this tree, and it is very easy to
+finish with both doing the same job in different files — at which point nobody
+can say how many threads are walking the disk. The split:
+
+| Walker | Owns | Why |
+| --- | --- | --- |
+| `jwalk` | Bulk file work with no ignore semantics: tree copy, and folder-size-on-demand and the operations queue's conflict scan when they land. | Lower overhead, and the job is "visit everything fast". |
+| `ignore` (Phase 5) | Filename and content search. | Honouring `.gitignore` is the entire feature. |
+
+Neither is used for the other's job. And neither is used for a **single**
+directory listing: reading the names out of one directory is a serial syscall
+stream that no walker changes, so `read_dir` stays as it is and the per-entry
+`stat` calls are what go parallel (D-33).
+
+Everything data-parallel runs on `ferret_vfs::pool`, never on rayon's implicit
+global pool — a bare `par_iter` silently creates a second one, alongside smol's
+blocking pool and GPUI's executor, and three pools each sized to the core count
+oversubscribe the machine.
+
 ### Finished when
 
 You can set Ferret as your default file manager and not miss the system one for

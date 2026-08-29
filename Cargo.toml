@@ -82,6 +82,13 @@ dirs = "6"
 # server-supplied names, that map wants a seeded hasher instead — see §9.
 foldhash = "0.2"
 futures = "0.3"
+# D-34. Parallel enumeration for bulk file work — the tree copy today, and
+# folder-size-on-demand and the operations queue's conflict scan when those
+# land. Deliberately *not* used for the single-directory listing (one directory
+# is one serial readdir, which no walker changes) and not for search, which
+# `ignore` will own because honouring .gitignore is that feature. One walker
+# per job, never both for the same job.
+jwalk = "0.9"
 notify = "7"
 # Not for speed first: `std`'s poisoning was doing active harm. Every lock in
 # Ferret guards a few nanoseconds — a map lookup, a `Point`, an `Option` — and

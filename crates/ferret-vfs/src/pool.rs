@@ -51,3 +51,22 @@ pub fn install<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         None => f(),
     }
 }
+
+/// How jwalk should parallelise, on Ferret's pool rather than rayon's global
+/// one.
+///
+/// `busy_timeout` is left at jwalk's default rather than `None`: the pool is
+/// shared with the sort and with metadata resolution, so "there is at least
+/// one free thread" is exactly the assumption that does not hold here, and the
+/// deadlock check is what turns that into a slow walk instead of a hang.
+pub fn parallelism() -> jwalk::Parallelism {
+    match pool() {
+        Some(pool) => jwalk::Parallelism::RayonExistingPool {
+            pool: Arc::clone(pool),
+            busy_timeout: None,
+        },
+        None => jwalk::Parallelism::RayonDefaultPool {
+            busy_timeout: std::time::Duration::from_secs(1),
+        },
+    }
+}

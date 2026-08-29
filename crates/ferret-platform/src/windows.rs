@@ -79,21 +79,6 @@ impl Platform for Windows {
             })
     }
 
-    async fn remove_permanently(&self, path: &Path) -> Result<()> {
-        let owned = path.to_path_buf();
-        smol::unblock(move || {
-            let md = std::fs::symlink_metadata(&owned)
-                .map_err(|source| PlatformError::from_io("read", &owned, source))?;
-            let outcome = if md.is_dir() {
-                std::fs::remove_dir_all(&owned)
-            } else {
-                std::fs::remove_file(&owned)
-            };
-            outcome.map_err(|source| PlatformError::from_io("delete", &owned, source))
-        })
-        .await
-    }
-
     fn places(&self) -> Vec<Place> {
         let mut out = Vec::new();
         if let Some(home) = dirs::home_dir() {

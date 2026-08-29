@@ -186,16 +186,19 @@ impl Browser {
                         if this.upgrade().is_none() {
                             return true;
                         }
-                        let platform = cx.global::<FerretState>().platform.clone();
+                        // Through the Vfs, not the platform: deleting
+                        // irreversibly is filesystem mechanics with nothing
+                        // OS-specific in it, and `RemoveMode::Permanent` is
+                        // where the parallel tree delete lives (D-34).
+                        let fs = cx.global::<FerretState>().fs;
                         let paths = paths.clone();
                         cx.spawn(async move |cx| {
                             let mut failures = 0usize;
                             let mut first_error = None;
                             for path in paths {
-                                let Some(local) = path.as_local().map(Path::to_path_buf) else {
-                                    continue;
-                                };
-                                if let Err(err) = platform.remove_permanently(&local).await {
+                                if let Err(err) =
+                                    fs.remove(&path, ferret_vfs::RemoveMode::Permanent).await
+                                {
                                     failures += 1;
                                     first_error.get_or_insert(err.to_string());
                                 }

@@ -270,16 +270,8 @@ impl Vfs for LocalFs {
             }),
             RemoveMode::Permanent => {
                 smol::unblock(move || {
-                    let md = fs::symlink_metadata(&local)
-                        .map_err(|source| VfsError::from_io("read", &owned, source))?;
-                    // Never follow a symlink out of the tree being deleted:
-                    // remove the link itself.
-                    let outcome = if md.is_dir() {
-                        fs::remove_dir_all(&local)
-                    } else {
-                        fs::remove_file(&local)
-                    };
-                    outcome.map_err(|source| VfsError::from_io("delete", &owned, source))
+                    remove_tree(&local)
+                        .map_err(|source| VfsError::from_io(source.action, &owned, source.source))
                 })
                 .await
             }
@@ -365,48 +357,174 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
     }
 }
 
+/// An `io::Error` that remembers which verb was being attempted.
+///
+/// The parallel paths below cross a `rayon` boundary where the `VfsPath` is
+/// not in hand, so the action travels with the error and the caller attaches
+/// the path it already knows.
+struct FileOpError {
+    action: &'static str,
+    source: std::io::Error,
+}
+
+impl FileOpError {
+    fn new(action: &'static str, source: std::io::Error) -> Self {
+        Self { action, source }
+    }
+}
+
+/// Delete a file, a link, or a whole tree.
+///
+/// Parallel across the top level only, and every subtree beneath it goes
+/// through `std::fs::remove_dir_all` (D-34). That split is deliberate. std's
+/// implementation walks with `openat` and refuses to descend a directory that
+/// was swapped for a symlink while it was working; a path-based parallel walk
+/// would be faster still and would give that up. On the one operation where
+/// being wrong destroys data outside the tree the user pointed at, that is not
+/// a trade worth making — so the parallelism goes where it is free, which is
+/// across independent children.
+///
+/// It is not a micro-optimisation: the common shape is a directory of many
+/// files, and those unlinks run across the pool rather than one at a time.
+fn remove_tree(path: &std::path::Path) -> std::result::Result<(), FileOpError> {
+    let md = fs::symlink_metadata(path).map_err(|e| FileOpError::new("read", e))?;
+    if !md.is_dir() {
+        // Never follow a symlink out of the tree being deleted: remove the
+        // link itself.
+        return fs::remove_file(path).map_err(|e| FileOpError::new("delete", e));
+    }
+
+    let children: Vec<PathBuf> = fs::read_dir(path)
+        .map_err(|e| FileOpError::new("read", e))?
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .collect();
+
+    // Collected rather than short-circuited: a delete that hits one
+    // permission-denied child should still remove everything it can, and then
+    // say what failed. `remove_dir` below fails anyway if anything is left.
+    let failures: Vec<FileOpError> = crate::pool::install(move || {
+        children
+            .into_par_iter()
+            .filter_map(|child| {
+                let md = fs::symlink_metadata(&child).ok()?;
+                let outcome = if md.is_dir() {
+                    fs::remove_dir_all(&child)
+                } else {
+                    // A symlink is unlinked, never followed — including one
+                    // that points outside the tree being deleted.
+                    fs::remove_file(&child)
+                };
+                outcome.err().map(|e| FileOpError::new("delete", e))
+            })
+            .collect()
+    });
+    if let Some(failure) = failures.into_iter().next() {
+        return Err(failure);
+    }
+
+    fs::remove_dir(path).map_err(|e| FileOpError::new("delete", e))
+}
+
+/// Copy one file, or reproduce one symlink as a link.
+fn copy_one(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    is_symlink: bool,
+) -> std::result::Result<(), FileOpError> {
+    if !is_symlink {
+        return fs::copy(src, dst)
+            .map(|_| ())
+            .map_err(|e| FileOpError::new("copy", e));
+    }
+    #[cfg(unix)]
+    {
+        let target = fs::read_link(src).map_err(|e| FileOpError::new("read", e))?;
+        std::os::unix::fs::symlink(&target, dst).map_err(|e| FileOpError::new("create", e))
+    }
+    #[cfg(windows)]
+    {
+        let _ = dst;
+        Err(FileOpError::new(
+            "copy",
+            std::io::Error::other("copying symlinks is not supported on Windows"),
+        ))
+    }
+}
+
 /// Recursive copy used by paste and cross-volume moves.
 ///
 /// Symlinks are copied as links, not followed — copying a tree that happens
-/// to contain a link back to `/` must not become a walk of the universe.
+/// to contain a link back to `/` must not become a walk of the universe. That
+/// is `follow_links(false)` plus [`copy_one`], and it is the reason the link
+/// tests exist.
+///
+/// Two phases (D-34). `jwalk` enumerates the tree across Ferret's pool, which
+/// is where it earns its place: a deep tree is many directories, and
+/// `fs::read_dir` recursion reads them strictly one after another. Directories
+/// are created as they are yielded — the walk yields a parent before its
+/// children, which is exactly the order `create_dir` needs — and the file
+/// copies, which are the expensive part, then run in parallel.
 fn copy_tree(src: &PathBuf, dst: &PathBuf) -> Result<()> {
-    fn err(action: &'static str, path: &std::path::Path, source: std::io::Error) -> VfsError {
-        VfsError::from_io(action, &VfsPath::local(path), source)
+    fn at(path: &std::path::Path, err: FileOpError) -> VfsError {
+        VfsError::from_io(err.action, &VfsPath::local(path), err.source)
     }
 
-    let md = fs::symlink_metadata(src).map_err(|source| err("read", src, source))?;
+    let md = fs::symlink_metadata(src)
+        .map_err(|source| VfsError::from_io("read", &VfsPath::local(src.as_path()), source))?;
 
-    if md.is_symlink() {
-        #[cfg(unix)]
-        {
-            let target = fs::read_link(src).map_err(|source| err("read", src, source))?;
-            std::os::unix::fs::symlink(&target, dst)
-                .map_err(|source| err("create", dst, source))?;
-            return Ok(());
-        }
-        #[cfg(windows)]
-        {
-            return Err(VfsError::Unsupported {
-                capability: "copying symlinks",
-            });
+    if md.is_symlink() || !md.is_dir() {
+        return copy_one(src, dst, md.is_symlink()).map_err(|e| at(src, e));
+    }
+
+    // Refuses to overwrite: conflict policy is the caller's decision, and this
+    // signature makes "silently replaced something" impossible to write by
+    // accident.
+    fs::create_dir(dst)
+        .map_err(|source| VfsError::from_io("create", &VfsPath::local(dst.as_path()), source))?;
+
+    let mut files = Vec::new();
+    for entry in jwalk::WalkDir::new(src)
+        .min_depth(1)
+        // Ferret's hidden logic is richer than a leading dot and is a user
+        // toggle besides; a copy that silently skipped dotfiles would be a
+        // data-loss bug wearing a feature's clothes.
+        .skip_hidden(false)
+        .follow_links(false)
+        .parallelism(crate::pool::parallelism())
+    {
+        let entry = entry.map_err(|source| {
+            VfsError::from_io("read", &VfsPath::local(src.as_path()), source.into())
+        })?;
+        let path = entry.path();
+        let Ok(relative) = path.strip_prefix(src) else {
+            continue;
+        };
+        let target = dst.join(relative);
+
+        // A symlink to a directory is a link to reproduce, never a directory
+        // to descend — `follow_links(false)` already stops the walk, and this
+        // keeps it out of the `create_dir` branch.
+        if entry.file_type().is_dir() {
+            fs::create_dir(&target).map_err(|source| {
+                VfsError::from_io("create", &VfsPath::local(target.as_path()), source)
+            })?;
+        } else {
+            files.push((path, target, entry.file_type().is_symlink()));
         }
     }
 
-    if md.is_dir() {
-        fs::create_dir(dst).map_err(|source| err("create", dst, source))?;
-        let items = fs::read_dir(src).map_err(|source| err("read", src, source))?;
-        for item in items {
-            let item = item.map_err(|source| err("read", src, source))?;
-            let child_src = item.path();
-            let child_name = item.file_name();
-            copy_tree(&child_src, &dst.join(child_name))?;
-        }
-        return Ok(());
+    let failure = crate::pool::install(move || {
+        files
+            .into_par_iter()
+            .filter_map(|(from, to, is_symlink)| {
+                copy_one(&from, &to, is_symlink).err().map(|e| (from, e))
+            })
+            .find_any(|_| true)
+    });
+    match failure {
+        Some((path, err)) => Err(at(&path, err)),
+        None => Ok(()),
     }
-
-    fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|source| err("copy", src, source))
 }
 
 #[cfg(windows)]
@@ -708,6 +826,110 @@ mod link_target_tests {
 
         // And a plain file is untouched by any of this.
         assert_eq!(by_name("real.txt").link_target, None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn tempdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ferret-vfs-tree-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_copied_tree_keeps_its_shape_at_depth() {
+        // The parallel copy creates directories as the walk yields them, which
+        // only works because a parent is always yielded before its children.
+        let root = tempdir("deep-copy");
+        let src = root.join("src");
+        let mut here = src.clone();
+        for level in 0..12 {
+            here = here.join(format!("level-{level}"));
+            fs::create_dir_all(&here).unwrap();
+            for i in 0..5 {
+                fs::write(here.join(format!("f{i}.txt")), format!("{level}:{i}")).unwrap();
+            }
+        }
+
+        let dst = root.join("dst");
+        smol::block_on(LocalFs::new().copy(&VfsPath::local(&src), &VfsPath::local(&dst))).unwrap();
+
+        let mut check = dst.clone();
+        for level in 0..12 {
+            check = check.join(format!("level-{level}"));
+            assert!(check.is_dir(), "{} must exist", check.display());
+            for i in 0..5 {
+                assert_eq!(
+                    fs::read_to_string(check.join(format!("f{i}.txt"))).unwrap(),
+                    format!("{level}:{i}")
+                );
+            }
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_tree_unlinks_symlinks_rather_than_following_them() {
+        // The one that matters: a link inside the tree pointing *outside* it
+        // must be unlinked, and whatever it points at must survive.
+        let root = tempdir("delete-links");
+        let outside = root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("precious.txt"), b"do not delete").unwrap();
+
+        let doomed = root.join("doomed");
+        fs::create_dir_all(doomed.join("nested")).unwrap();
+        fs::write(doomed.join("nested/a.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, doomed.join("link-to-dir")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("precious.txt"),
+            doomed.join("nested/link-to-file"),
+        )
+        .unwrap();
+
+        smol::block_on(LocalFs::new().remove(&VfsPath::local(&doomed), RemoveMode::Permanent))
+            .unwrap();
+
+        assert!(!doomed.exists(), "the tree is gone");
+        assert!(outside.is_dir(), "the link's target directory survives");
+        assert_eq!(
+            fs::read_to_string(outside.join("precious.txt")).unwrap(),
+            "do not delete",
+            "nothing outside the tree was followed and deleted"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn deleting_a_wide_directory_removes_every_child() {
+        // The shape the parallel top level is for: many children, no depth.
+        let root = tempdir("delete-wide");
+        let doomed = root.join("doomed");
+        fs::create_dir(&doomed).unwrap();
+        for i in 0..500 {
+            fs::write(doomed.join(format!("f{i:04}.txt")), b"x").unwrap();
+        }
+        fs::create_dir(doomed.join("sub")).unwrap();
+        fs::write(doomed.join("sub/inner.txt"), b"x").unwrap();
+
+        smol::block_on(LocalFs::new().remove(&VfsPath::local(&doomed), RemoveMode::Permanent))
+            .unwrap();
+        assert!(!doomed.exists());
 
         fs::remove_dir_all(&root).ok();
     }
