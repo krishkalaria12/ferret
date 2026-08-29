@@ -9,6 +9,48 @@ use rayon::slice::ParallelSliceMut as _;
 
 use super::*;
 
+/// How the listing is ordered: the key and direction the user picked, plus
+/// the two `settings.browser` rules that shape every comparison.
+///
+/// A struct rather than four parameters because `cmp_entries` is called from
+/// five places and two of them are inside a comparator closure, where an extra
+/// pair of positional `bool`s is exactly the kind of thing that gets swapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SortRules {
+    pub key: SortKey,
+    pub order: SortOrder,
+    /// `settings.browser.directories_first`. Folders sort above files whatever
+    /// the key is; off, they interleave.
+    pub directories_first: bool,
+    /// `settings.browser.natural_sort`. `file10` after `file9` rather than
+    /// before it; off, names compare byte-wise, case-insensitively.
+    pub natural: bool,
+}
+
+impl SortRules {
+    /// Name ascending, with both `settings.browser` rules on — the shipped
+    /// defaults.
+    ///
+    /// Only the tests use it: every real caller has a `Settings` to read, and
+    /// one that invented defaults instead would be the bug D-41 is about. It
+    /// lives here rather than in a test module so the defaults are stated
+    /// beside the type they belong to.
+    #[cfg(test)]
+    pub fn by_name() -> Self {
+        Self {
+            key: SortKey::Name,
+            order: SortOrder::Ascending,
+            directories_first: true,
+            natural: true,
+        }
+    }
+
+    /// The rules with a different key and direction, everything else kept.
+    pub(super) fn with_sort(self, key: SortKey, order: SortOrder) -> Self {
+        Self { key, order, ..self }
+    }
+}
+
 /// Above this many entries, sorting goes parallel.
 ///
 /// A 200,000-entry directory is ~3.4 million comparisons and is embarrassingly
@@ -62,9 +104,9 @@ impl Folder {
     // Sorting and filtering
 
     pub fn set_sort(&mut self, key: SortKey, order: SortOrder) {
-        let changed = self.sort_key != key || self.sort_order != order;
-        self.sort_key = key;
-        self.sort_order = order;
+        let next = self.rules.with_sort(key, order);
+        let changed = next != self.rules;
+        self.rules = next;
         if changed && !self.loading {
             self.resort();
         }
@@ -72,10 +114,11 @@ impl Folder {
 
     #[allow(dead_code)]
     pub fn toggle_sort_order(&mut self) {
-        self.sort_order = match self.sort_order {
+        let flipped = match self.rules.order {
             SortOrder::Ascending => SortOrder::Descending,
             SortOrder::Descending => SortOrder::Ascending,
         };
+        self.rules = self.rules.with_sort(self.rules.key, flipped);
         if !self.loading {
             self.resort();
         }
@@ -163,7 +206,7 @@ impl Folder {
     }
 
     pub(super) fn resort(&mut self) {
-        let (key, order) = (self.sort_key, self.sort_order);
+        let rules = self.rules;
         // Taken out so the comparator can read the slab while the id vector is
         // mutable. Sorting now permutes `u32`s, not `Entry`s.
         let mut ids = std::mem::take(&mut self.entries);
@@ -178,10 +221,10 @@ impl Folder {
             // would spin up a second pool alongside the one the listing walk
             // uses (`ferret_vfs::pool`).
             ferret_vfs::pool::install(|| {
-                ids.par_sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order))
+                ids.par_sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, rules))
             });
         } else {
-            ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, key, order));
+            ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, rules));
         }
         self.entries = ids;
         self.rebuild_index_and_order();
@@ -193,14 +236,8 @@ impl Folder {
     }
 
     /// [`cmp_slots`] against this folder's own slab.
-    pub(super) fn cmp_ids(
-        &self,
-        a: EntryId,
-        b: EntryId,
-        key: SortKey,
-        order: SortOrder,
-    ) -> std::cmp::Ordering {
-        cmp_slots(&self.slab, a, b, key, order)
+    pub(super) fn cmp_ids(&self, a: EntryId, b: EntryId) -> std::cmp::Ordering {
+        cmp_slots(&self.slab, a, b, self.rules)
     }
 
     /// Where `id` belongs in the sorted top-level listing.
@@ -208,10 +245,8 @@ impl Folder {
     /// Used for watcher inserts, which have to land in place without
     /// consulting an index that earlier inserts in the same batch invalidated.
     pub(super) fn sorted_position(&self, id: EntryId) -> usize {
-        let (key, order) = (self.sort_key, self.sort_order);
-        self.entries.partition_point(|&other| {
-            self.cmp_ids(other, id, key, order) == std::cmp::Ordering::Less
-        })
+        self.entries
+            .partition_point(|&other| self.cmp_ids(other, id) == std::cmp::Ordering::Less)
     }
 
     /// Flatten the listing — and the listings of any expanded folders —
@@ -293,36 +328,42 @@ fn cmp_slots(
     slab: &[Option<Entry>],
     a: EntryId,
     b: EntryId,
-    key: SortKey,
-    order: SortOrder,
+    rules: SortRules,
 ) -> std::cmp::Ordering {
     let slot = |id: EntryId| slab.get(id.0 as usize).and_then(Option::as_ref);
     match (slot(a), slot(b)) {
-        (Some(a), Some(b)) => cmp_entries(a, b, key, order),
+        (Some(a), Some(b)) => cmp_entries(a, b, rules),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     }
 }
 
-/// Directories sort above files regardless of the sort key
-/// (`settings.browser.directories_first`).
-pub(super) fn cmp_entries(
-    a: &Entry,
-    b: &Entry,
-    key: SortKey,
-    order: SortOrder,
-) -> std::cmp::Ordering {
+/// Order two entries under `rules`.
+pub(super) fn cmp_entries(a: &Entry, b: &Entry, rules: SortRules) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    match (a.is_dir_like(), b.is_dir_like()) {
-        (true, false) => return Ordering::Less,
-        (false, true) => return Ordering::Greater,
-        _ => {}
+    // `settings.browser.directories_first`, and it outranks the sort key on
+    // purpose: a folder is a place rather than a file, and mixing the two by
+    // size reads as noise. Off, they sort together like everything else.
+    if rules.directories_first {
+        match (a.is_dir_like(), b.is_dir_like()) {
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            _ => {}
+        }
     }
 
-    let ord = match key {
-        SortKey::Name => crate::format::natural_compare(a.name(), b.name()),
+    let by_name = |a: &str, b: &str| {
+        if rules.natural {
+            crate::format::natural_compare(a, b)
+        } else {
+            crate::format::plain_compare(a, b)
+        }
+    };
+
+    let ord = match rules.key {
+        SortKey::Name => by_name(a.name(), b.name()),
         SortKey::Modified => {
             let av = a
                 .metadata
@@ -344,14 +385,14 @@ pub(super) fn cmp_entries(
         SortKey::Kind => a
             .extension()
             .cmp(&b.extension())
-            .then_with(|| crate::format::natural_compare(a.name(), b.name())),
+            .then_with(|| by_name(a.name(), b.name())),
     };
 
-    let ord = match order {
+    let ord = match rules.order {
         SortOrder::Ascending => ord,
         SortOrder::Descending => ord.reverse(),
     };
 
     // Stable, sensible tiebreak so equal keys keep names findable.
-    ord.then_with(|| crate::format::natural_compare(a.name(), b.name()))
+    ord.then_with(|| by_name(a.name(), b.name()))
 }

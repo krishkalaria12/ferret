@@ -85,7 +85,7 @@ impl Folder {
     fn load_children(&mut self, parent: EntryId, dir: VfsPath, cx: &mut Context<Self>) {
         let fs = cx.global::<crate::state::FerretState>().fs;
         let generation = self.generation;
-        let (key, order) = (self.sort_key, self.sort_order);
+        let rules = self.rules;
 
         cx.spawn(async move |this, cx| {
             let mut stream = fs.read_dir(&dir);
@@ -98,7 +98,7 @@ impl Folder {
                     Err(_) => break,
                 }
             }
-            entries.sort_unstable_by(|a, b| cmp_entries(a, b, key, order));
+            entries.sort_unstable_by(|a, b| cmp_entries(a, b, rules));
 
             let _ = this.update(cx, |folder, cx| {
                 if folder.generation != generation || !folder.expanded.contains(&parent) {
@@ -207,7 +207,7 @@ impl Folder {
         // after the sort; Name order never is.
         if metadata_changed
             && matches!(
-                self.sort_key,
+                self.rules.key,
                 ferret_settings::SortKey::Modified | ferret_settings::SortKey::Size
             )
         {

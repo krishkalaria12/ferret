@@ -34,6 +34,8 @@ mod expansion;
 mod listing;
 mod sort;
 
+pub use sort::SortRules;
+
 #[cfg(all(test, feature = "dhat-heap"))]
 mod alloc_budget;
 #[cfg(test)]
@@ -243,8 +245,10 @@ pub struct Folder {
     loading: bool,
     error: Option<VfsError>,
 
-    sort_key: SortKey,
-    sort_order: SortOrder,
+    /// The sort key and direction, plus the two `settings.browser` rules that
+    /// shape every comparison. One field so a comparator cannot be handed a
+    /// key from one place and a rule from another.
+    rules: SortRules,
     show_hidden: bool,
     filter: Option<sort::NameFilter>,
     /// Which parts of the listing lifecycle this folder runs (A-14).
@@ -275,13 +279,7 @@ pub struct Folder {
 }
 
 impl Folder {
-    pub fn new(
-        dir: VfsPath,
-        sort_key: SortKey,
-        sort_order: SortOrder,
-        show_hidden: bool,
-        profile: ListingProfile,
-    ) -> Self {
+    pub fn new(dir: VfsPath, rules: SortRules, show_hidden: bool, profile: ListingProfile) -> Self {
         Self {
             dir,
             profile,
@@ -296,8 +294,7 @@ impl Folder {
             by_name: FastMap::default(),
             loading: true,
             error: None,
-            sort_key,
-            sort_order,
+            rules,
             show_hidden,
             filter: None,
             selection: FastSet::default(),
@@ -429,12 +426,17 @@ impl Folder {
         self.entries.len()
     }
 
+    /// The full ordering rules, for a column that wants to match this one.
+    pub fn rules(&self) -> SortRules {
+        self.rules
+    }
+
     pub fn sort_key(&self) -> SortKey {
-        self.sort_key
+        self.rules.key
     }
 
     pub fn sort_order(&self) -> SortOrder {
-        self.sort_order
+        self.rules.order
     }
 
     #[allow(dead_code)]

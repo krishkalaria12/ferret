@@ -25,8 +25,7 @@ async fn streams_a_listing_into_rows(cx: &mut gpui::TestAppContext) {
     let folder = cx.new(|_| {
         Folder::new(
             VfsPath::local(root.clone()),
-            ferret_settings::SortKey::Name,
-            ferret_settings::SortOrder::Ascending,
+            SortRules::by_name(),
             true,
             ListingProfile::BROWSING,
         )
@@ -84,8 +83,7 @@ async fn a_navigating_listing_attaches_no_watcher(cx: &mut gpui::TestAppContext)
         let folder = cx.new(|_| {
             Folder::new(
                 VfsPath::local(root.clone()),
-                ferret_settings::SortKey::Name,
-                ferret_settings::SortOrder::Ascending,
+                SortRules::by_name(),
                 true,
                 profile,
             )

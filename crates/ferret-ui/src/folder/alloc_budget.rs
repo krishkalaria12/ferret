@@ -51,8 +51,7 @@ const ALLOCATIONS_PER_ROW: u64 = 3;
 fn folder_of(n: usize) -> Folder {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         true,
         ListingProfile::BROWSING,
     );

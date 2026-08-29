@@ -32,7 +32,13 @@ const DARK_GLASS: &str = "Ferret Dark Glass";
 /// `glass` selects the translucent variants, which only make sense behind a
 /// blurred window: on an opaque one their alpha composites against whatever
 /// GPUI clears to rather than against the desktop.
-pub fn register(glass: bool, cx: &mut App) {
+///
+/// `font_size` is `settings.appearance.ui_font_size`, already clamped to a
+/// usable range by `ferret-settings`. It goes on the theme rather than
+/// straight onto the window because `gpui_component::Root` re-applies
+/// `set_rem_size(cx.theme().font_size)` on every frame — setting the window
+/// directly would be overwritten before it was ever seen.
+pub fn register(glass: bool, font_size: f32, cx: &mut App) {
     use gpui_component::{Theme, ThemeMode, ThemeRegistry};
 
     if let Err(err) = ThemeRegistry::global_mut(cx).load_themes_from_str(THEMES) {
@@ -66,6 +72,9 @@ pub fn register(glass: bool, cx: &mut App) {
         theme.dark_theme = dark;
     }
     Theme::change(mode, None, cx);
+    // After `change`, which re-applies a whole theme config and would put the
+    // library's own size back.
+    Theme::global_mut(cx).font_size = gpui::px(font_size);
 }
 
 /// The sixteen ANSI colours plus foreground, background and cursor, as a terminal

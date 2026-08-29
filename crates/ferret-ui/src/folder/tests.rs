@@ -40,8 +40,7 @@ fn plant(f: &mut Folder, entries: Vec<Entry>) {
 fn populated() -> Folder {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         false,
         ListingProfile::BROWSING,
     );
@@ -115,8 +114,7 @@ fn modified_sort_orders_by_time() {
 fn kind_sort_groups_by_the_cached_extension() {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Kind,
-        SortOrder::Ascending,
+        SortRules::by_name().with_sort(SortKey::Kind, SortOrder::Ascending),
         true,
         ListingProfile::BROWSING,
     );
@@ -135,6 +133,58 @@ fn kind_sort_groups_by_the_cached_extension() {
     // No extension sorts before every extension, then txt, then zip — and
     // within one extension, natural name order.
     assert_eq!(row_names(&f), ["Makefile", "b.txt", "c.txt", "a.zip"]);
+}
+
+#[test]
+fn directories_first_can_be_turned_off() {
+    // `settings.browser.directories_first`. On, a folder outranks the sort
+    // key; off, it sorts among the files like anything else.
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("a-file.txt", EntryKind::File, 1, None),
+            entry("z-folder", EntryKind::Dir, 0, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["z-folder", "a-file.txt"], "folders pinned");
+
+    f.rules.directories_first = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["a-file.txt", "z-folder"], "interleaved");
+}
+
+#[test]
+fn natural_sort_can_be_turned_off() {
+    // `settings.browser.natural_sort`. On, digit runs compare numerically;
+    // off, they compare byte-wise, which is what `ls` does.
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("file9.txt", EntryKind::File, 1, None),
+            entry("file10.txt", EntryKind::File, 1, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["file9.txt", "file10.txt"], "9 before 10");
+
+    f.rules.natural = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["file10.txt", "file9.txt"], "byte order");
 }
 
 #[test]
@@ -206,8 +256,7 @@ fn a_non_ascii_needle_still_folds_case() {
     // fall back rather than silently stop matching.
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         true,
         ListingProfile::BROWSING,
     );
@@ -550,8 +599,7 @@ fn marquee_selection_replaces_rather_than_accumulates() {
 fn extending_in_an_empty_folder_is_harmless() {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         false,
         ListingProfile::BROWSING,
     );
@@ -727,8 +775,7 @@ fn selecting_out_of_range_is_harmless() {
 fn symlinked_directories_sort_as_directories() {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         true,
         ListingProfile::BROWSING,
     );
@@ -761,8 +808,7 @@ fn symlinked_directories_sort_as_directories() {
 fn reindex_cost_on_a_large_listing() {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         true,
         ListingProfile::BROWSING,
     );
@@ -791,8 +837,7 @@ fn sort_and_filter_cost_on_a_large_listing() {
     const EXTS: [&str; 8] = ["txt", "rs", "png", "md", "toml", "json", "zip", "log"];
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         true,
         ListingProfile::BROWSING,
     );
@@ -819,8 +864,7 @@ fn sort_and_filter_cost_on_a_large_listing() {
         } else {
             SortOrder::Descending
         };
-        f.sort_order = order;
-        f.sort_key = SortKey::Kind;
+        f.rules = f.rules.with_sort(SortKey::Kind, order);
         f.resort();
     }
     println!("kind sort: {:?} per click", start.elapsed() / 6);

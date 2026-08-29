@@ -245,7 +245,8 @@ fn apply_startup_theme(cx: &mut App) {
     // Ferret's palette first: `sync_system_appearance` and `change` both
     // re-apply whichever theme config is registered, so registering after
     // them would leave the library's colours on screen until the next toggle.
-    ferret_ui::register_theme(vibrancy(cx), cx);
+    let font_size = cx.global::<FerretState>().settings.appearance.ui_font_size;
+    ferret_ui::register_theme(vibrancy(cx), font_size, cx);
 
     match cx.global::<FerretState>().settings.appearance.theme {
         ThemeChoice::System => Theme::sync_system_appearance(None, cx),

@@ -36,26 +36,25 @@ impl Browser {
         ViewMode,
         Vec<Subscription>,
     ) {
-        let ((sort_key, sort_order), mode, hidden_columns, show_hidden) = {
+        let (rules, mode, hidden_columns, show_hidden) = {
             let state = cx.global_mut::<FerretState>();
             let view = state.folder_view(&dir);
+            let browser = &state.settings.browser;
             (
-                view.sort_key_and_order(),
+                SortRules {
+                    key: view.sort_key,
+                    order: view.sort_order,
+                    directories_first: browser.directories_first,
+                    natural: browser.natural_sort,
+                },
                 view.mode,
                 view.hidden_columns.clone(),
-                state.settings.browser.show_hidden,
+                browser.show_hidden,
             )
         };
 
-        let folder = cx.new(|_| {
-            Folder::new(
-                dir.clone(),
-                sort_key,
-                sort_order,
-                show_hidden,
-                ListingProfile::BROWSING,
-            )
-        });
+        let folder =
+            cx.new(|_| Folder::new(dir.clone(), rules, show_hidden, ListingProfile::BROWSING));
         folder.update(cx, |f, cx| f.start_loading(cx));
 
         let pane = cx.new(|cx| FilePane::new(folder.clone(), mode, &hidden_columns, window, cx));

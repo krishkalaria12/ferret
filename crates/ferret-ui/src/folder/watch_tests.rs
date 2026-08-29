@@ -112,8 +112,7 @@ async fn a_burst_of_creates_and_deletes_converges_on_what_is_on_disk(
     let folder = cx.new(|_| {
         Folder::new(
             VfsPath::local(root.clone()),
-            SortKey::Name,
-            SortOrder::Ascending,
+            SortRules::by_name(),
             true,
             ListingProfile::BROWSING,
         )

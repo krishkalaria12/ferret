@@ -162,11 +162,28 @@ impl Browser {
     ) -> impl IntoElement {
         let dir = self.active().folder.read(cx).dir.clone();
 
+        // `settings.sidebar.show_places` / `show_volumes`: a group turned off
+        // is not gathered at all, so it costs nothing rather than being drawn
+        // and hidden. Favourites have no toggle — they are only there because
+        // the user put them there.
+        let (show_places, show_volumes) = {
+            let sidebar = &cx.global::<FerretState>().settings.sidebar;
+            (sidebar.show_places, sidebar.show_volumes)
+        };
+
         // Gathered up front so the selected row can be picked against every
         // candidate at once rather than section by section.
-        let places = self.places(cx);
+        let places = if show_places {
+            self.places(cx)
+        } else {
+            Vec::new()
+        };
         let favorites = self.favorites(cx);
-        let volumes = self.volumes();
+        let volumes = if show_volumes {
+            self.volumes()
+        } else {
+            Vec::new()
+        };
         let current = current_place(
             &dir,
             places
@@ -197,7 +214,9 @@ impl Browser {
             .pt(px(4.))
             .pb(px(10.));
 
-        side = side.child(section_label("Places", cx));
+        if !places.is_empty() {
+            side = side.child(section_label("Places", cx));
+        }
         for (i, place) in places.into_iter().enumerate() {
             let active = is_current(&place.path);
             side = side.child(self.sidebar_place_row(

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use ferret_platform::Place;
-use ferret_settings::{FolderView, SortKey, SortOrder, ThemeChoice, ViewMode};
+use ferret_settings::{FolderView, ThemeChoice, ViewMode};
 use ferret_vfs::{Vfs as _, VfsPath};
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
@@ -36,7 +36,7 @@ use gpui_component::{
 };
 
 use crate::actions;
-use crate::folder::{Folder, FolderEvent, ListingProfile};
+use crate::folder::{Folder, FolderEvent, ListingProfile, SortRules};
 use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
 use crate::state::FerretState;
@@ -366,16 +366,6 @@ enum Region {
     Sidebar,
     PathBar,
     Pane,
-}
-
-trait SortKeyAndOrder {
-    fn sort_key_and_order(&self) -> (SortKey, SortOrder);
-}
-
-impl SortKeyAndOrder for FolderView {
-    fn sort_key_and_order(&self) -> (SortKey, SortOrder) {
-        (self.sort_key, self.sort_order)
-    }
 }
 
 /// One toast for a batch operation. A single failure shows its own message

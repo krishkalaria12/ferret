@@ -169,9 +169,23 @@ impl Browser {
         if paths.is_empty() {
             return;
         }
+
+        // `settings.browser.confirm_permanent_delete`. On by default, and the
+        // schema says why trashing is never confirmed: it is reversible, and a
+        // dialog on every delete trains people to dismiss them. Someone who
+        // has turned this off has said they know what the action does.
+        if !cx
+            .global::<FerretState>()
+            .settings
+            .browser
+            .confirm_permanent_delete
+        {
+            self.delete_now(paths, window, cx);
+            return;
+        }
+
         let count = paths.len();
         let this = cx.weak_entity();
-        let window_handle = window.window_handle();
         window.open_alert_dialog(cx, move |alert, _, _| {
             alert
                 .title("Delete Permanently?")
@@ -182,45 +196,41 @@ impl Browser {
                 .on_ok({
                     let paths = paths.clone();
                     let this = this.clone();
-                    move |_, _, cx| {
-                        if this.upgrade().is_none() {
-                            return true;
+                    move |_, window, cx| {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.delete_now(paths.clone(), window, cx);
+                            });
                         }
-                        // Through the Vfs, not the platform: deleting
-                        // irreversibly is filesystem mechanics with nothing
-                        // OS-specific in it, and `RemoveMode::Permanent` is
-                        // where the parallel tree delete lives (D-34).
-                        let fs = cx.global::<FerretState>().fs;
-                        let paths = paths.clone();
-                        cx.spawn(async move |cx| {
-                            let mut failures = 0usize;
-                            let mut first_error = None;
-                            for path in paths {
-                                if let Err(err) =
-                                    fs.remove(&path, ferret_vfs::RemoveMode::Permanent).await
-                                {
-                                    failures += 1;
-                                    first_error.get_or_insert(err.to_string());
-                                }
-                            }
-                            if failures > 0 {
-                                let message = match first_error {
-                                    Some(err) if failures == 1 => err,
-                                    Some(err) => {
-                                        format!("{failures} items could not be deleted: {err}")
-                                    }
-                                    None => String::new(),
-                                };
-                                let _ = window_handle.update(cx, |_, window, cx| {
-                                    window.push_notification(Notification::error(message), cx);
-                                });
-                            }
-                        })
-                        .detach();
                         true
                     }
                 })
         });
+    }
+
+    /// Delete without asking. The confirmation, where there is one, has
+    /// already happened.
+    fn delete_now(&mut self, paths: Vec<VfsPath>, window: &mut Window, cx: &mut Context<Self>) {
+        // Through the Vfs, not the platform: deleting irreversibly is
+        // filesystem mechanics with nothing OS-specific in it, and
+        // `RemoveMode::Permanent` is where the parallel tree delete lives
+        // (D-34).
+        let fs = cx.global::<FerretState>().fs;
+        let window_handle = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            let mut failures = Vec::new();
+            for path in paths {
+                if let Err(err) = fs.remove(&path, ferret_vfs::RemoveMode::Permanent).await {
+                    failures.push(err.to_string());
+                }
+            }
+            if let Some(message) = summarize_failures("be deleted", &failures) {
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    window.push_notification(Notification::error(message), cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// Drop a set of paths into `dest` (§8).

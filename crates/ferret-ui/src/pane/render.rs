@@ -97,8 +97,17 @@ impl Render for FilePane {
                 *origin.lock() = bounds.origin;
             })
             .on_key_down(cx.listener(Self::handle_typeahead))
-            .on_action(cx.listener(|this, _: &actions::Open, _, cx| {
-                this.open_selection(cx);
+            // `settings.browser.enter_opens`. Ferret opens on Enter by
+            // default on both platforms and renames on F2; Finder renames on
+            // Enter, and people with that muscle memory can have it back.
+            // F2 keeps working either way — this changes what *Enter* does,
+            // not what rename is bound to.
+            .on_action(cx.listener(|this, _: &actions::Open, window, cx| {
+                if cx.global::<FerretState>().settings.browser.enter_opens {
+                    this.open_selection(cx);
+                } else if let Some(path) = this.folder.read(cx).cursor_path() {
+                    this.begin_rename(path, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &actions::Rename, window, cx| {
                 let target = this.folder.read(cx).cursor_path();

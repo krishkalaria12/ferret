@@ -11,10 +11,15 @@
 //! 3. **A bad value never stops the app.** Parsing is per section, so a mistake
 //!    in `browser` cannot cost the user their `appearance`. The bad section falls
 //!    back to defaults and reports a [`crate::Warning`].
+//! 4. **Every key here does something.** This is the rule that had been
+//!    broken: twelve keys were declared, defaulted, shipped in
+//!    `default-settings.json` and read by nothing, which made the file
+//!    documentation that lied. Six were wired up; the six needing features
+//!    nobody has built were removed until those features exist (D-41).
+//!    `every_setting_is_read_by_something` in `lib.rs` keeps this true.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Which theme to draw with.
@@ -56,24 +61,12 @@ pub enum SortOrder {
     Descending,
 }
 
-/// Row height in the file pane.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RowDensity {
-    #[default]
-    Comfortable,
-    Compact,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     pub theme: ThemeChoice,
     /// Interface font size in logical pixels. Clamped on load; see `config`.
     pub ui_font_size: f32,
-    pub row_density: RowDensity,
-    /// Alternating row shading in list view.
-    pub alternate_row_colors: bool,
     /// Draw the window translucent over a blurred desktop.
     ///
     /// Off by default, and deliberately: blur is a macOS enhancement (D-19),
@@ -95,8 +88,6 @@ impl Default for Appearance {
         Self {
             theme: ThemeChoice::System,
             ui_font_size: 13.0,
-            row_density: RowDensity::Comfortable,
-            alternate_row_colors: true,
             vibrancy: false,
             unknown: Map::new(),
         }
@@ -115,9 +106,6 @@ pub struct Browser {
     /// `file10` sorts after `file9` rather than before it.
     pub natural_sort: bool,
     pub show_hidden: bool,
-    /// Columns shown in list view, in order. `name` is always present and is
-    /// re-inserted first if a hand-edited file omits it.
-    pub columns: Vec<String>,
     /// Confirm before a permanent delete. Trashing is never confirmed — it is
     /// reversible, and a dialog on every delete trains people to dismiss them.
     pub confirm_permanent_delete: bool,
@@ -139,7 +127,6 @@ impl Default for Browser {
             directories_first: true,
             natural_sort: true,
             show_hidden: false,
-            columns: vec!["name".into(), "modified".into(), "size".into()],
             confirm_permanent_delete: true,
             enter_opens: true,
             remember_folder_views: true,
@@ -175,34 +162,6 @@ impl Default for Sidebar {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WindowSettings {
-    /// Reopen with the previous tabs, geometry and panel sizes.
-    pub restore_session: bool,
-    /// Where a new window starts when there is no session to restore.
-    /// `null` means the user's home directory.
-    pub default_directory: Option<PathBuf>,
-    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
-    pub unknown: Map<String, Value>,
-}
-
-impl Default for WindowSettings {
-    fn default() -> Self {
-        Self {
-            restore_session: true,
-            default_directory: None,
-            unknown: Map::new(),
-        }
-    }
-}
-
-/// Keystroke to action name, overlaid on the built-in defaults.
-///
-/// A binding mapped to `null` removes the default rather than replacing it,
-/// which is the only way to *unbind* something.
-pub type Keymap = BTreeMap<String, Option<String>>;
-
 /// The whole settings file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -210,10 +169,11 @@ pub struct Settings {
     pub appearance: Appearance,
     pub browser: Browser,
     pub sidebar: Sidebar,
-    pub window: WindowSettings,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub keymap: Keymap,
-    /// Top-level sections this version does not know about, kept verbatim.
+    /// Top-level sections this version does not know about, kept verbatim —
+    /// which is what a `window` or `keymap` section in an existing file
+    /// becomes. Those were removed rather than left declared and unread
+    /// (D-41), and rule 2 is what keeps them in the file until the features
+    /// that read them exist.
     #[serde(flatten, skip_serializing_if = "Map::is_empty")]
     pub unknown: Map<String, Value>,
 }

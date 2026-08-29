@@ -176,6 +176,21 @@ pub fn natural_compare(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Case-insensitive byte order, for `settings.browser.natural_sort = false`.
+///
+/// The plain alternative to [`natural_compare`]: `file10` sorts before
+/// `file9`, because `1` precedes `9`. Some people want exactly that — it is
+/// what `ls` does — which is why the setting exists.
+///
+/// Case-insensitive like its natural sibling, and for the same reason: both
+/// supported platforms have case-insensitive filesystems by default, so a
+/// listing that put `Zebra` before `apple` would read as a bug either way.
+pub fn plain_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+}
+
 /// Whether `name` begins with `prefix`, ignoring case, without allocating.
 ///
 /// Type-ahead and path completion both ask this once per entry per keystroke,
@@ -341,6 +356,18 @@ mod tests {
         // 2026-07-15 12:00 UTC → 14:00 CEST
         let summer = UNIX_EPOCH + Duration::from_secs(1_784_116_800);
         assert_eq!(format_date_in(summer, &berlin), "15 Jul 2026 at 14:00");
+    }
+
+    #[test]
+    fn plain_order_is_what_natural_order_is_not() {
+        // The setting exists because this is what `ls` does, and some people
+        // want it: byte order, so `file10` lands before `file9`.
+        let mut names = vec!["file10", "file9", "file2", "File1"];
+        names.sort_by(|a, b| plain_compare(a, b));
+        assert_eq!(names, ["File1", "file10", "file2", "file9"]);
+        // Still case-insensitive, like the natural one.
+        assert_eq!(plain_compare("Apple", "apple"), std::cmp::Ordering::Equal);
+        assert_eq!(plain_compare("apple", "Zebra"), std::cmp::Ordering::Less);
     }
 
     #[test]
