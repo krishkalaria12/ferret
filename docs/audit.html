@@ -554,6 +554,7 @@ footer {
   </div>
   <nav aria-label="Sections">
     <ol>
+      <li><a href="#status">what landed</a></li>
       <li><a href="#what">what this is</a></li>
       <li><a href="#verdict">the verdict</a></li>
       <li><a href="#wrong">what the app gets wrong</a></li>
@@ -579,18 +580,101 @@ footer {
 <main class="doc">
 
 <header class="masthead">
-  <p class="eyebrow">Audit · rev 2 · 29 Aug 2026</p>
+  <p class="eyebrow">Audit · rev 2 · 29 Aug 2026 · <b>all landed</b></p>
   <h1>What the first audit did not look at</h1>
   <p class="lede">Rev 1 is finished — twenty-six findings and six decisions, landed. This is the pass over what that left behind, and over the parts of the workspace the first audit passed through without auditing: the settings schema, the sidebar and title bar, the binary, and the asset and theme layers. The headline is not performance this time. It is that the app quietly does the wrong thing in four places, and one of them is wrong for almost every user on earth.</p>
   <dl class="facts">
     <div><dt>Reviewed</dt><dd class="mono">16,208 lines · 6 crates</dd></div>
-    <div><dt>Findings</dt><dd>13 (A-27 … A-39)</dd></div>
+    <div><dt>Findings</dt><dd>13 (A-27 … A-39) · all fixed</dd></div>
     <div><dt>Correctness bugs</dt><dd>4 user-visible</dd></div>
     <div><dt>New decisions</dt><dd>D-39 … D-42</dd></div>
     <div><dt>Method</dt><dd>Reading, then measuring</dd></div>
-    <div><dt>New dependencies</dt><dd>1 shipped · 2 free · 1 optional</dd></div>
+    <div><dt>New dependencies</dt><dd>1 shipped (<code>jiff</code>)</dd></div>
   </dl>
 </header>
+
+<!-- ==================================================================== -->
+<section id="status">
+  <span class="sec-tag">§0</span>
+  <h2>What landed</h2>
+  <p class="sec-intro">Everything below is fixed. This section says what that cost, what it measured, and — the part worth reading — the three places this document turned out to be wrong.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Measured outcomes</caption>
+    <thead><tr><th>What</th><th class="key">Before</th><th class="key">After</th><th>Finding</th></tr></thead>
+    <tbody>
+      <tr><td>One selection change, 200,000 rows, small band</td><td class="key">691 µs</td><td class="key">597 ns</td><td>A-29</td></tr>
+      <tr><td>One selection change, everything selected</td><td class="key">1.37 ms</td><td class="key">22 ns</td><td>A-29</td></tr>
+      <tr><td>Time to first row, <code>flat/</code> (warm)</td><td class="key">5.8 ms</td><td class="key">0.35 ms</td><td>A-35</td></tr>
+      <tr><td><code>Entry</code>, carried once per row</td><td class="key">144 B</td><td class="key">128 B</td><td>A-34</td></tr>
+      <tr><td>Events lost by other directories during watcher churn</td><td class="key">91%</td><td class="key">none, from that cause</td><td>D-40</td></tr>
+      <tr><td>Syscalls per frame in the sidebar</td><td class="key">7</td><td class="key">0</td><td>A-28</td></tr>
+      <tr><td>Settings shipped and read by nothing</td><td class="key">12</td><td class="key">0</td><td>A-30</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note risk">
+    <strong>Three things this document got wrong</strong>
+    <p>Recorded because a document that only records its successes is not worth
+    consulting the next time.</p>
+    <ol>
+      <li><b>§7 badly understated the watcher gap</b>, calling it "a window
+      measured in milliseconds". Measured before fixing it: writing 240 files
+      into one watched directory while twelve others were subscribed and
+      dropped around it lost <b>91% of them</b>. That is not a window, and it
+      meant D-37 had made things strictly <em>worse</em> than the forty
+      watchers it replaced.</li>
+      <li><b>D-40's proposed fix was not the right one.</b> It called for
+      owning an <code>FSEventStream</code> through <code>fsevent-sys</code> and
+      threading <code>FSEventStreamGetLatestEventId</code> through the
+      rebuild — roughly 300 lines of <code>unsafe</code> FFI. What A-17
+      actually asked for was deduplication by <em>directory</em>, not one
+      stream for the process. Keying the registry that way keeps every bit of
+      A-17's win and gives each directory an independent stream, so there is
+      no rebuild left to make lossless. The fix contains no
+      <code>unsafe</code> at all.</li>
+      <li><b>A-32 claimed "GPUI already models exactly this".</b> True of the
+      type; false of the macOS backend, whose pasteboard <em>write</em> for
+      <code>ExternalPaths</code> is an empty match arm. Three of the four
+      directions work; Ferret&nbsp;→&nbsp;Finder is blocked upstream. See the
+      revised A-32.</li>
+    </ol>
+  </div>
+
+  <div class="note">
+    <strong>Precisely what "none" means in that last row</strong>
+    <p>Registering a directory no longer restarts any other directory's
+    stream, so that cause of loss is gone outright. It is not a claim that no
+    event is ever dropped: a consumer too slow to drain its channel still
+    overflows it, and still gets a <code>Desynced</code> telling it to re-list.
+    That is A-06's contract working, and it is what the regression test asserts
+    — <em>silent</em> staleness is the failure, not loss. Writing that test the
+    other way first, and watching it fail because it never drained the
+    64-event channel, is what made the distinction concrete.</p>
+  </div>
+
+  <div class="note ok">
+    <strong>And one thing it got right, which is worth naming</strong>
+    <p>A-33 predicted that the allocation budget could not see the very finding
+    being reported, because its harness skipped <code>os_icon</code>. Closing
+    that hole was verified by reverting the fix: the budget goes from 2.02
+    allocations per visible row to 3.02 and fails. A budget with a documented
+    hole is a budget that will let the next one through too.</p>
+  </div>
+
+  <div class="note warn">
+    <strong>What the fixes themselves broke</strong>
+    <p>Splitting the selection summary (A-29) left <code>selected_entry</code>
+    scanning the visible rows — which the column view's metadata panel calls
+    once per frame, making it A-16 again, a finding <em>rev 1 had already
+    fixed</em>. A review pass caught it before it shipped and it is now 1.0 µs
+    per frame with the selected row at the end of 200,000. Worth stating
+    plainly: two of this document's thirteen findings were places an earlier
+    fix stopped one step short, and this was very nearly a third.</p>
+  </div>
+</section>
 
 <!-- ==================================================================== -->
 <section id="what">
@@ -659,22 +743,22 @@ footer {
   <table class="wide">
     <caption>All findings, most damaging first</caption>
     <thead>
-      <tr><th>ID</th><th>Finding</th><th class="key">Where</th><th>Sev</th></tr>
+      <tr><th>ID</th><th>Finding</th><th class="key">Where</th><th>Sev</th><th>Status</th></tr>
     </thead>
     <tbody>
-      <tr><td class="id">A-27</td><td>Every date the app displays is UTC — the Date Modified column is wrong for anyone not on Greenwich</td><td class="key">format.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-28</td><td><code>places()</code> runs seven <code>is_dir()</code> syscalls and seven allocations on the render path, every frame</td><td class="key">browser/sidebar.rs · platform/macos.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-29</td><td>The selection summary is rebuilt in O(the directory) on <em>every</em> selection change — 0.7–1.4 ms each, during a marquee drag or shift-arrow repeat</td><td class="key">folder/mod.rs</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-30</td><td>Twelve settings are declared, shipped as documentation, and read by nothing</td><td class="key">ferret-settings · ferret-ui</td><td><span class="pill p-risky">critical</span></td></tr>
-      <tr><td class="id">A-31</td><td><code>theme: "system"</code> — the default — reads the OS appearance once at launch and never follows it</td><td class="key">ferret/main.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-32</td><td>The clipboard never leaves the process: no interop with Finder, and none between two Ferret windows</td><td class="key">browser/mutations.rs · browser/mod.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-33</td><td><code>IconKey::of</code> allocates a <code>String</code> per row per frame — and the allocation budget cannot see it</td><td class="key">platform/icon.rs · icons.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-34</td><td><code>Metadata</code> carries two fields nothing reads, on every one of 200,000 entries</td><td class="key">vfs/entry.rs</td><td><span class="pill p-warn">major</span></td></tr>
-      <tr><td class="id">A-35</td><td><code>LISTING_BATCH_SIZE</code> was tuned when a batch was names only; it now gates the first row on 4,096 <code>stat</code> calls</td><td class="key">vfs/config.rs · vfs/local.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-36</td><td><code>Assets::list</code> ignores the path it is given and returns every embedded asset</td><td class="key">assets.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-37</td><td>The sidebar allocates a row id and a label per row, per frame</td><td class="key">browser/sidebar.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-38</td><td>The table delegate re-reads the model four times per cell and re-resolves the palette per cell</td><td class="key">pane/list.rs</td><td><span class="pill p-later">minor</span></td></tr>
-      <tr><td class="id">A-39</td><td>The macOS icon conversion swizzles one pixel at a time — carried forward from rev 1 and still undone</td><td class="key">platform/macos.rs</td><td><span class="pill p-later">minor</span></td></tr>
+      <tr><td class="id">A-27</td><td>Every date the app displays is UTC — the Date Modified column is wrong for anyone not on Greenwich</td><td class="key">format.rs</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-28</td><td><code>places()</code> runs seven <code>is_dir()</code> syscalls and seven allocations on the render path, every frame</td><td class="key">browser/sidebar.rs · platform/macos.rs</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-29</td><td>The selection summary is rebuilt in O(the directory) on <em>every</em> selection change — 0.7–1.4 ms each, during a marquee drag or shift-arrow repeat</td><td class="key">folder/mod.rs</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-30</td><td>Twelve settings are declared, shipped as documentation, and read by nothing</td><td class="key">ferret-settings · ferret-ui</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-31</td><td><code>theme: "system"</code> — the default — reads the OS appearance once at launch and never follows it</td><td class="key">ferret/main.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-32</td><td>The clipboard never leaves the process: no interop with Finder, and none between two Ferret windows</td><td class="key">browser/mutations.rs · browser/mod.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-33</td><td><code>IconKey::of</code> allocates a <code>String</code> per row per frame — and the allocation budget cannot see it</td><td class="key">platform/icon.rs · icons.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-34</td><td><code>Metadata</code> carries two fields nothing reads, on every one of 200,000 entries</td><td class="key">vfs/entry.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-35</td><td><code>LISTING_BATCH_SIZE</code> was tuned when a batch was names only; it now gates the first row on 4,096 <code>stat</code> calls</td><td class="key">vfs/config.rs · vfs/local.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-36</td><td><code>Assets::list</code> ignores the path it is given and returns every embedded asset</td><td class="key">assets.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-37</td><td>The sidebar allocates a row id and a label per row, per frame</td><td class="key">browser/sidebar.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-38</td><td>The table delegate re-reads the model four times per cell and re-resolves the palette per cell</td><td class="key">pane/list.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-39</td><td>The macOS icon conversion swizzles one pixel at a time — carried forward from rev 1 and still undone</td><td class="key">platform/macos.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
     </tbody>
   </table>
   </div>
@@ -758,11 +842,29 @@ clipboard: Option&lt;(Vec&lt;VfsPath&gt;, bool)&gt;,</code></pre>
       window has its own. Copying in one Ferret window and pasting in another is a no-op —
       silently, because <code>paste_clipboard</code> takes <code>None</code> and returns.</li>
     </ul>
-    <p class="fix"><b>Fix</b> — No new dependency. GPUI already models exactly this:
+    <p class="fix"><b>Fix</b> — No new dependency.
     <code>ClipboardEntry::ExternalPaths</code> (<code>gpui/src/platform.rs:2355</code>) with
     <code>App::write_to_clipboard</code> and <code>read_from_clipboard</code>. The cut/copy
     distinction has no pasteboard representation on macOS, so it stays a local flag beside the
     system write — which is also how Finder behaves. See <b>D-42</b>.</p>
+    <div class="note warn">
+      <strong>Corrected: "GPUI already models exactly this" is only half true</strong>
+      <p>True of the type; false of the macOS backend. Its pasteboard
+      <em>write</em> for <code>ExternalPaths</code> is an empty match arm —
+      <code>[ClipboardEntry::ExternalPaths(_)] =&gt; {}</code> in
+      <code>gpui_macos/src/pasteboard.rs</code> — and its own tests only ever
+      exercise the read. Reading the backend rather than trusting the type is
+      what turned that up. So of the four directions:</p>
+      <ul>
+        <li>Finder → Ferret — <b>works</b>, GPUI reads <code>ExternalPaths</code> correctly.</li>
+        <li>Ferret → Ferret — <b>works</b>, via the string half.</li>
+        <li>Ferret → terminal or a text field — <b>works</b>, and is useful in its own right.</li>
+        <li>Ferret → Finder — <b>does not</b>, and cannot without patching GPUI.</li>
+      </ul>
+      <p>The <code>ExternalPaths</code> entry is written regardless, so the last
+      row starts working the day that arm is implemented, with no change in
+      Ferret.</p>
+    </div>
   </div>
 </section>
 
@@ -1068,7 +1170,19 @@ let volumes = self.volumes();       // → cached (A-25)</code></pre>
   <code>ferret_vfs::watch</code>'s module header at the time rather than discovered later:</p>
 
   <div class="note risk">
-    <strong>The cost, restated</strong>
+    <strong>Corrected: this was far worse than stated below</strong>
+    <p>Everything in this section was written before the gap was measured, and
+    it understates it by an order of magnitude. The measurement: writing 240
+    files into one watched directory while twelve others were subscribed and
+    dropped around it lost <b>91% of them</b> — not "a short window", and bad
+    enough that D-37 had made this <em>worse</em> than the forty watchers it
+    replaced. The section is left as written because being wrong in this
+    direction is the interesting part; the fix and what it actually took are
+    in the revised D-40.</p>
+  </div>
+
+  <div class="note">
+    <strong>The cost, as originally stated</strong>
     <p><code>notify</code>'s FSEvents backend calls <code>stop()</code>, edits its path list,
     and calls <code>run()</code> again on <em>every</em> <code>watch</code> and
     <code>unwatch</code>. With one stream per folder that was invisible. With one shared
@@ -1197,7 +1311,30 @@ let volumes = self.volumes();       // → cached (A-25)</code></pre>
   </div>
 
   <div class="dec">
-    <h4><span class="did">D-40</span> The macOS watcher resumes from its last event id rather than restarting.</h4>
+    <h4><span class="did">D-40</span> One watcher per directory, not one for the process. <span class="pill p-done">superseded</span></h4>
+    <p><b>What was decided instead.</b> The proposal below — own an
+    <code>FSEventStream</code> through <code>fsevent-sys</code> and thread
+    <code>FSEventStreamGetLatestEventId</code> through each rebuild — solves
+    the wrong problem at a high price. It assumes one shared stream is
+    required, because that is how D-37 read A-17. It is not:
+    A-17's complaint was "one watcher per <code>Folder</code>", meaning per
+    <em>consumer</em>, and its own words were "for a handful of distinct
+    directories, several of which are shared between tabs".</p>
+    <p>Keying the registry per <em>directory</em> keeps all of that — ten tabs
+    on one folder is one watcher, column view over a deep path is four rather
+    than forty — and gives each directory an independent stream, so
+    registering one cannot disturb another. There is no rebuild left to make
+    lossless, and no <code>unsafe</code> anywhere in the fix. <code>notify</code>
+    8.2.0 was checked and is byte-identical here, so upgrading was never an
+    alternative either.</p>
+    <p class="because"><b>Kept below</b> because the reasoning that led to the
+    wrong answer is worth seeing: it starts from "the shared stream is a given"
+    and optimises within that, which is how a design constraint nobody chose
+    turns into 300 lines of FFI.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-40 (as originally proposed)</span> The macOS watcher resumes from its last event id rather than restarting.</h4>
     <p>The local backend owns an <code>FSEventStream</code> through <code>fsevent-sys</code>
     instead of going through <code>notify</code> on macOS. Before every rebuild it stores
     <code>FSEventStreamGetLatestEventId</code>; the next stream starts from there rather than
@@ -1300,7 +1437,18 @@ let volumes = self.volumes();       // → cached (A-25)</code></pre>
 <section id="order">
   <span class="sec-tag">§11</span>
   <h2>The order to do this in</h2>
-  <p class="sec-intro">Sequenced so each step is independently shippable, with the correctness bugs first — because unlike rev 1, most of this is not about speed.</p>
+  <p class="sec-intro">Sequenced so each step is independently shippable, with the correctness bugs first — because unlike rev 1, most of this is not about speed. <b>All six steps landed in this order</b>, one commit each, plus a seventh reviewing the six.</p>
+
+  <div class="note ok">
+    <strong>The seventh step was not planned, and should have been</strong>
+    <p>A review pass over the six commits found two real defects in them: an
+    O(the directory) scan reintroduced on the render path (see §0), and a race
+    in the watcher registry that returned a spurious error when an idle
+    eviction landed between two lock acquisitions. Neither was caught by the
+    test suite as it stood. Both are the kind of thing that only surfaces by
+    re-reading work while it is still fresh — which argues for making that a
+    step rather than a courtesy.</p>
+  </div>
 
   <div class="step">
     <span class="part">1</span>
@@ -1396,15 +1544,18 @@ let volumes = self.volumes();       // → cached (A-25)</code></pre>
     <code>places()</code> shape (identical to macOS, so A-28 applies to both) and for the
     icon cache. The <code>unsafe</code> <code>SHGetFileInfo</code> path was not audited with
     the care the macOS one received, and no finding here has been reproduced on Windows.</li>
-    <li><b>No profiler was attached.</b> The measured figures come from
-    <code>cargo xtask bench</code>, <code>just budget</code>, and three
+    <li><b>No profiler was attached</b>, before or after. The figures come from
+    <code>cargo xtask bench</code>, <code>just budget</code>, and four
     <code>#[ignore]</code>d measurements run in release. Tracy is wired up
     (<code>--features profile</code>) and was not used; a flame graph might well disagree
     with the ordering of §5.</li>
-    <li><b>The correctness bugs were reasoned, not reproduced.</b> A-27 and A-31 are read
-    from the code and are not in doubt — there is no timezone conversion and no appearance
-    observer to find. But neither was demonstrated by running the app in a non-UTC zone or
-    toggling the system appearance, and doing so is the first step of fixing them.</li>
+    <li><b>Three fixes are not covered by an automated test</b>, because each
+    needs a real window or a real pasteboard. A-31's theme following an OS
+    appearance change; and the three working directions of A-32's clipboard.
+    The logic either side of each is unit-tested — the date conversion across
+    five zones, the clipboard's text parsing and its rejection of prose — but
+    the round trip through the platform is a manual check. A-27 <em>is</em>
+    covered: the zone is a parameter, so a test can name one.</li>
     <li><b>The terminal phase was not considered.</b> <code>terminal.html</code> is a plan,
     not code. Where a finding here interacts with it — the shared worker pool, the clipboard,
     the settings schema — this document assumes Phase 2 has not started.</li>
@@ -1412,17 +1563,21 @@ let volumes = self.volumes();       // → cached (A-25)</code></pre>
     path handling around symlinks, and the new <code>fsevent-sys</code> proposal in D-40 all
     deserve a pass that this is not.</li>
     <li><b>Rev 1's own work was re-read, not re-derived.</b> A-29, A-33 and A-35 are all
-    places where rev 1's fixes stopped one step short, which suggests the same is true
-    somewhere this pass did not look.</li>
+    places where rev 1's fixes stopped one step short — and A-28 was a fix
+    applied to one function and not to the one beside it. That pattern held up
+    within this pass too: the A-29 fix itself very nearly reintroduced A-16.
+    It is the most reliable place to look for a rev 3.</li>
   </ul>
 </section>
 
 <footer>
-  <p>Ferret · second audit · rev 2 · 29 August 2026 · GPL-3.0-or-later<br>
+  <p>Ferret · second audit · rev 2 · 29 August 2026 · <b>all findings landed</b> · GPL-3.0-or-later<br>
   Companion to <a href="plan.html">plan.html</a> (whole product), <a href="ui-base.html">ui-base.html</a> (phase 1)
   and <a href="terminal.html">terminal.html</a> (phase 2).
   New IDs A-27…A-39 and D-39…D-42 continue the numbering of rev 1, whose A-01…A-26 and D-33…D-38 are cited
-  throughout the source and must not be reused. D-39 amends <code>plan.html</code>'s "no date library" note.</p>
+  throughout the source and must not be reused; a rev 3 starts at A-40 and D-43.
+  D-39 amends <code>plan.html</code>'s "no date library" note. D-40 was superseded by a
+  simpler fix than the one it proposed — see §0 and §9.</p>
 </footer>
 
 </main>
