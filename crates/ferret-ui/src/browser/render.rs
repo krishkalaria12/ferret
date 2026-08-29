@@ -176,6 +176,11 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::ToggleTheme, window, cx| {
                 this.toggle_theme(window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &actions::OpenInTerminal, window, cx| {
+                    this.open_current_in_terminal(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &actions::AddToFavorites, _, cx| {
                 this.add_current_to_favorites(cx)
             }))

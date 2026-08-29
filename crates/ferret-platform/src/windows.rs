@@ -8,7 +8,7 @@
 
 use crate::config::MAX_VOLUMES;
 use crate::errors::{PlatformError, Result};
-use crate::{Place, PlaceKind, Platform};
+use crate::{Place, PlaceKind, Platform, validate_terminal_directory};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub struct Windows;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
 fn spawn_explorer(args: &[String], action: &'static str, path: PathBuf) -> Result<()> {
     use std::os::windows::process::CommandExt;
@@ -32,6 +33,28 @@ fn spawn_explorer(args: &[String], action: &'static str, path: PathBuf) -> Resul
         Ok(_) => Ok(()),
         Err(source) => Err(PlatformError::from_io(action, path, source)),
     }
+}
+
+fn spawn_terminal(path: &Path) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let path_text = path.to_string_lossy().into_owned();
+    let windows_terminal = std::process::Command::new("wt.exe")
+        .args(["-d", &path_text])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    if windows_terminal.is_ok() {
+        return Ok(());
+    }
+
+    let escaped = path_text.replace('\'', "''");
+    let command = format!("Set-Location -LiteralPath '{escaped}'");
+    std::process::Command::new("powershell.exe")
+        .args(["-NoExit", "-Command", &command])
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|source| PlatformError::from_io("open a terminal in", path, source))
 }
 
 fn place(kind: PlaceKind, name: &str, path: PathBuf) -> Option<Place> {
@@ -58,6 +81,12 @@ impl Platform for Windows {
         let owned = path.to_path_buf();
         let arg = format!("/select,{}", owned.display());
         smol::unblock(move || spawn_explorer(&[arg], "reveal", owned)).await
+    }
+
+    async fn open_in_terminal(&self, path: &Path) -> Result<()> {
+        let owned = path.to_path_buf();
+        validate_terminal_directory(&owned)?;
+        smol::unblock(move || spawn_terminal(&owned)).await
     }
 
     async fn move_to_trash(&self, path: &Path) -> Result<()> {

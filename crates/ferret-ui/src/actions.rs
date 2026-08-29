@@ -37,6 +37,7 @@ actions!(
         ViewAsColumns,
         ViewAsIcons,
         ToggleTheme,
+        OpenInTerminal,
         AddToFavorites,
         FocusFilter,
         ClearFilter,

@@ -166,6 +166,8 @@ impl Browser {
                         menu.menu("Select All", Box::new(actions::SelectAll))
                             .menu("Paste", Box::new(actions::Paste))
                             .separator()
+                            .menu("Open in Terminal", Box::new(actions::OpenInTerminal))
+                            .separator()
                             .menu("Show Hidden Files", Box::new(actions::ToggleHidden))
                             .separator()
                             .menu("Add Folder to Favorites", Box::new(actions::AddToFavorites))

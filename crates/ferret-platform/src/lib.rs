@@ -26,6 +26,20 @@ pub use icon::{IconBitmap, IconKey, IconProvider, icon_provider};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
+fn validate_terminal_directory(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        Ok(())
+    } else if path.exists() {
+        Err(PlatformError::NotADirectory {
+            path: path.to_path_buf(),
+        })
+    } else {
+        Err(PlatformError::NotFound {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
 /// The backend for the platform Ferret was built for.
 ///
 /// Linux is deferred (D-19): rather than a stub that lies, the constructor
@@ -103,6 +117,12 @@ pub trait Platform: Send + Sync + 'static {
     /// Used by "Reveal in Finder" / "Show in Explorer".
     async fn reveal_in_file_manager(&self, path: &Path) -> Result<()>;
 
+    /// Open a system terminal with `path` as its working directory (D-29).
+    ///
+    /// This is independent of the embedded terminal and remains useful as an
+    /// escape hatch when a command needs the user's full terminal application.
+    async fn open_in_terminal(&self, path: &Path) -> Result<()>;
+
     /// Move a path to the platform Trash / Recycle Bin.
     ///
     /// Gate 5: no delete path may exist that does not come through here
@@ -119,4 +139,45 @@ pub trait Platform: Send + Sync + 'static {
 
     /// Mounted volumes, ready to browse.
     fn volumes(&self) -> Vec<Place>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_directory_rejects_files_and_missing_paths() {
+        let unique = format!(
+            "ferret-terminal-directory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let file = std::env::temp_dir().join(unique);
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        assert!(matches!(
+            validate_terminal_directory(&file),
+            Err(PlatformError::NotADirectory { .. })
+        ));
+        std::fs::remove_file(&file).unwrap();
+        assert!(matches!(
+            validate_terminal_directory(&file),
+            Err(PlatformError::NotFound { .. })
+        ));
+    }
+
+    /// Launches a real application, so this is an explicit manual gate rather
+    /// than part of the ordinary unit suite.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "opens Terminal.app"]
+    fn open_in_terminal_smoke() {
+        let dir = std::env::var_os("FERRET_TERMINAL_SMOKE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap());
+        smol::block_on(platform().open_in_terminal(&dir)).unwrap();
+    }
 }

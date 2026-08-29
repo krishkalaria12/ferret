@@ -16,6 +16,9 @@ pub enum PlatformError {
     #[error("Ferret doesn't have permission to open {path}.")]
     PermissionDenied { path: PathBuf },
 
+    #[error("Ferret can't open a terminal in {path} because it isn't a folder.")]
+    NotADirectory { path: PathBuf },
+
     /// The current platform build does not implement the operation. Linux is
     /// deferred (D-19); a missing backend must say so rather than guess.
     #[error("This platform doesn't support {capability} yet.")]
@@ -36,6 +39,7 @@ impl PlatformError {
         match source.kind() {
             io::ErrorKind::NotFound => PlatformError::NotFound { path },
             io::ErrorKind::PermissionDenied => PlatformError::PermissionDenied { path },
+            io::ErrorKind::NotADirectory => PlatformError::NotADirectory { path },
             _ => PlatformError::Io {
                 action,
                 path,

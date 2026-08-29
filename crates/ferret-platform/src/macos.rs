@@ -8,7 +8,7 @@
 
 use crate::config::{MAX_VOLUMES, VOLUME_EXCLUSIONS};
 use crate::errors::{PlatformError, Result};
-use crate::{Place, PlaceKind, Platform};
+use crate::{Place, PlaceKind, Platform, validate_terminal_directory};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +58,11 @@ impl Platform for MacOs {
 
     async fn reveal_in_file_manager(&self, path: &Path) -> Result<()> {
         run_open(&["-R"], "reveal", path).await
+    }
+
+    async fn open_in_terminal(&self, path: &Path) -> Result<()> {
+        validate_terminal_directory(path)?;
+        run_open(&["-a", "Terminal"], "open a terminal in", path).await
     }
 
     async fn move_to_trash(&self, path: &Path) -> Result<()> {
