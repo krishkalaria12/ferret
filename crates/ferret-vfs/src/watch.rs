@@ -7,10 +7,10 @@
 //! side (a short debounce), because only it knows how busy the UI currently
 //! is.
 //!
-//! Behind that shape is one registry (D-37). There is a single backend watcher
-//! for the whole process, and [`Watch`] is a reference-counted subscription to
-//! one directory within it. Before this, every `Folder` constructed its own
-//! `notify::RecommendedWatcher` — its own FSEvents stream on macOS or
+//! Behind that shape is a registry (D-37): **one backend watcher per distinct
+//! directory**, with reference-counted subscriptions, and [`Watch`] is a
+//! subscription rather than a watcher. Before it, every `Folder` constructed
+//! its own `notify::RecommendedWatcher` — its own FSEvents stream on macOS or
 //! `ReadDirectoryChangesW` registration on Windows, its own thread, and its
 //! own draining task. Ten tabs in column view was up to forty of each, for a
 //! handful of distinct directories most of which were shared (A-17).
@@ -18,22 +18,28 @@
 //! Dropping [`Watch`] unsubscribes. There is no stop token to forget,
 //! matching the cancel-by-drop rule of `Vfs::read_dir`.
 //!
-//! # The cost a shared backend has, and what is done about it
+//! # Why per directory, and not one watcher for everything
 //!
-//! `notify`'s FSEvents backend stops and restarts its whole stream on every
-//! `watch` and `unwatch` (`fsevent.rs`: both call `stop()`, edit the path
-//! list, then `run()`). With one watcher per folder that was invisible,
-//! because each stream was its own. Sharing one means every registration
-//! change is a short window in which *other* directories' events are lost —
-//! and a lost event is a row that stays stale until something else happens,
-//! which is the failure A-06 exists to prevent.
+//! One watcher for the whole process is the obvious reading of A-17, and it is
+//! wrong. `notify`'s FSEvents backend stops and restarts its entire stream on
+//! every `watch` and `unwatch` — `fsevent.rs`: both call `stop()`, edit the
+//! path list, then `run()` — and it pins `since_when` to
+//! `kFSEventStreamEventIdSinceNow` at construction without ever advancing it.
+//! So with a shared stream, every registration change is a window in which
+//! *every other watched directory* loses events outright.
 //!
-//! It cannot be removed without going back to one stream per folder, which is
-//! what A-17 is about. It is made rare instead: a directory that loses its
-//! last subscriber keeps its registration for a while ([`MAX_IDLE_WATCHES`]),
-//! so navigating away and back, or closing and reopening a tab, costs no
-//! rebuild at all — only reaching a directory nothing has watched recently
-//! does.
+//! That was measured, not assumed: writing 240 files into one watched
+//! directory while twelve others were subscribed and dropped around it lost
+//! **91% of them** (D-40). A lost event is a row that stays stale until
+//! something else happens, which is exactly the failure A-06 exists to
+//! prevent — so this was strictly worse than the forty watchers it replaced.
+//!
+//! What A-17 actually asked for is deduplication by *directory*: ten tabs on
+//! one folder should cost one watcher, not ten. Keying the registry that way
+//! keeps every bit of that — column view over a deep path is four watchers,
+//! not forty — while giving each directory its own independent stream, so
+//! registering one cannot disturb another. `notify` 8.2.0 behaves identically
+//! here, so upgrading is not an alternative.
 
 use crate::config::WATCH_EVENT_BUFFER;
 use notify::Watcher as _;
@@ -46,13 +52,17 @@ use std::sync::{
 };
 use std::time::Duration;
 
-/// How many directories keep a native registration after their last
-/// subscriber leaves.
+/// How many directories keep a live watcher after their last subscriber
+/// leaves.
 ///
-/// Unregistering is not free — see the module header — so a directory that
-/// goes idle is kept for a while in case it is wanted again, which navigating
-/// back or reopening a tab is. Bounded because the registration is real work
-/// the OS does for a folder nobody is looking at.
+/// Building one spawns a thread and an OS-level stream, so a directory that
+/// has just gone idle is worth keeping briefly in case it is wanted again —
+/// which navigating away and back, or closing and reopening a tab, is.
+///
+/// Bounded because an idle watcher is real work the OS does for a folder
+/// nobody is looking at. Unlike under the old shared stream, holding these is
+/// now purely a cost-vs-latency trade: an idle watcher cannot affect what any
+/// other directory sees.
 const MAX_IDLE_WATCHES: usize = 8;
 
 /// How long the watcher will wait before reporting an event burst.
@@ -148,21 +158,27 @@ struct Subscriber {
 /// last. Remote mounts (Phase 7) will need a different change-detection
 /// mechanism entirely — polling for SFTP, nothing at all for S3 — and this is
 /// the seam where that plugs in.
+/// One watched directory: its backend watcher, and everyone listening to it.
+struct Watched {
+    /// Held for its `Drop`, which unregisters the directory. Its own stream,
+    /// so building or dropping it cannot disturb any other directory.
+    _watcher: notify::RecommendedWatcher,
+    subscribers: Vec<Subscriber>,
+}
+
 struct Registry {
-    /// `None` until the first subscription, and again if the backend refuses
-    /// to start. Separate from `subscribers` so neither lock is ever held
-    /// while the other is taken.
+    /// Canonical directory to its watcher and subscribers.
     ///
-    /// `parking_lot` throughout: these are taken from the backend's callback
-    /// thread on every filesystem event, they guard a map lookup and a
-    /// non-blocking send, and `std`'s poisoning would turn one panic anywhere
-    /// into a process that silently stops watching files.
-    backend: Mutex<Option<notify::RecommendedWatcher>>,
-    subscribers: Mutex<HashMap<PathBuf, Vec<Subscriber>>>,
-    /// Registered directories with no subscribers left, oldest first.
+    /// `parking_lot`: this is taken from a backend callback thread on every
+    /// filesystem event, it guards a map lookup and a non-blocking send, and
+    /// `std`'s poisoning would turn one panic anywhere into a process that
+    /// silently stops watching files.
+    watched: Mutex<HashMap<PathBuf, Watched>>,
+    /// Directories still watched with nobody listening, oldest first. Their
+    /// entries stay in `watched`; this is only the eviction order.
     ///
-    /// Its own lock, taken after `subscribers` is released rather than while
-    /// it is held, so the two can never deadlock against the backend thread.
+    /// Its own lock, taken after `watched` is released rather than while it is
+    /// held, so the two can never deadlock against a callback thread.
     idle: Mutex<Vec<PathBuf>>,
     next_id: AtomicU64,
 }
@@ -172,8 +188,7 @@ static REGISTRY: OnceLock<Arc<Registry>> = OnceLock::new();
 fn registry() -> &'static Arc<Registry> {
     REGISTRY.get_or_init(|| {
         Arc::new(Registry {
-            backend: Mutex::new(None),
-            subscribers: Mutex::new(HashMap::new()),
+            watched: Mutex::new(HashMap::new()),
             idle: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
         })
@@ -181,109 +196,94 @@ fn registry() -> &'static Arc<Registry> {
 }
 
 impl Registry {
-    /// Fan one backend event out to the directories it concerns.
+    /// Fan one directory's events out to everyone subscribed to it.
     ///
-    /// A non-recursive watch on `D` reports paths inside `D`, plus `D` itself
-    /// when `D` is removed. One event can name paths in more than one watched
-    /// directory — a rename across two open tabs does — so they are grouped by
-    /// parent rather than broadcast.
-    ///
-    /// Paths arrive in the canonical namespace — FSEvents resolves symlinks
-    /// before reporting, so a watch on `/var/folders/x` produces
-    /// `/private/var/folders/x/...` — and are re-expressed against each
+    /// `dir` is the canonical path this watcher was created for, so there is
+    /// no routing to do — a watcher hears about one directory and nothing
+    /// else. Paths arrive in the canonical namespace (FSEvents resolves
+    /// symlinks before reporting, so a watch on `/var/folders/x` produces
+    /// `/private/var/folders/x/...`) and are re-expressed against each
     /// subscriber's own directory on the way out.
-    fn dispatch(&self, result: notify::Result<notify::Event>) {
-        let subscribers = self.subscribers.lock();
+    fn dispatch(&self, dir: &Path, result: notify::Result<notify::Event>) {
+        let watched = self.watched.lock();
+        let Some(entry) = watched.get(dir) else {
+            return; // Unsubscribed while this event was in flight.
+        };
 
         let event = match result {
             Ok(event) => event,
             Err(_) => {
-                // The backend is shared, so a failure it does not attribute to
-                // a path is not attributable to a directory either. Every
-                // subscriber re-lists; one that has genuinely vanished finds
-                // out from its own `read_dir`, which is the reliable signal.
-                for subscriber in subscribers.values().flatten() {
+                // A backend error that names no path is not something the
+                // individual paths can repair: this directory re-lists, and
+                // one that has genuinely vanished finds out from its own
+                // `read_dir`, which is the reliable signal.
+                for subscriber in &entry.subscribers {
                     subscriber.forwarder.forward(WatchEvent::Desynced);
                 }
                 return;
             }
         };
 
+        // Removing the watched directory itself ends the story; removing
+        // something *inside* it is just a change to re-stat.
         let removal = matches!(event.kind, notify::EventKind::Remove(_));
-        // Grouped by directory, not broadcast: one event can name paths in
-        // more than one watched directory — a rename between two open tabs
-        // does — and each consumer must hear only about its own.
-        let mut changed: HashMap<&Path, Vec<&Path>> = HashMap::new();
-
-        for path in &event.paths {
-            // Removing the watched directory itself ends the story for its
-            // subscribers; removing something *inside* it is just a change
-            // they re-stat.
-            if removal && let Some(watchers) = subscribers.get(path.as_path()) {
-                for subscriber in watchers {
-                    subscriber.forwarder.forward(WatchEvent::Gone);
-                }
+        if removal && event.paths.iter().any(|p| p == dir) {
+            for subscriber in &entry.subscribers {
+                subscriber.forwarder.forward(WatchEvent::Gone);
             }
-            if let Some(parent) = path.parent()
-                && let Some((dir, _)) = subscribers.get_key_value(parent)
-            {
-                changed
-                    .entry(dir.as_path())
-                    .or_default()
-                    .push(path.as_path());
-            }
+            return;
         }
 
-        for (dir, paths) in changed {
-            let Some(watchers) = subscribers.get(dir) else {
-                continue;
-            };
-            for subscriber in watchers {
-                let rebased = paths
-                    .iter()
-                    .map(|path| match path.file_name() {
-                        Some(name) => subscriber.requested.join(name),
-                        None => path.to_path_buf(),
-                    })
-                    .collect();
-                subscriber.forwarder.forward(WatchEvent::Changed(rebased));
-            }
+        // Only direct children. The watch is `NonRecursive`, so this is
+        // usually everything it reports — but a directory reached through a
+        // symlink can see a sibling's path, and expanded subtrees are a
+        // snapshot by design (A-24).
+        let children: Vec<&Path> = event
+            .paths
+            .iter()
+            .filter(|p| p.parent() == Some(dir))
+            .map(PathBuf::as_path)
+            .collect();
+        if children.is_empty() {
+            return;
+        }
+
+        for subscriber in &entry.subscribers {
+            let rebased = children
+                .iter()
+                .map(|path| match path.file_name() {
+                    Some(name) => subscriber.requested.join(name),
+                    None => path.to_path_buf(),
+                })
+                .collect();
+            subscriber.forwarder.forward(WatchEvent::Changed(rebased));
         }
     }
 
-    /// Register `dir` with the backend, starting it if this is the first one.
-    fn watch_natively(self: &Arc<Self>, dir: &Path) -> std::io::Result<()> {
+    /// Build this directory's own watcher.
+    ///
+    /// One stream per directory, which is what keeps a new subscription from
+    /// interrupting delivery to every other one — see the module header.
+    fn build_watcher(self: &Arc<Self>, dir: &Path) -> std::io::Result<notify::RecommendedWatcher> {
         let to_io = |err: notify::Error| std::io::Error::other(err.to_string());
-        let mut backend = self.backend.lock();
-        if backend.is_none() {
-            let registry = Arc::clone(self);
-            *backend = Some(
-                notify::recommended_watcher(move |result| registry.dispatch(result))
-                    .map_err(to_io)?,
-            );
-        }
-        backend
-            .as_mut()
-            .expect("just constructed")
+        let registry = Arc::clone(self);
+        let owned = dir.to_path_buf();
+        let mut watcher = notify::recommended_watcher(move |result| {
+            registry.dispatch(&owned, result);
+        })
+        .map_err(to_io)?;
+        watcher
             .watch(dir, notify::RecursiveMode::NonRecursive)
-            .map_err(to_io)
-    }
-
-    fn unwatch_natively(&self, dir: &Path) {
-        if let Some(backend) = self.backend.lock().as_mut() {
-            // The directory may already be gone, which is exactly when this
-            // fails and exactly when there is nothing left to detach.
-            let _ = backend.unwatch(dir);
-        }
+            .map_err(to_io)?;
+        Ok(watcher)
     }
 
     fn subscribe(self: &Arc<Self>, requested: PathBuf) -> std::io::Result<Watch> {
         // Keyed on the canonical path, because that is the namespace the
         // backend reports in: on macOS a watch on `/var/folders/x` produces
-        // events under `/private/var/folders/x`, and routing by parent would
-        // find no subscriber at all. It also means two tabs that reached one
-        // directory by different symlinked routes share a single native
-        // watch, which is the point of the registry.
+        // events under `/private/var/folders/x`. It also means two tabs that
+        // reached one directory by different symlinked routes share a single
+        // native watch, which is the point of the registry.
         let dir = requested
             .canonicalize()
             .unwrap_or_else(|_| requested.clone());
@@ -296,31 +296,41 @@ impl Registry {
             requested,
         };
 
-        // Whether this is the first claim decides whether the backend has to
-        // learn about the directory at all — which is the whole point: a
-        // second tab on one folder costs a channel, not a native stream. An
-        // idle registration is reclaimed here rather than rebuilt, so
-        // navigating back to somewhere recently open is free.
-        let first = {
-            let mut subscribers = self.subscribers.lock();
-            let watchers = subscribers.entry(dir.clone()).or_default();
-            watchers.push(subscriber);
-            watchers.len() == 1
+        // A directory already watched — by another tab, or parked as idle —
+        // costs a channel and a map entry. Only a new one builds a stream,
+        // which is the whole of A-17.
+        let needs_watcher = !self.watched.lock().contains_key(&dir);
+        let watcher = if needs_watcher {
+            Some(self.build_watcher(&dir)?)
+        } else {
+            None
         };
-        let reclaimed = {
-            let mut idle = self.idle.lock();
-            let was_parked = idle.contains(&dir);
-            idle.retain(|parked| *parked != dir);
-            was_parked
-        };
-        let needs_registering = first && !reclaimed;
 
-        if needs_registering && let Err(err) = self.watch_natively(&dir) {
-            // Leave nothing half-registered behind for the next subscriber to
-            // inherit as a watch that silently never fires.
-            self.subscribers.lock().remove(&dir);
-            return Err(err);
+        {
+            let mut watched = self.watched.lock();
+            match watched.get_mut(&dir) {
+                Some(entry) => entry.subscribers.push(subscriber),
+                None => {
+                    // `watcher` is `Some` unless another thread inserted the
+                    // same directory while this one was building; in that
+                    // case `get_mut` above took its entry and this arm is
+                    // unreachable. Building twice would be wasteful, not
+                    // wrong, so the loser's watcher is simply dropped.
+                    let Some(watcher) = watcher else {
+                        return Err(std::io::Error::other("watcher vanished during subscribe"));
+                    };
+                    watched.insert(
+                        dir.clone(),
+                        Watched {
+                            _watcher: watcher,
+                            subscribers: vec![subscriber],
+                        },
+                    );
+                }
+            }
         }
+        // No longer idle, whether or not it was.
+        self.idle.lock().retain(|parked| *parked != dir);
 
         Ok(Watch {
             events: rx,
@@ -333,25 +343,22 @@ impl Registry {
     }
 
     fn unsubscribe(&self, dir: &Path, id: u64) {
-        let last = {
-            let mut subscribers = self.subscribers.lock();
-            let Some(watchers) = subscribers.get_mut(dir) else {
+        let now_idle = {
+            let mut watched = self.watched.lock();
+            let Some(entry) = watched.get_mut(dir) else {
                 return;
             };
-            watchers.retain(|subscriber| subscriber.id != id);
-            let last = watchers.is_empty();
-            if last {
-                subscribers.remove(dir);
-            }
-            last
+            entry.subscribers.retain(|subscriber| subscriber.id != id);
+            entry.subscribers.is_empty()
         };
-        if !last {
+        if !now_idle {
             return;
         }
 
-        // Not unregistered: parked. See the module header — each `unwatch`
-        // costs every other watched directory a gap in delivery, and a folder
-        // just navigated away from is one of the likeliest to come back.
+        // Parked, not torn down: building a watcher spawns a thread and an
+        // OS-level stream, and a folder just navigated away from is one of
+        // the likeliest to come back. Dropping one no longer costs any other
+        // directory anything, so this is purely latency against idle cost.
         let evicted = {
             let mut idle = self.idle.lock();
             idle.retain(|parked| parked != dir);
@@ -359,7 +366,14 @@ impl Registry {
             (idle.len() > MAX_IDLE_WATCHES).then(|| idle.remove(0))
         };
         if let Some(evicted) = evicted {
-            self.unwatch_natively(&evicted);
+            // Dropping the entry drops its watcher, which unregisters it.
+            let mut watched = self.watched.lock();
+            if watched
+                .get(&evicted)
+                .is_some_and(|entry| entry.subscribers.is_empty())
+            {
+                watched.remove(&evicted);
+            }
         }
     }
 }
@@ -401,25 +415,30 @@ impl Watch {
     }
 
     /// How many consumers are watching `dir`, canonicalised as the registry
-    /// keys it. For tests: a shared registration is the A-17 property.
+    /// keys it. For tests: sharing one watcher is the A-17 property.
     #[cfg(test)]
     fn subscribers_for(dir: &Path) -> usize {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        registry().subscribers.lock().get(&dir).map_or(0, Vec::len)
+        registry()
+            .watched
+            .lock()
+            .get(&dir)
+            .map_or(0, |entry| entry.subscribers.len())
     }
 
-    /// Whether the backend is still registered for `dir` — with a live
-    /// subscriber, or parked as idle.
+    /// Whether a watcher for `dir` still exists — with a live subscriber, or
+    /// parked as idle.
     #[cfg(test)]
     fn is_registered(dir: &Path) -> bool {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        registry().subscribers.lock().contains_key(&dir) || registry().idle.lock().contains(&dir)
+        registry().watched.lock().contains_key(&dir)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
 
     fn tempdir(tag: &str) -> PathBuf {
@@ -623,6 +642,84 @@ mod tests {
         for root in &roots {
             fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[test]
+    fn subscribing_to_one_directory_does_not_cost_another_its_events() {
+        // D-40, and the reason the registry is keyed per directory rather
+        // than sharing one stream. `notify`'s FSEvents backend stops and
+        // restarts the whole stream on every registration and resumes from
+        // "now", so with one shared watcher everything written during a
+        // rebuild was gone — measured at 91% loss.
+        //
+        // The contract being asserted is A-06's, not "nothing is ever
+        // dropped": a consumer may miss individual events, but only if it is
+        // *told* to re-list. What must never happen is silent staleness.
+        let root = tempdir("churn");
+        let watched = root.join("watched");
+        fs::create_dir_all(&watched).unwrap();
+        let watch = Watch::start(watched.clone()).unwrap();
+
+        // Let the stream come up before anything is written into it.
+        expect_change(&[("warmup", &watch)], &watched);
+        while watch.events.try_recv().is_ok() {}
+
+        const ROUNDS: usize = 8;
+        const PER_ROUND: usize = 5;
+        let mut expected = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut desynced = false;
+
+        // Drained as we go, the way a real consumer does — the channel holds
+        // WATCH_EVENT_BUFFER events, and a test that only drains at the end
+        // is measuring its own laziness.
+        let drain = |watch: &Watch, seen: &mut BTreeSet<String>, desynced: &mut bool| {
+            while let Ok(event) = watch.events.try_recv() {
+                match event {
+                    WatchEvent::Changed(paths) => seen.extend(
+                        paths
+                            .iter()
+                            .filter_map(|p| p.file_name()?.to_str().map(str::to_owned)),
+                    ),
+                    WatchEvent::Desynced => *desynced = true,
+                    WatchEvent::Gone => {}
+                }
+            }
+        };
+
+        for round in 0..ROUNDS {
+            // Churn: a directory subscribed and dropped around every write,
+            // which is what entering and leaving column view does.
+            let other = root.join(format!("other-{round}"));
+            fs::create_dir_all(&other).unwrap();
+            let sub = Watch::start(other).unwrap();
+            for i in 0..PER_ROUND {
+                let name = format!("f-{round}-{i}.txt");
+                fs::write(watched.join(&name), b"x").unwrap();
+                expected.insert(name);
+            }
+            drop(sub);
+            std::thread::sleep(Duration::from_millis(40));
+            drain(&watch, &mut seen, &mut desynced);
+        }
+
+        // FSEvents coalesces, so give the tail a moment to arrive.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && !expected.is_subset(&seen) && !desynced {
+            drain(&watch, &mut seen, &mut desynced);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let missing: Vec<&String> = expected.difference(&seen).collect();
+        assert!(
+            missing.is_empty() || desynced,
+            "{} of {} writes went unreported, and no Desynced was delivered — \
+             the listing would sit stale forever: {missing:?}",
+            missing.len(),
+            expected.len()
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
