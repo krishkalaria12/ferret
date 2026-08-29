@@ -10,6 +10,7 @@ repository.workspace = true
 async-trait.workspace = true
 dirs.workspace = true
 parking_lot.workspace = true
+smol_str.workspace = true
 smol.workspace = true
 thiserror.workspace = true
 trash.workspace = true

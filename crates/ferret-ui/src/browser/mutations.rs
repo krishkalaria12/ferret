@@ -437,38 +437,50 @@ impl Browser {
             .clone()
     }
 
-    pub(super) fn places(&self, cx: &Context<Self>) -> Vec<Place> {
-        cx.global::<FerretState>().platform.places()
-    }
-
     /// The last volume list the background probe produced.
     ///
-    /// Never a filesystem call: [`Self::start_volume_refresh`] owns the
+    /// Never a filesystem call: [`Self::start_place_refresh`] owns the
     /// probing, so the sidebar draws the last known answer even while a stale
     /// mount is taking seconds to reply (A-25).
     pub(super) fn volumes(&self) -> Vec<Place> {
         self.volumes.clone()
     }
 
-    /// Keep [`Self::volumes`] fresh from a background timer.
+    /// The last Places list the background probe produced.
     ///
-    /// One probe every [`VOLUMES_TTL`], on the background executor, for the
-    /// life of the browser. The first pass runs immediately so the sidebar is
-    /// not empty for fifteen seconds on launch.
-    pub(super) fn start_volume_refresh(&mut self, cx: &mut Context<Self>) {
-        self.volume_refresh = Some(cx.spawn(async move |this, cx| {
+    /// Same rule and the same reason (A-28). `platform.places()` is not a
+    /// lookup — it asks the filesystem whether each well-known folder still
+    /// exists, so it was seven `is_dir()` calls and eight allocations *per
+    /// frame*, and `~/Documents` on an evicted iCloud Drive or a home
+    /// directory on a dropped SMB mount is exactly where `is_dir` blocks.
+    pub(super) fn places(&self) -> Vec<Place> {
+        self.places.clone()
+    }
+
+    /// Keep [`Self::places`] and [`Self::volumes`] fresh from one background
+    /// timer.
+    ///
+    /// One task rather than two: they are the same kind of work — ask the
+    /// platform, compare, repaint if it moved — on the same schedule, and two
+    /// timers would wake the window twice as often to usually do nothing.
+    /// The first pass runs immediately so the sidebar is not empty for fifteen
+    /// seconds on launch.
+    pub(super) fn start_place_refresh(&mut self, cx: &mut Context<Self>) {
+        self.place_refresh = Some(cx.spawn(async move |this, cx| {
             loop {
                 let platform = cx.update(|cx| cx.global::<FerretState>().platform.clone());
                 let probed = cx
                     .background_executor()
-                    .spawn(async move { platform.volumes() })
+                    .spawn(async move { (platform.places(), platform.volumes()) })
                     .await;
 
                 let alive = this.update(cx, |this, cx| {
                     // Repaint only on a real change: mounting nothing must not
                     // wake the window every fifteen seconds.
-                    if this.volumes != probed {
-                        this.volumes = probed;
+                    let (places, volumes) = probed;
+                    if this.places != places || this.volumes != volumes {
+                        this.places = places;
+                        this.volumes = volumes;
                         cx.notify();
                     }
                 });

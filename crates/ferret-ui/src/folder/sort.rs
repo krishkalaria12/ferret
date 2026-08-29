@@ -172,17 +172,26 @@ impl Folder {
     }
 
     /// Select a set of display rows (marquee selection).
+    ///
+    /// This is the hot one: it runs on every mouse-move while a band is being
+    /// dragged. It counts as it goes, so the cost is the size of the band
+    /// rather than the size of the directory (A-29).
     pub fn select_rows(&mut self, rows: impl IntoIterator<Item = usize>) {
         self.selection.clear();
+        self.selected_visible_count = 0;
+        self.selected_visible_bytes = 0;
         for row in rows {
-            if let Some(id) = self.id_at(row) {
-                self.selection.insert(id);
+            if let Some(id) = self.id_at(row)
+                && self.selection.insert(id)
+            {
+                self.selected_visible_count += 1;
+                self.selected_visible_bytes += self.row_weight(id);
             }
         }
         if let Some(first) = self.selection.iter().next().copied() {
             self.anchor = Some(first);
         }
-        self.refresh_selection_summary();
+        self.invalidate_selected_paths();
     }
 
     /// Type-ahead: select the first row at or after `from` whose name starts
@@ -282,7 +291,7 @@ impl Folder {
         }
         self.row_of_id = row_of_id;
 
-        self.refresh_selection_summary();
+        self.recount_selection();
     }
 
     /// Splice one expanded folder's visible children in beneath it, and

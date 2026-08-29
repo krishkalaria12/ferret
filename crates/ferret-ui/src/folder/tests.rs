@@ -875,3 +875,45 @@ fn sort_and_filter_cost_on_a_large_listing() {
     }
     println!("filter: {:?} per keystroke", start.elapsed() / 6);
 }
+
+/// What one selection change costs on a large listing (A-29).
+///
+/// A measurement, not an assertion — the sibling of
+/// `reindex_cost_on_a_large_listing`. Run with
+/// `cargo test -p ferret-ui --release selection_summary_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn selection_summary_cost() {
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| entry(&format!("file-{i:06}.txt"), EntryKind::File, i, t(i)))
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+    f.select_only(0);
+
+    // A marquee drag: extend the band by one row, over and over.
+    let start = std::time::Instant::now();
+    for row in 1..201 {
+        f.extend_select(row);
+        std::hint::black_box((f.selection_count(), f.selection_size()));
+    }
+    println!("small band:  {:?} per change", start.elapsed() / 200);
+
+    // The worst case: everything selected, then one more change.
+    f.select_all();
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        f.toggle_select(0);
+        std::hint::black_box((f.selection_count(), f.selection_size()));
+    }
+    println!("everything selected: {:?} per change", start.elapsed() / 20);
+}

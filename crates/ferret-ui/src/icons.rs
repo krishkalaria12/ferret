@@ -206,7 +206,9 @@ impl FileIcons {
 pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
     let state = cx.global::<crate::state::FerretState>();
     let local = entry.path.as_local()?;
-    let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+    // From the entry's cached extension, not by re-parsing its path: this
+    // runs once per visible row per frame (A-33).
+    let key = ferret_platform::IconKey::of_entry(local, entry.is_dir_like(), entry.extension());
     if let Some(image) = state.rendered_os_icons.get(&key) {
         return Some(gpui::ImageSource::Render(image));
     }
@@ -247,7 +249,7 @@ pub(crate) fn collect_os_icon_requests<'a>(
         let Some(local) = entry.path.as_local() else {
             continue;
         };
-        let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+        let key = ferret_platform::IconKey::of_entry(local, entry.is_dir_like(), entry.extension());
         if provider.lookup(&key).is_some() || !seen.insert(key.clone()) {
             continue;
         }

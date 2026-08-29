@@ -449,13 +449,20 @@ impl TableDelegate for ListDelegate {
         _window: &mut Window,
         cx: &mut gpui::Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(entry) = self.folder.read(cx).entry_at(row_ix).cloned() else {
+        // One read of the model for everything this cell needs (A-38).
+        // `render_td` runs once per (row, column), and asking four separate
+        // times was 640 entity reads a frame to answer questions that are
+        // constant for the row.
+        let folder = self.folder.read(cx);
+        let Some(entry) = folder.entry_at(row_ix).cloned() else {
             return div().into_any_element();
         };
+        let selected = folder.is_row_selected(row_ix);
+        let depth = folder.depth_at(row_ix);
+        let expansion = folder.expansion_at(row_ix);
 
         let theme = cx.theme();
         let palette = self.palette(cx);
-        let selected = self.folder.read(cx).is_row_selected(row_ix);
         let focused = self.pane_focused.load(Ordering::Relaxed);
 
         // The focused fill is an accent whose lightness differs per theme, so
@@ -469,8 +476,6 @@ impl TableDelegate for ListDelegate {
         match self.column_at(col_ix) {
             FileColumn::Name => {
                 let broken = entry.kind.is_broken_symlink();
-                let depth = self.folder.read(cx).depth_at(row_ix);
-                let expansion = self.folder.read(cx).expansion_at(row_ix);
                 let toggles = self.toggles.clone();
                 let icon_color = if broken {
                     theme.warning

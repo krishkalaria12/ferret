@@ -185,9 +185,12 @@ pub struct Browser {
     /// plus a `metadata` per entry, and a stale network mount can make that
     /// take seconds — which, on the render path, is seconds of frozen window.
     volumes: Vec<Place>,
-    /// Re-probes `volumes` every [`VOLUMES_TTL`]. Held so the loop stops when
-    /// the browser goes away.
-    volume_refresh: Option<gpui::Task<()>>,
+    /// The well-known folders, as of the same probe. Also never touched from
+    /// render: each one is an `is_dir()` (A-28).
+    places: Vec<Place>,
+    /// Re-probes both every [`VOLUMES_TTL`]. Held so the loop stops when the
+    /// browser goes away.
+    place_refresh: Option<gpui::Task<()>>,
 
     /// Focus for the sidebar, so Tab can reach it and it can show that it has
     /// focus (§8: "Focus must be visible").
@@ -268,11 +271,12 @@ impl Browser {
             filter_input,
             _filter_subscription: filter_subscription,
             volumes: Vec::new(),
-            volume_refresh: None,
+            places: Vec::new(),
+            place_refresh: None,
             sidebar_focus: cx.focus_handle(),
         };
         this.push_tab(start_directory(), window, cx);
-        this.start_volume_refresh(cx);
+        this.start_place_refresh(cx);
         this
     }
 

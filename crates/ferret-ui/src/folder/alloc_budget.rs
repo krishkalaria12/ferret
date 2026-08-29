@@ -9,11 +9,22 @@
 //!
 //! # What it measures, precisely
 //!
-//! Not a rendered frame. There is no window here and no GPUI paint pass; what
-//! this drives is **the questions a frame asks of the model and the icon
-//! table** for one viewport of rows, with everything selected — which is where
-//! all seven of the findings above lived. A regression in GPUI's own element
-//! tree would not show up, and this file should not pretend otherwise.
+//! Not a rendered frame. There is no GPUI paint pass; what this drives is
+//! **the questions a frame asks of the model and the icon tables** for one
+//! viewport of rows, with everything selected — which is where all seven of
+//! the findings above lived. A regression in GPUI's own element tree would not
+//! show up, and this file should not pretend otherwise.
+//!
+//! It does run under a `TestAppContext`, which is what lets it reach
+//! `os_icon` — the platform icon lookup. That used to be skipped for want of
+//! an `App`, and A-33 walked straight through the hole: a `String` allocated
+//! per row per frame to build a cache key, while this budget passed at 2.00.
+//! A documented hole in the one check whose job is to have none is still a
+//! hole.
+//!
+//! A selection pass runs alongside the scroll, because A-29 — a full rescan of
+//! the listing on every selection change — was also invisible to a budget that
+//! only scrolled.
 //!
 //! # The floor
 //!
@@ -28,6 +39,7 @@
 use super::*;
 use crate::icons::FileIcons;
 use ferret_vfs::{EntryKind, Metadata};
+use gpui::AppContext as _;
 
 /// Rows on screen at once. Roughly a maximised list view at 30 px rows; the
 /// exact figure does not matter because the budget is per row.
@@ -79,7 +91,13 @@ fn folder_of(n: usize) -> Folder {
 /// selection fill and its drag source, then the Name, Date and Size cells each
 /// ask the model something. The results are folded into a return value so
 /// nothing here can be optimised away.
-fn draw_rows(folder: &Folder, icons: &FileIcons, first: usize, count: usize) -> usize {
+fn draw_rows(
+    folder: &Folder,
+    icons: &FileIcons,
+    cx: &gpui::App,
+    first: usize,
+    count: usize,
+) -> usize {
     let mut sink = 0usize;
     for row in first..first + count {
         // render_tr: the fill, and the payload a drag would carry.
@@ -99,6 +117,10 @@ fn draw_rows(folder: &Folder, icons: &FileIcons, first: usize, count: usize) -> 
         sink += folder.expansion_at(row).is_some() as usize;
         sink += icons.asset_path(&entry).len();
         sink += gpui::SharedString::new(entry.name()).len();
+        // The platform icon lookup, which is where A-33 hid. A cache miss
+        // returns `None` and the row draws the bundled SVG — but the *key* is
+        // built either way, which is the part that was allocating.
+        sink += crate::icons::os_icon(&entry, cx).is_some() as usize;
 
         // Date and Size — the two that legitimately allocate.
         if let Some(modified) = entry.metadata.and_then(|m| m.modified) {
@@ -111,9 +133,11 @@ fn draw_rows(folder: &Folder, icons: &FileIcons, first: usize, count: usize) -> 
     sink
 }
 
-#[test]
-fn frame_allocation_budget() {
-    let folder = folder_of(DIRECTORY_ROWS);
+#[gpui::test]
+async fn frame_allocation_budget(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(crate::state::load_state()));
+
+    let mut folder = folder_of(DIRECTORY_ROWS);
     let icons = FileIcons::embedded();
     assert_eq!(
         folder.selection_count(),
@@ -125,13 +149,19 @@ fn frame_allocation_budget() {
 
     // Warm up: the first pass resolves lazily-initialised things that a real
     // app resolves before its first frame.
-    std::hint::black_box(draw_rows(&folder, icons, 0, VISIBLE_ROWS));
+    cx.update(|cx| std::hint::black_box(draw_rows(&folder, icons, cx, 0, VISIBLE_ROWS)));
 
     let before = dhat::HeapStats::get();
     for frame in 0..FRAMES {
         // Scroll, so no frame draws the same rows as the last.
         let first = (frame * VISIBLE_ROWS) % (DIRECTORY_ROWS - VISIBLE_ROWS);
-        std::hint::black_box(draw_rows(&folder, icons, first, VISIBLE_ROWS));
+        cx.update(|cx| std::hint::black_box(draw_rows(&folder, icons, cx, first, VISIBLE_ROWS)));
+
+        // And drag a marquee band across those rows while doing it: a
+        // selection change per frame is what a drag actually does, and it is
+        // the path A-29 made O(the directory).
+        folder.select_rows(first..first + VISIBLE_ROWS);
+        std::hint::black_box((folder.selection_count(), folder.selection_size()));
     }
     let after = dhat::HeapStats::get();
     drop(profiler);

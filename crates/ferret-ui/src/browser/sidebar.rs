@@ -174,7 +174,7 @@ impl Browser {
         // Gathered up front so the selected row can be picked against every
         // candidate at once rather than section by section.
         let places = if show_places {
-            self.places(cx)
+            self.places()
         } else {
             Vec::new()
         };
@@ -220,7 +220,7 @@ impl Browser {
         for (i, place) in places.into_iter().enumerate() {
             let active = is_current(&place.path);
             side = side.child(self.sidebar_place_row(
-                SharedString::from(format!("place-{i}")),
+                ("sidebar-place", i),
                 &place.name,
                 place.kind.icon_name(),
                 place.path.clone(),
@@ -243,7 +243,7 @@ impl Browser {
                 .unwrap_or_else(|| fav.to_string_lossy().into_owned());
             let active = is_current(&fav);
             side = side.child(self.sidebar_place_row(
-                SharedString::from(format!("favorite-{i}")),
+                ("sidebar-favorite", i),
                 &name,
                 "icons/file/folder-base.svg",
                 fav.clone(),
@@ -259,7 +259,7 @@ impl Browser {
         for (i, volume) in volumes.into_iter().enumerate() {
             let active = is_current(&volume.path);
             side = side.child(self.sidebar_place_row(
-                SharedString::from(format!("volume-{i}")),
+                ("sidebar-volume", i),
                 &volume.name,
                 volume.kind.icon_name(),
                 volume.path.clone(),
@@ -277,7 +277,7 @@ impl Browser {
     #[allow(clippy::too_many_arguments)]
     fn sidebar_place_row(
         &self,
-        id: SharedString,
+        id: impl Into<gpui::ElementId>,
         label: &str,
         icon: &'static str,
         target: PathBuf,
@@ -299,7 +299,7 @@ impl Browser {
             .as_ref()
             .is_some_and(|(ix, _)| self.favorite_drag == Some(*ix));
         let row = h_flex()
-            .id(id)
+            .id(id.into())
             .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
             .mx(px(8.))

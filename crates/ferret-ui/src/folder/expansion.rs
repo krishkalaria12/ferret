@@ -352,7 +352,7 @@ impl Folder {
         if selection_changed {
             // A selected row may have acquired its first size. Keep the
             // status-bar cache coherent with the row repaint below.
-            self.refresh_selection_summary();
+            self.recount_selection();
         }
 
         let now = Instant::now();

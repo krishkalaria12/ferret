@@ -58,8 +58,9 @@ impl Folder {
         self.selection.clear();
         self.anchor = None;
         self.cursor = None;
-        self.selected_visible_paths = std::sync::Arc::from([]);
+        self.selected_visible_count = 0;
         self.selected_visible_bytes = 0;
+        self.invalidate_selected_paths();
         self.error = None;
         self.loading = true;
         self.loading_since = Some(Instant::now());
@@ -146,7 +147,7 @@ impl Folder {
             }
         }
         if restoring {
-            self.refresh_selection_summary();
+            self.recount_selection();
         }
         cx.emit(FolderEvent::RowsChanged);
         cx.notify();
