@@ -186,6 +186,124 @@ fn natural_sort_can_be_turned_off() {
     assert_eq!(row_names(&f), ["file10.txt", "file9.txt"], "byte order");
 }
 
+/// What a full scan says the selection summary should be.
+///
+/// The incrementally-maintained counters (A-29) are only worth having if they
+/// agree with this after every operation — a drifted count is a status bar
+/// that lies, and it would drift silently.
+fn scanned_summary(f: &Folder) -> (usize, u64) {
+    let mut count = 0;
+    let mut bytes = 0;
+    for row in 0..f.row_count() {
+        if f.is_row_selected(row)
+            && let Some(entry) = f.entry_at(row)
+        {
+            count += 1;
+            bytes += entry.display_len().unwrap_or(0);
+        }
+    }
+    (count, bytes)
+}
+
+fn assert_summary_agrees(f: &Folder, after: &str) {
+    let scanned = scanned_summary(f);
+    assert_eq!(
+        (f.selection_count(), f.selection_size()),
+        scanned,
+        "the maintained summary drifted from a full scan after {after}"
+    );
+    // And the lazily-built path list has to agree with both.
+    assert_eq!(
+        f.selected_paths().len(),
+        scanned.0,
+        "the path list disagrees with the count after {after}"
+    );
+}
+
+#[test]
+fn the_selection_summary_never_drifts() {
+    let mut f = populated(); // src, report.pdf, zebra.txt, .hidden
+    f.set_show_hidden(true);
+    assert_summary_agrees(&f, "the initial listing");
+
+    // Every mutator, in sequences that leave the selection in different
+    // shapes — each one adjusts the totals rather than rescanning, so each
+    // one is a chance to drift.
+    f.select_only(0);
+    assert_summary_agrees(&f, "select_only");
+
+    f.toggle_select(2);
+    assert_summary_agrees(&f, "toggle_select adding");
+    f.toggle_select(2);
+    assert_summary_agrees(&f, "toggle_select removing");
+    // Toggling the same row twice more, to catch a counter that only drifts
+    // on a second pass.
+    f.toggle_select(1);
+    f.toggle_select(1);
+    assert_summary_agrees(&f, "toggle_select twice");
+
+    f.extend_select(3);
+    assert_summary_agrees(&f, "extend_select forwards");
+    f.extend_select(0);
+    assert_summary_agrees(&f, "extend_select backwards past the anchor");
+
+    f.select_rows([0, 2]);
+    assert_summary_agrees(&f, "select_rows");
+    f.select_rows([1, 1, 1]);
+    assert_summary_agrees(&f, "select_rows with duplicates");
+    f.select_rows([]);
+    assert_summary_agrees(&f, "select_rows with nothing");
+
+    f.select_all();
+    assert_summary_agrees(&f, "select_all");
+    f.clear_selection();
+    assert_summary_agrees(&f, "clear_selection");
+
+    // And across the operations that change *visibility* rather than the
+    // selection, which are the ones that must fall back to a full recount.
+    f.select_all();
+    f.set_filter(Some("t".into()));
+    assert_summary_agrees(&f, "a filter hiding some of the selection");
+    f.set_filter(None);
+    assert_summary_agrees(&f, "clearing the filter");
+    f.set_sort(SortKey::Size, SortOrder::Descending);
+    assert_summary_agrees(&f, "re-sorting");
+    f.set_show_hidden(false);
+    assert_summary_agrees(&f, "hiding hidden files");
+}
+
+#[test]
+fn the_summary_survives_a_watcher_burst() {
+    // The path that used to rebuild everything: a probe replaces an entry,
+    // and the totals have to follow its new size.
+    let mut f = populated();
+    f.select_all();
+    assert_summary_agrees(&f, "select_all");
+
+    // A selected file grows.
+    f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/report.pdf"),
+        Ok(entry("report.pdf", EntryKind::File, 9_999, t(1))),
+    )]);
+    assert_summary_agrees(&f, "a selected file changing size");
+
+    // A selected file vanishes.
+    f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/report.pdf"),
+        Err(ferret_vfs::VfsError::NotFound {
+            path: VfsPath::local("/x/report.pdf"),
+        }),
+    )]);
+    assert_summary_agrees(&f, "a selected file being deleted");
+
+    // And one arrives, unselected.
+    f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/new.txt"),
+        Ok(entry("new.txt", EntryKind::File, 42, t(2))),
+    )]);
+    assert_summary_agrees(&f, "an unselected file appearing");
+}
+
 #[test]
 fn selection_survives_resorting() {
     let mut f = populated();
@@ -915,4 +1033,34 @@ fn selection_summary_cost() {
         std::hint::black_box((f.selection_count(), f.selection_size()));
     }
     println!("everything selected: {:?} per change", start.elapsed() / 20);
+}
+
+/// What the column view's metadata panel costs per frame (A-16, and the
+/// regression this nearly became). A measurement, not an assertion.
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn selected_entry_cost() {
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| entry(&format!("file-{i:06}.txt"), EntryKind::File, i, t(i)))
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+
+    // The worst case for a scan: the one selected row is the very last.
+    f.select_only(f.row_count() - 1);
+
+    let start = std::time::Instant::now();
+    for _ in 0..1_000 {
+        std::hint::black_box(f.selected_entry().map(|e| e.name().len()));
+    }
+    println!("selected_entry: {:?} per frame", start.elapsed() / 1_000);
 }

@@ -346,6 +346,24 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_offset_can_push_an_instant_into_the_previous_year() {
+        // The epoch itself, west of Greenwich: the local reading is in 1969,
+        // so the day count goes negative. `div_euclid`/`rem_euclid` are what
+        // make that work — plain `/` and `%` would round towards zero and
+        // produce 1 Jan 1970 at a negative hour.
+        assert_eq!(
+            format_date_in(UNIX_EPOCH, &zone("America/Los_Angeles")),
+            "31 Dec 1969 at 16:00"
+        );
+        // And one second before midnight, local, on the far side.
+        let t = UNIX_EPOCH + Duration::from_secs(8 * 3600 - 1);
+        assert_eq!(
+            format_date_in(t, &zone("America/Los_Angeles")),
+            "31 Dec 1969 at 23:59"
+        );
+    }
+
+    #[test]
     fn daylight_saving_is_not_a_fixed_offset() {
         // The reason this cannot be a constant, and the reason it cannot be
         // hand-rolled: the same zone is +01:00 in January and +02:00 in July.

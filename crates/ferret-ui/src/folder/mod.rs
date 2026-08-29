@@ -549,16 +549,20 @@ impl Folder {
 
     /// The one selected entry when exactly one visible row is selected.
     ///
-    /// Answered from the counter and one pass over the visible rows rather
-    /// than through the path list, so the column view's metadata panel does
-    /// not materialise a 200,000-path vector to look at one file.
+    /// The count guard comes first and is what makes this cheap: the column
+    /// view's metadata panel calls this once per frame, and a scan for "the
+    /// selected row" in a 200,000-entry listing is A-16 all over again. With
+    /// the guard, the path list it goes through holds exactly one element and
+    /// is cached until the selection next moves.
     pub fn selected_entry(&self) -> Option<&Entry> {
         if self.selected_visible_count != 1 {
             return None;
         }
-        self.visible_entries()
-            .find(|(id, _)| self.selection.contains(id))
-            .map(|(_, entry)| entry)
+        let paths = self.selected_paths_shared();
+        let [only] = paths.as_ref() else {
+            return None;
+        };
+        self.entry(self.id_of(only)?)
     }
 
     /// Whether the entry at `path` navigates like a directory.

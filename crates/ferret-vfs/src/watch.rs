@@ -278,6 +278,23 @@ impl Registry {
         Ok(watcher)
     }
 
+    /// Attach `subscriber` to `dir` if something already watches it.
+    ///
+    /// Hands the subscriber back when nothing does, so the caller can build a
+    /// watcher — which must happen *outside* this lock, because the backend's
+    /// callback thread takes the same one and `notify` makes no promise about
+    /// which thread `watch()` may deliver on.
+    fn attach(&self, dir: &Path, subscriber: Subscriber) -> Option<Subscriber> {
+        let mut watched = self.watched.lock();
+        match watched.get_mut(dir) {
+            Some(entry) => {
+                entry.subscribers.push(subscriber);
+                None
+            }
+            None => Some(subscriber),
+        }
+    }
+
     fn subscribe(self: &Arc<Self>, requested: PathBuf) -> std::io::Result<Watch> {
         // Keyed on the canonical path, because that is the namespace the
         // backend reports in: on macOS a watch on `/var/folders/x` produces
@@ -297,38 +314,27 @@ impl Registry {
         };
 
         // A directory already watched — by another tab, or parked as idle —
-        // costs a channel and a map entry. Only a new one builds a stream,
-        // which is the whole of A-17.
-        let needs_watcher = !self.watched.lock().contains_key(&dir);
-        let watcher = if needs_watcher {
-            Some(self.build_watcher(&dir)?)
-        } else {
-            None
-        };
-
-        {
-            let mut watched = self.watched.lock();
-            match watched.get_mut(&dir) {
-                Some(entry) => entry.subscribers.push(subscriber),
-                None => {
-                    // `watcher` is `Some` unless another thread inserted the
-                    // same directory while this one was building; in that
-                    // case `get_mut` above took its entry and this arm is
-                    // unreachable. Building twice would be wasteful, not
-                    // wrong, so the loser's watcher is simply dropped.
-                    let Some(watcher) = watcher else {
-                        return Err(std::io::Error::other("watcher vanished during subscribe"));
-                    };
-                    watched.insert(
-                        dir.clone(),
-                        Watched {
-                            _watcher: watcher,
-                            subscribers: vec![subscriber],
-                        },
-                    );
-                }
+        // costs a channel and a map entry. Only one nobody is watching builds
+        // a stream, which is the whole of A-17.
+        if let Some(subscriber) = self.attach(&dir, subscriber) {
+            let watcher = self.build_watcher(&dir)?;
+            // Asked again, because the map could have changed while the
+            // watcher was being built: another subscriber may have arrived, or
+            // an idle eviction may have removed the entry. Attaching wins
+            // either way — the watcher just built is then dropped, which
+            // unregisters it. Wasteful, not wrong, and it needs two threads
+            // opening the same directory in the same instant.
+            if let Some(subscriber) = self.attach(&dir, subscriber) {
+                self.watched.lock().insert(
+                    dir.clone(),
+                    Watched {
+                        _watcher: watcher,
+                        subscribers: vec![subscriber],
+                    },
+                );
             }
         }
+
         // No longer idle, whether or not it was.
         self.idle.lock().retain(|parked| *parked != dir);
 
