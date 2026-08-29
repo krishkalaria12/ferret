@@ -17,9 +17,20 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/ferret-fm/ferret"
 
 [workspace.dependencies]
-# GPUI is tracked from Zed's Git repository; the exact commit is pinned by Cargo.lock.
-# `gpui-component` resolves `gpui` from the same Git source, so Cargo unifies both to a
-# single crate instance. Do not add a `rev` to one without pinning the other to match.
+# GPUI is tracked from Zed's Git repository. The exact commit is pinned by
+# `Cargo.lock`, which is what reproducibility rests on for a binary.
+#
+# **Do not add a `rev` here.** It is the obvious hygiene fix and it is wrong:
+# `gpui-component` declares `gpui = { version = "0.2.2", git = ".../zed" }`
+# with no revision of its own, so a `rev` on this line makes a *different*
+# source id, and Cargo then compiles two `gpui` crates instead of unifying
+# them. That is precisely the "confusing type mismatch errors" failure — tried,
+# 217 of them. The pin below on `gpui-component` is safe because nothing else
+# in the graph resolves that package.
+#
+# Bump the GPUI side with `cargo update -p gpui`, deliberately, in its own
+# commit; `gpui-component`'s unpinned edge follows it to the same commit, which
+# is what keeps them unified.
 gpui = { git = "https://github.com/zed-industries/zed" }
 # Ferret targets macOS and Windows for now; the Linux backends are not enabled
 # here. Note that `gpui-base` still turns `wayland` and `x11` on transitively,
@@ -36,10 +47,10 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     # depend on a feature some other crate happens to enable.
     "runtime_shaders",
 ] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 # Embedded SVGs backing `IconName`. Without registering these as the app's asset
 # source, every gpui-component icon renders empty.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 
 ferret-platform = { path = "crates/ferret-platform" }
 ferret-ui = { path = "crates/ferret-ui" }
@@ -57,14 +68,14 @@ ferret-vfs = { path = "crates/ferret-vfs" }
 aho-corasick = "1"
 anyhow = "1"
 arc-swap = "1"
+async-channel = "2"
 async-trait = "0.1"
+dirs = "6"
 # The folder indices key on `EntryId`s and on names read from the user's own
 # disk, never on attacker-chosen input, so they were paying SipHash for a
 # threat model Ferret does not have. If a remote backend ever keys a map on
 # server-supplied names, that map wants a seeded hasher instead — see §9.
 foldhash = "0.2"
-async-channel = "2"
-dirs = "6"
 futures = "0.3"
 notify = "7"
 # A-12. Sorting 200,000 rows on a header click is embarrassingly parallel, and
@@ -112,6 +123,16 @@ serde_json = "1"
 
 [profile.dev]
 opt-level = 0
+# Ferret links GPUI, so the debug info the linker has to chew through dominates
+# an incremental build. Line tables are all a *backtrace* needs — file and line
+# for every frame — at a fraction of full DWARF.
+#
+# The trade is real and worth knowing: this is enough to read a panic and to
+# step through code, and not enough to inspect variables in lldb. If you are
+# debugging interactively, `cargo build --config 'profile.dev.debug=true'` gets
+# them back for one build without touching this file. `split-debuginfo` is the
+# other half and is platform-specific, so it lives in `.cargo/config.toml`.
+debug = "line-tables-only"
 
 # GPUI is unusably slow when its dependencies are built unoptimised.
 [profile.dev.package."*"]
