@@ -43,6 +43,59 @@ pub struct FerretState {
     ///
     /// [`App`]: gpui::App
     save_task: Option<gpui::Task<()>>,
+    /// Payloads serialised but not yet on disk.
+    ///
+    /// Shared, because the debounced writer runs on the background executor
+    /// while the quit flush runs on the main thread and the two must see the
+    /// same set. See [`OutstandingWrites`].
+    outstanding: Arc<OutstandingWrites>,
+}
+
+/// Config that has been serialised but has not reached disk yet.
+///
+/// Clearing the dirty flags at serialisation time is what stops a read-only
+/// config directory from re-serialising the same bytes on every debounce, but
+/// on its own it makes the payload invisible: quitting in the window between
+/// `take_pending_saves` and the write completing would find nothing to flush
+/// and exit with the user's last change still in memory. Holding it here keeps
+/// it findable until it actually lands.
+#[derive(Default)]
+pub(crate) struct OutstandingWrites {
+    /// Keyed by path, so a newer serialisation *replaces* an older one that
+    /// has not been written yet instead of racing it to the same file.
+    payloads: parking_lot::Mutex<std::collections::HashMap<PathBuf, String>>,
+    /// Held across the file writes themselves.
+    ///
+    /// Taking a batch and writing it has to be atomic against another drain,
+    /// or a quit-time write of new contents can be overtaken by an older
+    /// background write that was already in flight — leaving the stale
+    /// version on disk. This is also what makes the quit flush *wait* for an
+    /// in-flight background write rather than racing it.
+    writing: parking_lot::Mutex<()>,
+}
+
+impl OutstandingWrites {
+    fn queue(&self, payloads: impl IntoIterator<Item = (PathBuf, String)>) {
+        let mut pending = self.payloads.lock();
+        pending.extend(payloads);
+    }
+
+    /// Write everything outstanding, blocking the calling thread.
+    fn drain_and_write(&self) {
+        let _writing = self.writing.lock();
+        loop {
+            let batch = std::mem::take(&mut *self.payloads.lock());
+            if batch.is_empty() {
+                return;
+            }
+            // A failed write drops its payload rather than retrying forever:
+            // `write_config` reports the reason, and a config directory that
+            // cannot be written will not start working on the next debounce.
+            for (path, contents) in batch {
+                write_config(&path, &contents);
+            }
+        }
+    }
 }
 
 impl gpui::Global for FerretState {}
@@ -83,6 +136,7 @@ pub fn load_state() -> FerretState {
         rendered_os_icons: RenderedIconCache::default(),
         settings_dirty: false,
         save_task: None,
+        outstanding: Arc::default(),
     }
 }
 
@@ -98,16 +152,22 @@ pub(crate) fn arm_config_save(cx: &mut gpui::App) {
         cx.background_executor()
             .timer(ferret_settings::config::SAVE_DEBOUNCE)
             .await;
-        let pending = cx.update(|cx| cx.global_mut::<FerretState>().take_pending_saves());
-        if pending.is_empty() {
-            return; // Nothing changed since the last write.
-        }
+        // Serialised and queued in one step, so the payload is never
+        // unaccounted for: the dirty flags are cleared here, and from this
+        // point the quit flush finds the work in `outstanding` instead.
+        let Some(outstanding) = cx.update(|cx| {
+            let state = cx.global_mut::<FerretState>();
+            let pending = state.take_pending_saves();
+            if pending.is_empty() {
+                return None; // Nothing changed since the last write.
+            }
+            state.outstanding.queue(pending);
+            Some(Arc::clone(&state.outstanding))
+        }) else {
+            return;
+        };
         cx.background_executor()
-            .spawn(async move {
-                for (path, contents) in pending {
-                    write_config(&path, &contents);
-                }
-            })
+            .spawn(async move { outstanding.drain_and_write() })
             .detach();
     });
     cx.global_mut::<FerretState>().save_task = Some(task);
@@ -133,7 +193,9 @@ impl FerretState {
     /// Marking saved here rather than after the write is deliberate: a failed
     /// write already reports itself, and holding the flag would make the next
     /// debounce re-serialise the same bytes forever on a read-only config
-    /// directory.
+    /// directory. What makes that safe is that every caller hands the result
+    /// straight to [`OutstandingWrites::queue`] — the work stays visible to
+    /// the quit flush even though the flags no longer show it.
     pub fn take_pending_saves(&mut self) -> Vec<(PathBuf, String)> {
         let mut pending = Vec::new();
         if self.settings_dirty
@@ -156,10 +218,15 @@ impl FerretState {
     /// The one place a config write is allowed to block: quitting, where
     /// there is no next frame to protect and a debounce that has not fired
     /// yet would otherwise lose the user's last sort click.
+    ///
+    /// This covers three cases, and needs to cover all three: a debounce that
+    /// never fired (still dirty), one that fired and whose write is still in
+    /// flight (queued, and `drain_and_write` blocks until it lands), and one
+    /// that fired and finished (nothing to do).
     pub fn flush_pending_saves(&mut self) {
-        for (path, contents) in self.take_pending_saves() {
-            write_config(&path, &contents);
-        }
+        let pending = self.take_pending_saves();
+        self.outstanding.queue(pending);
+        self.outstanding.drain_and_write();
     }
 
     /// The remembered view for a folder, falling back to browser defaults.
