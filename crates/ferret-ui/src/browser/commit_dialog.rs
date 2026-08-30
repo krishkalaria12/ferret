@@ -13,7 +13,7 @@
 use super::*;
 
 use gpui_component::checkbox::Checkbox;
-use gpui_component::dialog::{Cancel, Confirm, DialogFooter};
+use gpui_component::dialog::{Cancel, Confirm};
 use gpui_component::input::{Textarea, TextareaState};
 
 /// Height of the message field.
@@ -27,6 +27,30 @@ const MESSAGE_HEIGHT: f32 = 108.;
 /// wrapped at 448 px reads as a chat box.
 const DIALOG_WIDTH: f32 = 460.;
 
+/// What `Dialog` draws around the body, in logical pixels.
+///
+/// Read off `Dialog::render`: the popup pads 16 above and below and draws a
+/// one-pixel border. There is no inter-child gap to account for because the body
+/// is its only child — which is the reason the action buttons live in this
+/// view's own content rather than in `Dialog::footer`. With them inside, one
+/// measurement covers the whole dialog and the centring below is exact.
+const DIALOG_CHROME: f32 = 34.;
+
+/// Where the dialog is assumed to sit until its first frame has been measured.
+///
+/// Only ever used for one frame, and only the first time a window opens the
+/// dialog; the height is content-driven but fixed, so every later open is
+/// already exact. Measured at the default text size, so that first frame is
+/// within a pixel or two rather than visibly settling.
+const ESTIMATED_HEIGHT: f32 = 240.;
+
+/// Never nearer the top of the window than this.
+///
+/// A window shorter than the dialog would otherwise centre it off the top edge,
+/// taking the title and the message field with it. Below this the dialog stops
+/// centring and simply starts at the top; the body scrolls.
+const MIN_MARGIN_TOP: f32 = 24.;
+
 pub(super) struct CommitDialog {
     message: Entity<TextareaState>,
     /// `git add -A` before committing. Checked by default: it is what the
@@ -36,6 +60,13 @@ pub(super) struct CommitDialog {
     /// The repository name, shown under the title so a commit cannot be made
     /// into the wrong repository without the chance to notice.
     repository: SharedString,
+    /// The body's painted height, written on prepaint and read by the builder
+    /// that positions the dialog.
+    ///
+    /// Measured rather than assumed: the height depends on
+    /// `appearance.ui_font_size`, so a constant would centre correctly at one
+    /// text size and be visibly wrong at every other.
+    height: Arc<Mutex<f32>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,6 +82,7 @@ impl CommitDialog {
             message,
             stage_all: true,
             repository,
+            height: Arc::new(Mutex::new(ESTIMATED_HEIGHT)),
             _subscriptions: vec![subscription],
         }
     }
@@ -67,8 +99,18 @@ impl CommitDialog {
 impl Render for CommitDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let ready = self.can_commit(cx);
+        let measured = self.height.clone();
+
         v_flex()
+            .id("commit-dialog-body")
             .gap_3()
+            // What the dialog's vertical position is computed from. The open
+            // animation moves the popup's `top` and never its height, so this
+            // is stable from the first frame.
+            .on_prepaint(move |bounds, _, _| {
+                *measured.lock() = f32::from(bounds.size.height);
+            })
             .child(
                 h_flex()
                     .gap_3()
@@ -115,7 +157,42 @@ impl Render for CommitDialog {
                         cx.notify();
                     })),
             )
+            // The actions live here rather than in `Dialog::footer` for two
+            // reasons. They are inside the one element that is measured, which
+            // is what makes `DIALOG_CHROME` a constant instead of a guess; and
+            // `DialogClose`/`DialogAction` each wrap their child in a
+            // `size_full` div, which stretches every button to half the footer.
+            // The actions dispatched are the same ones those wrappers dispatch.
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("commit-cancel")
+                            .outline()
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
+                    )
+                    .child(
+                        Button::new("commit-ok")
+                            .primary()
+                            .label("Commit")
+                            .disabled(!ready)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(Confirm { secondary: false }), cx)
+                            }),
+                    ),
+            )
     }
+}
+
+/// Where the dialog's top edge goes so that it sits in the middle of the window.
+///
+/// `body` is the measured height of the mounted view; the dialog's own padding
+/// and border are the only things around it (see [`DIALOG_CHROME`]).
+fn centred_top(body: f32, window: &Window) -> f32 {
+    let viewport = f32::from(window.viewport_size().height);
+    ((viewport - (body + DIALOG_CHROME)) / 2.).max(MIN_MARGIN_TOP)
 }
 
 impl Browser {
@@ -160,40 +237,19 @@ impl Browser {
         window.focus(&focus, cx);
 
         let browser = cx.weak_entity();
-        window.open_dialog(cx, move |modal, _, cx| {
+        let measured = dialog.read(cx).height.clone();
+        window.open_dialog(cx, move |modal, window, _cx| {
             let dialog = dialog.clone();
             let browser = browser.clone();
-            let ready = dialog.read(cx).can_commit(cx);
             modal
                 .w(px(DIALOG_WIDTH))
                 .close_button(false)
+                // `Dialog` centres itself horizontally and then puts its top at
+                // a tenth of the viewport, because it cannot know how tall it
+                // is going to be. This view does know — it measured itself last
+                // frame — so it finishes the job.
+                .margin_top(px(centred_top(*measured.lock(), window)))
                 .child(dialog.clone())
-                // The buttons dispatch `Cancel` and `Confirm` themselves
-                // rather than going through `DialogClose`/`DialogAction`: both
-                // of those wrap their child in a `size_full` div, which makes
-                // each button stretch to half the footer. The actions they
-                // dispatch are the same ones, so nothing is lost but the width.
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            Button::new("commit-cancel")
-                                .outline()
-                                .label("Cancel")
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(Cancel), cx)
-                                }),
-                        )
-                        .child(
-                            Button::new("commit-ok")
-                                .primary()
-                                .label("Commit")
-                                .disabled(!ready)
-                                .on_click(|_, window, cx| {
-                                    window
-                                        .dispatch_action(Box::new(Confirm { secondary: false }), cx)
-                                }),
-                        ),
-                )
                 .on_ok(move |_, window, cx| {
                     let Some(browser) = browser.upgrade() else {
                         return true;
