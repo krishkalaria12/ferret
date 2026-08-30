@@ -17,7 +17,7 @@ impl Browser {
             forward: Vec::new(),
             _subscriptions: subscriptions,
         });
-        self.active = self.tabs.len() - 1;
+        self.activate_tab(self.tabs.len() - 1, cx);
         cx.notify();
     }
 
@@ -81,6 +81,18 @@ impl Browser {
 
     pub(super) fn active_mut(&mut self) -> &mut BrowserTab {
         &mut self.tabs[self.active]
+    }
+
+    /// Make a tab visible and keep the persistent terminal aligned with the
+    /// folder the window now shows.
+    pub(super) fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.active = index;
+        let directory = self.active().folder.read(cx).dir.clone();
+        self.sync_terminal_to(&directory, cx);
+        cx.notify();
     }
 
     /// Swap in fresh entities for the active tab, pushing history.
@@ -183,8 +195,18 @@ impl Browser {
         if self.tabs.len() <= 1 {
             return; // One tab always stays so `+` has something to clone.
         }
+        let active_changed = ix == self.active;
         self.tabs.remove(ix);
-        self.active = self.active.min(self.tabs.len() - 1);
+        let next_active = if ix < self.active {
+            self.active - 1
+        } else {
+            self.active.min(self.tabs.len() - 1)
+        };
+        self.active = next_active;
+        if active_changed {
+            let directory = self.active().folder.read(cx).dir.clone();
+            self.sync_terminal_to(&directory, cx);
+        }
         cx.notify();
     }
 

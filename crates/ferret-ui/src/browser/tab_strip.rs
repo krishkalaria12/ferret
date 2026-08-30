@@ -124,10 +124,7 @@ impl Browser {
                     .selected_index(self.active)
                     .text_size(px(12.5))
                     .on_click(cx.listener(|this, ix: &usize, _window, cx| {
-                        if *ix < this.tabs.len() {
-                            this.active = *ix;
-                            cx.notify();
-                        }
+                        this.activate_tab(*ix, cx);
                     }))
                     .children(tabs),
             )
@@ -156,9 +153,8 @@ impl Browser {
         }
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
-        self.active = to;
         self.tab_drag = Some(to);
-        cx.notify();
+        self.activate_tab(to, cx);
     }
 
     pub(super) fn end_tab_drag(&mut self, cx: &mut Context<Self>) {
