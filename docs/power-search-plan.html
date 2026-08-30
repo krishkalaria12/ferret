@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Ferret Power Search — implementation plan</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --paper: #ffffff;
+      --paper-2: #edf3fa;
+      --ink: #182331;
+      --muted: #607084;
+      --faint: #8794a5;
+      --line: #d6e0eb;
+      --accent: #0878e8;
+      --accent-soft: #dceeff;
+      --good: #13795b;
+      --warn: #9a5b00;
+      --risk: #b93845;
+      --code: #e7eef7;
+      --shadow: 0 18px 55px rgba(34, 57, 84, .10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10161f;
+        --paper: #161f2a;
+        --paper-2: #1c2835;
+        --ink: #e8eef5;
+        --muted: #a6b4c4;
+        --faint: #7e8b9a;
+        --line: #2b3a49;
+        --accent: #4da3ff;
+        --accent-soft: #173b60;
+        --good: #55c69a;
+        --warn: #f0b35b;
+        --risk: #ff7d89;
+        --code: #213040;
+        --shadow: 0 20px 65px rgba(0, 0, 0, .32);
+      }
+    }
+    :root[data-theme="light"] {
+      --bg: #f4f7fb; --paper: #ffffff; --paper-2: #edf3fa; --ink: #182331;
+      --muted: #607084; --faint: #8794a5; --line: #d6e0eb; --accent: #0878e8;
+      --accent-soft: #dceeff; --good: #13795b; --warn: #9a5b00; --risk: #b93845;
+      --code: #e7eef7; --shadow: 0 18px 55px rgba(34, 57, 84, .10);
+    }
+    :root[data-theme="dark"] {
+      --bg: #10161f; --paper: #161f2a; --paper-2: #1c2835; --ink: #e8eef5;
+      --muted: #a6b4c4; --faint: #7e8b9a; --line: #2b3a49; --accent: #4da3ff;
+      --accent-soft: #173b60; --good: #55c69a; --warn: #f0b35b; --risk: #ff7d89;
+      --code: #213040; --shadow: 0 20px 65px rgba(0, 0, 0, .32);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6; text-rendering: optimizeLegibility;
+    }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    code, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+    code { background: var(--code); border-radius: 4px; padding: .08rem .3rem; font-size: .9em; }
+    button { font: inherit; }
+    .shell { display: grid; grid-template-columns: 17rem minmax(0, 1fr); max-width: 96rem; margin: 0 auto; }
+    .rail {
+      position: sticky; top: 0; height: 100vh; padding: 2rem 1.5rem;
+      border-right: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 92%, transparent);
+      overflow-y: auto;
+    }
+    .brand { display: flex; align-items: center; gap: .7rem; margin-bottom: 1.8rem; }
+    .brand-mark { width: 1.7rem; height: 1.7rem; border: 2px solid var(--accent); border-radius: 50%; position: relative; }
+    .brand-mark::after { content: ""; position: absolute; width: .7rem; height: 2px; right: -.5rem; bottom: .1rem; background: var(--accent); transform: rotate(45deg); }
+    .brand b { letter-spacing: -.02em; }
+    .rail-label { color: var(--faint); font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+    nav ol { list-style: none; margin: .55rem 0 1.5rem; padding: 0; }
+    nav a { display: block; padding: .31rem .4rem; color: var(--muted); text-decoration: none; border-left: 2px solid transparent; }
+    nav a:hover, nav a:focus-visible { color: var(--ink); border-left-color: var(--accent); background: var(--accent-soft); outline: none; }
+    .theme { border: 1px solid var(--line); border-radius: 5px; background: var(--paper); color: var(--ink); padding: .35rem .6rem; cursor: pointer; }
+    .doc { min-width: 0; padding: 4.5rem clamp(1.5rem, 5vw, 5.5rem) 8rem; }
+    .masthead { max-width: 68rem; padding-bottom: 3.2rem; border-bottom: 1px solid var(--line); }
+    .eyebrow, .section-tag { color: var(--accent); font-size: .72rem; font-weight: 760; text-transform: uppercase; letter-spacing: .13em; }
+    h1, h2, h3 { line-height: 1.18; text-wrap: balance; }
+    h1 { max-width: 16ch; margin: .75rem 0 1.2rem; font-size: clamp(2.8rem, 7vw, 6.4rem); letter-spacing: -.065em; font-weight: 780; }
+    h2 { margin: .4rem 0 .9rem; font-size: clamp(1.8rem, 3.3vw, 3rem); letter-spacing: -.04em; }
+    h3 { margin: 2.1rem 0 .65rem; font-size: 1.12rem; letter-spacing: -.018em; }
+    h4 { margin: 1.25rem 0 .35rem; }
+    .lede { max-width: 62ch; color: var(--muted); font-size: 1.18rem; }
+    .facts { display: grid; grid-template-columns: repeat(4, minmax(8rem, 1fr)); gap: 1px; margin-top: 2.3rem; background: var(--line); border: 1px solid var(--line); }
+    .facts div { background: var(--paper); padding: .85rem 1rem; }
+    dt { color: var(--faint); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+    dd { margin: .15rem 0 0; font-weight: 650; }
+    section { max-width: 68rem; padding: 4rem 0 1rem; }
+    .intro { max-width: 65ch; color: var(--muted); font-size: 1.05rem; }
+    .callout { margin: 1.4rem 0; padding: 1rem 1.15rem; border-left: 3px solid var(--accent); background: var(--paper-2); }
+    .callout strong { display: block; margin-bottom: .25rem; }
+    .callout.warn { border-left-color: var(--warn); }
+    .callout.risk { border-left-color: var(--risk); }
+    .callout.good { border-left-color: var(--good); }
+    pre.callout { max-width: 100%; overflow-x: auto; }
+    pre.callout code { display: block; width: max-content; min-width: 100%; background: transparent; padding: 0; }
+    .decision { display: grid; grid-template-columns: 7rem 1fr; border-top: 1px solid var(--line); padding: .9rem 0; gap: 1rem; }
+    .decision b { color: var(--accent); }
+    .decision p { margin: 0; }
+    .scroller { overflow-x: auto; border: 1px solid var(--line); background: var(--paper); }
+    table { width: 100%; min-width: 46rem; border-collapse: collapse; font-size: .9rem; }
+    caption { text-align: left; padding: .75rem 1rem; color: var(--muted); font-weight: 700; }
+    th { background: var(--paper-2); color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; text-align: left; }
+    th, td { padding: .72rem .85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .yes { color: var(--good); font-weight: 720; }
+    .no { color: var(--risk); font-weight: 720; }
+    .hold { color: var(--warn); font-weight: 720; }
+    .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; margin: 1.4rem 0; }
+    .flow div { min-height: 8rem; padding: 1rem; background: var(--paper); border: 1px solid var(--line); box-shadow: var(--shadow); }
+    .flow small { display: block; color: var(--accent); font-weight: 750; margin-bottom: .45rem; }
+    .flow b { display: block; margin-bottom: .35rem; }
+    .flow p { margin: 0; color: var(--muted); font-size: .88rem; }
+    .ui-map { padding: 1rem; border: 1px solid var(--line); background: var(--paper); }
+    .dialog { max-width: 52rem; margin: 1rem auto; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
+    .dialog-row { display: grid; grid-template-columns: 6.5rem 1fr auto; align-items: center; gap: .65rem; padding: .65rem .9rem; border-bottom: 1px solid var(--line); }
+    .dialog-row:last-child { border-bottom: 0; }
+    .fake-input { padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); }
+    .chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+    .chip { padding: .24rem .52rem; background: var(--paper-2); border: 1px solid var(--line); border-radius: 5px; font-size: .82rem; }
+    .chip.active { color: white; background: var(--accent); border-color: var(--accent); }
+    ul, ol { padding-left: 1.3rem; }
+    li + li { margin-top: .4rem; }
+    .phase { display: grid; grid-template-columns: 4.7rem minmax(0, 1fr); gap: 1.2rem; padding: 1.25rem 0; border-top: 1px solid var(--line); }
+    .phase-id { color: var(--accent); font: 740 .78rem ui-monospace, monospace; }
+    .phase h3 { margin: 0 0 .35rem; }
+    .phase p { margin: 0; }
+    details { border-top: 1px solid var(--line); padding: .75rem 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    .sources li { margin-bottom: .55rem; }
+    .foot { max-width: 68rem; margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--faint); font-size: .82rem; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 900px) {
+      .shell { display: block; }
+      .rail { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav ol { columns: 2; }
+      .doc { padding-top: 2.5rem; }
+      .facts { grid-template-columns: repeat(2, 1fr); }
+      .flow { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px) {
+      nav ol { columns: 1; }
+      .facts, .flow { grid-template-columns: 1fr; }
+      .decision, .phase { grid-template-columns: 1fr; gap: .25rem; }
+      .dialog-row { grid-template-columns: 1fr; }
+    }
+    @media print {
+      .rail { display: none; }
+      .shell { display: block; max-width: none; }
+      .doc { padding: 0; }
+      section { break-inside: auto; }
+      a { color: inherit; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><b>ferret/search</b></div>
+    <span class="rail-label">Plan index</span>
+    <nav aria-label="Plan sections">
+      <ol>
+        <li><a href="#verdict">Executive verdict</a></li>
+        <li><a href="#source">Source &amp; scope</a></li>
+        <li><a href="#experience">Product experience</a></li>
+        <li><a href="#semantics">Search semantics</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#libraries">Library decision</a></li>
+        <li><a href="#performance">Performance contract</a></li>
+        <li><a href="#platforms">Platform behavior</a></li>
+        <li><a href="#delivery">Build sequence</a></li>
+        <li><a href="#verification">Verification</a></li>
+        <li><a href="#risks">Risks &amp; questions</a></li>
+        <li><a href="#sources">Research sources</a></li>
+      </ol>
+    </nav>
+    <button class="theme" id="theme" type="button" aria-label="Toggle light and dark theme">Toggle theme</button>
+  </aside>
+
+  <main class="doc">
+    <header class="masthead">
+      <p class="eyebrow">Detailed implementation plan · F-40–F-43 · 30 Aug 2026</p>
+      <h1>Power Search, at filesystem speed.</h1>
+      <p class="lede">A streaming, cancellable filename and content search for Ferret. It opens from a right-side top-bar toggle, preserves every control visible in the supplied reference, and adds the smallest set of high-value capabilities that do not compromise latency.</p>
+      <dl class="facts">
+        <div><dt>Owner</dt><dd><code>ferret-search</code> + <code>ferret-ui</code></dd></div>
+        <div><dt>Mode</dt><dd>Index-free, in-process</dd></div>
+        <div><dt>Targets</dt><dd>macOS · Windows</dd></div>
+        <div><dt>Primary gate</dt><dd>&lt;100 ms first local result</dd></div>
+      </dl>
+    </header>
+
+    <section id="verdict">
+      <span class="section-tag">Decision summary</span>
+      <h2>Executive verdict</h2>
+      <p class="intro">Build the existing Phase 4 commitment as one modal Power Search surface, but keep the engine independent of GPUI. One filesystem walk feeds filename matches and content workers concurrently; bounded channels stream batches into a virtualized result table; generation IDs and cancel-by-drop prevent stale work from reaching the UI.</p>
+      <div class="callout good"><strong>Recommended baseline</strong><span><code>ignore</code> for traversal and ignore rules; <code>grep-searcher</code> + <code>grep-regex</code> for content; existing <code>async-channel</code>/<code>smol</code> for bounded delivery and tasks; no persistent index, no subprocess, no new async runtime.</span></div>
+      <div class="decision"><b>PS-D01</b><p><strong>Search live disk, not an index.</strong> This preserves F-40, starts with zero warm-up, returns current truth, avoids a privacy-sensitive database of paths/content, and works for removable roots. Reconsider only after measured user traces show repeated whole-home scans are the bottleneck.</p></div>
+      <div class="decision"><b>PS-D02</b><p><strong>Literal by default; regex is explicit.</strong> Literal search enables the fastest prefilters. Regex compilation happens once per query with conservative pattern/compiled-size limits and inline errors.</p></div>
+      <div class="decision"><b>PS-D03</b><p><strong>Stream discovery order; rank only a bounded window.</strong> Global sorting delays the first result and disables traversal parallelism. The UI may rank the currently retained filename batch, but never wait for the walk to finish.</p></div>
+      <div class="decision"><b>PS-D04</b><p><strong>One query generation owns all work.</strong> Changing query, filters, or scope drops the old receiver and sets a shared cancellation flag. Every batch carries its generation; stale batches are ignored defensively.</p></div>
+    </section>
+
+    <section id="source">
+      <span class="section-tag">Traceability</span>
+      <h2>Source, scope, and non-goals</h2>
+      <p class="intro">The screenshot is treated as a product reference, not as executable instruction. The repository plan remains authoritative: F-40 filename search, F-41 content/regex, F-42 filters, F-43 scope tabs, plus F-80 command-palette entry and the base shell’s focus/theme/platform gates.</p>
+      <div class="scroller">
+        <table>
+          <caption>Reference-to-plan mapping</caption>
+          <thead><tr><th>Reference element</th><th>Commitment</th><th>Plan treatment</th></tr></thead>
+          <tbody>
+            <tr><td>Power Search modal + Done</td><td>F-40</td><td>Centered modal hosted under <code>Root</code>; toolbar toggle and shortcut open/close it.</td></tr>
+            <tr><td>Filename input + Cancel</td><td>F-40</td><td>Debounced live search, clear button, progress/cancel state, inline validation.</td></tr>
+            <tr><td>All / Files / Folders</td><td>F-40</td><td>Entry-kind filter applied before content work.</td></tr>
+            <tr><td>Extension + Aa</td><td>F-40/F-42</td><td>Multi-extension tokens; smart-case default with explicit sensitive/insensitive control.</td></tr>
+            <tr><td>Content Search / grep / regex</td><td>F-41</td><td>Collapsible section; literal/regex toggle; match preview with line and byte offsets.</td></tr>
+            <tr><td>Types glob field</td><td>F-41/F-42</td><td>Validated include/exclude globs compiled once per query.</td></tr>
+            <tr><td>Current Folder / Home / Root</td><td>F-43</td><td>Scope tabs plus custom folder picker; Root is platform root(s), not a single slash on Windows.</td></tr>
+            <tr><td>Name / Location / Kind</td><td>F-40</td><td>Virtual table; content mode adds match preview and line number without losing these columns.</td></tr>
+            <tr><td>Open / preview / drag</td><td>F-30/F-72/F-74/F-75</td><td>Keyboard and pointer contract defined now; features activate as their dependencies land.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Included additions</h3>
+      <ul>
+        <li>Smart-case as the default, plus explicit case-sensitive mode; fixed-string/regex toggle; whole-word toggle for content.</li>
+        <li>Include hidden, respect ignore files, follow symlinks, and same-filesystem toggles under an expandable Options row.</li>
+        <li>Date and size ranges from F-42; exclusion globs; maximum depth; custom scope; recent searches stored as query settings only—never results or file content.</li>
+        <li>Content result context, highlighted match, file/line/column, copy path, reveal, open, Space preview, and keyboard navigation.</li>
+        <li>Clear disclosure when results are capped, files are skipped, access is denied, a remote backend is filename-only, or the query is still running.</li>
+      </ul>
+      <h3>Non-goals for first delivery</h3>
+      <ul>
+        <li>No persistent content index, background daemon, OCR, semantic/vector search, archive decompression, PCRE2, or searching inside proprietary document formats.</li>
+        <li>No attempt to provide regex backreferences/look-around; the Rust regex syntax is fast and bounded precisely because those are excluded.</li>
+        <li>No global result sort that waits for completion. No unlimited result retention. No UI-thread filesystem access.</li>
+      </ul>
+    </section>
+
+    <section id="experience">
+      <span class="section-tag">Interaction contract</span>
+      <h2>Product experience</h2>
+      <p class="intro">The top bar gains a search button in the right action group, before create actions. Clicking it—or pressing <span class="mono">⌘⇧F</span> on macOS / <span class="mono">Ctrl+Shift+F</span> on Windows—toggles the modal. The active pane’s folder becomes the initial scope.</p>
+      <div class="ui-map" aria-label="Simplified Power Search layout">
+        <div class="dialog">
+          <div class="dialog-row"><strong>⌕ Power Search</strong><span></span><span>Done</span></div>
+          <div class="dialog-row"><span>Filename</span><span class="fake-input">Search names or paths…</span><span>Cancel</span></div>
+          <div class="dialog-row"><span></span><span class="chips"><span class="chip active">All</span><span class="chip">Files</span><span class="chip">Folders</span><span class="chip">Ext…</span><span class="chip">Aa</span><span class="chip">Options</span></span><span>running</span></div>
+          <div class="dialog-row"><span>Content</span><span class="fake-input">Literal or regex…</span><span class="chip">.*</span></div>
+          <div class="dialog-row"><span>Scope</span><span class="chips"><span class="chip active">Current Folder</span><span class="chip">Home</span><span class="chip">Computer</span><span class="chip">Choose…</span></span><span>862 results</span></div>
+          <div class="dialog-row"><strong>Results</strong><span>Name · Location · Kind · Match / line</span><span>streaming</span></div>
+        </div>
+      </div>
+      <h3>States that must be designed, not inferred</h3>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>State</th><th>Visible behavior</th><th>Keyboard</th></tr></thead>
+          <tbody>
+            <tr><td>Fresh open</td><td>Filename focused; no walk until 1 non-whitespace character or content query exists.</td><td>Tab follows visual order; Esc closes.</td></tr>
+            <tr><td>Debouncing</td><td>Previous results remain dimmed for 75 ms; then old generation is cancelled.</td><td>Typing never loses focus.</td></tr>
+            <tr><td>Streaming</td><td>Live count, subtle progress, rows append in batches; selection stays stable by result ID.</td><td>Down moves to table; Up at first row returns to field.</td></tr>
+            <tr><td>No results</td><td>Explain active filters and offer one-click relaxation; never show an empty white box.</td><td>Shift+Tab returns to last filter.</td></tr>
+            <tr><td>Partial/error</td><td>Results remain usable; summary names skipped paths and permission/encoding counts.</td><td>Details disclosure is focusable.</td></tr>
+            <tr><td>Cap reached</td><td>“Showing first N; narrow the query” with scanned count and elapsed time.</td><td>Search continues only if user explicitly raises cap.</td></tr>
+            <tr><td>Remote scope</td><td>Backend capability badge: content, filename only, or unavailable.</td><td>Scope change preserves query.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Result actions</h3>
+      <p>Single click selects; double click opens; Enter opens and closes by default; <span class="mono">⌘Enter/Ctrl+Enter</span> opens while keeping search; Space previews when F-75 exists; <span class="mono">⌘R/Ctrl+R</span> reveals; context menu copies name/path/relative path and can set the result’s parent as scope. Drag-to-move remains disabled until F-74/F-60 are complete.</p>
+    </section>
+
+    <section id="semantics">
+      <span class="section-tag">Query model</span>
+      <h2>Search semantics</h2>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Input</th><th>Default</th><th>Semantics</th><th>Restart walk?</th></tr></thead>
+          <tbody>
+            <tr><td>Filename</td><td>Substring, smart-case</td><td>Matches basename; “match path” option includes relative path. Literal fast path before optional fuzzy ranking.</td><td>No for local post-filter change if retained candidates suffice; otherwise yes.</td></tr>
+            <tr><td>Content</td><td>Literal, smart-case</td><td>AND with filename when both present. Empty content avoids opening files.</td><td>Content workers restart.</td></tr>
+            <tr><td>Regex</td><td>Off</td><td>Rust regex syntax, Unicode on; compile/size limits; error shown under input.</td><td>Workers restart.</td></tr>
+            <tr><td>Kind/ext/date/size</td><td>Any</td><td>Metadata filters execute before opening file content.</td><td>Yes unless safely filterable from retained set.</td></tr>
+            <tr><td>Ignore/hidden</td><td>Respect / hide</td><td>Match ripgrep defaults; user can override explicitly.</td><td>Yes.</td></tr>
+            <tr><td>Symlinks</td><td>Do not follow</td><td>Show link itself; optional follow with loop protection and same-filesystem guard.</td><td>Yes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn"><strong>Do not silently call filename search “fuzzy.”</strong><span>The screenshot implies substring matching. A Nucleo-powered fuzzy mode is a useful optional addition for filename ranking, but it changes what matches. Ship it only as a visible mode after benchmarking injection, ranking, Unicode normalization, and stable streamed ordering.</span></div>
+    </section>
+
+    <section id="architecture">
+      <span class="section-tag">Ownership and data flow</span>
+      <h2>Architecture</h2>
+      <div class="flow" aria-label="Power Search data flow">
+        <div><small>01 · ferret-ui</small><b>Query snapshot</b><p>Inputs, scope, generation, filters. GPUI owns display state only.</p></div>
+        <div><small>02 · ferret-search</small><b>Planner + walker</b><p>Compile matchers once. Traverse in parallel. Apply cheap metadata gates first.</p></div>
+        <div><small>03 · worker pool</small><b>Content scan</b><p>Bounded work queue, per-worker searcher, cancellation checks between files and matches.</p></div>
+        <div><small>04 · bounded stream</small><b>Batched results</b><p>Generation-tagged batches, progress deltas, warnings, terminal outcome.</p></div>
+      </div>
+      <h3>New crate: <code>ferret-search</code></h3>
+      <p>This is the point at which a second service needs <code>VfsPath</code>/<code>EntryKind</code>. Prefer moving only truly shared domain types to <code>ferret-core</code> if necessary; do not make <code>ferret-search</code> depend on <code>ferret-ui</code> or <code>gpui-component</code>. The first implementation may accept local <code>PathBuf</code> roots and a capability-aware remote adapter later, but the public request/result types must not assume slash paths.</p>
+      <pre class="callout"><code>SearchService::start(SearchRequest) -&gt; SearchSession
+SearchSession { events: Receiver&lt;SearchEvent&gt;, cancel-on-drop }
+SearchEvent = Batch { generation, results } | Progress(...) | Warning(...) | Finished(...)
+SearchResult = File { path, metadata } | Content { path, line, column, ranges, preview }</code></pre>
+      <h3>Backpressure and scheduling</h3>
+      <ul>
+        <li>Use a bounded file-work queue and bounded UI-event channel. A slow frame must park search producers instead of materializing the tree.</li>
+        <li>Batch by count or a short deadline (for example 64 rows or 8 ms), whichever comes first. Notify GPUI once per batch, not once per match.</li>
+        <li>Reserve one CPU for the UI on machines with more than two logical cores; make thread count configurable and benchmark the heuristic.</li>
+        <li>Check cancellation before metadata work, before opening a file, after each file, and from the match sink. Dropping a session must stop observable output immediately.</li>
+        <li>Keep result data compact: shared root + relative paths where practical; bounded preview bytes; no entire file bodies; never load all results merely to sort.</li>
+      </ul>
+      <h3>UI integration points</h3>
+      <ul>
+        <li>Add <code>TogglePowerSearch</code> in <code>ferret-ui/src/actions.rs</code>; bind both platform shortcuts in the binary; add a bundled search icon.</li>
+        <li>Add the toolbar button in <code>browser/title_bar.rs</code> right action group. Mount a <code>gpui-component</code> dialog under the existing <code>Root</code>.</li>
+        <li>Keep the long-lived modal state in a focused <code>search/</code> UI module, not in the already-busy browser render file. Results use <code>Table</code>/<code>virtual_list</code>.</li>
+        <li>Opening a result navigates the active tab by default. Modifier behavior opens a new tab. Content results carry a future preview/editor location without coupling the engine to preview UI.</li>
+      </ul>
+    </section>
+
+    <section id="libraries">
+      <span class="section-tag">Dependency research</span>
+      <h2>Library decision</h2>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Candidate</th><th>Use</th><th>Decision</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr><td><code>ignore 0.4.33</code></td><td>Parallel traversal, hidden/gitignore/custom glob rules</td><td class="yes">Adopt</td><td>Ripgrep’s walker; <code>build_parallel</code>, thread controls, max depth/size, symlink and same-filesystem policy. MIT OR Unlicense.</td></tr>
+            <tr><td><code>grep-searcher 0.1.17</code></td><td>Buffered/mmap-aware line search, encoding/BOM, binary detection</td><td class="yes">Adopt</td><td>Correct incremental search and sinks are harder than they look; built for this exact workload. MIT OR Unlicense.</td></tr>
+            <tr><td><code>grep-regex 0.1.14</code></td><td>Regex matcher compatible with grep-searcher</td><td class="yes">Adopt</td><td>Linear-time Rust regex family, smart case/whole word and line-aware optimizations. MIT OR Unlicense.</td></tr>
+            <tr><td><code>nucleo 0.5.0</code></td><td>Concurrent streamed fuzzy filename ranking</td><td class="hold">Optional experiment</td><td>Excellent fit for live streaming and path scoring, but fuzzy semantics are an addition and reordered rows can harm selection stability. MPL-2.0.</td></tr>
+            <tr><td><code>regex-automata</code></td><td>Lower-level engine control</td><td class="no">Do not add directly</td><td><code>grep-regex</code> already owns the correct integration; direct use increases complexity without an identified gap.</td></tr>
+            <tr><td><code>rayon</code>/<code>jwalk</code>/<code>walkdir</code></td><td>Parallel/general traversal</td><td class="no">Not for v1</td><td><code>ignore</code> already supplies work-stealing traversal plus ignore semantics. A second pool/walker duplicates policy; <code>jwalk</code> also declares itself unmaintained.</td></tr>
+            <tr><td><code>Tantivy 0.26.1</code></td><td>Persistent full-text index</td><td class="no">Reject for baseline</td><td>Excellent Lucene-like engine, but token index semantics do not equal arbitrary live grep/regex; indexing/freshness/disk/privacy contradict F-40.</td></tr>
+            <tr><td>SQLite FTS5</td><td>Persistent token/trigram index</td><td class="no">Reject for baseline</td><td>Trigram can accelerate substrings, but external-content synchronization becomes Ferret’s responsibility and regex still needs verification on disk.</td></tr>
+            <tr><td><code>notify</code></td><td>Index freshness</td><td class="hold">Reuse only if indexing later</td><td>Already in <code>ferret-vfs</code>; native backends differ and events can be lossy, so an index still needs reconciliation scans.</td></tr>
+            <tr><td><code>memmap2</code></td><td>Map file bodies</td><td class="no">No direct dependency</td><td>Let <code>grep-searcher</code> choose. mmap is often worse across many small files and has file-mutation hazards.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Proposed Cargo edges</h3>
+      <p>Add workspace dependencies for <code>ignore</code>, <code>grep-searcher</code>, and <code>grep-regex</code>, then a path dependency for <code>ferret-search</code>. Reuse existing <code>async-channel</code>, <code>smol</code>, <code>thiserror</code>, and <code>ferret-vfs</code>. Do not add Tokio, Rayon, a database, or a subprocess wrapper.</p>
+      <div class="callout"><strong>Licensing</strong><span>Verify each pinned crate’s license in <code>Cargo.lock</code>/<code>cargo deny</code> during implementation. The recommended ripgrep crates are permissively licensed and compatible with Ferret’s GPL distribution; document bundled notices if required.</span></div>
+    </section>
+
+    <section id="performance">
+      <span class="section-tag">Hard gates</span>
+      <h2>Performance contract</h2>
+      <p class="intro">“Fast” must be testable on cold and warm caches. Keep traversal, matching, event delivery, model update, and paint timings separate so the bottleneck is visible.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Metric</th><th>Target</th><th>Fixture / condition</th><th>Failure response</th></tr></thead>
+          <tbody>
+            <tr><td>Keystroke → old query cancelled</td><td>&lt;16 ms observable; &lt;50 ms worker quiescence</td><td>200k flat + deep mixed tree</td><td>Stop feature work; fix cancellation granularity/backpressure.</td></tr>
+            <tr><td>Filename first result, warm metadata</td><td>p95 &lt;100 ms</td><td>200k local entries, selective literal</td><td>Profile allocations/syscalls; avoid sort and per-entry stat.</td></tr>
+            <tr><td>Content first match, warm cache</td><td>p95 &lt;250 ms; always &lt;1 s</td><td>Large source tree, match near early traversal</td><td>Review queue ordering, worker startup, matcher reuse.</td></tr>
+            <tr><td>UI frame while streaming</td><td>p95 &lt;16.7 ms at 60 Hz</td><td>Maximum result throughput</td><td>Increase batching; cap per-frame model work; verify virtualization.</td></tr>
+            <tr><td>Result memory</td><td>Bounded by configured cap; no growth after cap</td><td>Query matching every file/line</td><td>Discard excess detail; retain counters only.</td></tr>
+            <tr><td>Idle overhead</td><td>0 worker CPU, 0 search I/O</td><td>Dialog closed/open with empty query</td><td>Fix leaked sessions/tasks or eager scans.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Benchmark matrix</h3>
+      <ul>
+        <li>Flat 200,000-entry fixture; deep tree; many tiny files; few multi-GB files; binary-heavy tree; generated minified lines; inaccessible directories; symlink cycle; Unicode names; cold and warm filesystem cache.</li>
+        <li>Literal rare/common, regex anchored/unanchored, Unicode classes, case-insensitive, filename-only, content-only, combined filters, cap-hit, cancel after 1/10/100 ms.</li>
+        <li>macOS APFS (case-sensitive and insensitive if available), Windows NTFS, removable/network volume. Report CPU count, storage, cache state, files/bytes scanned, ignored/skipped counts.</li>
+      </ul>
+      <h3>Important implementation corrections to the older product plan</h3>
+      <ul>
+        <li>Do not force mmap for “large files.” Ripgrep’s own documentation notes buffered reads usually win for directory searches; let the searcher choose and benchmark any threshold.</li>
+        <li>Do not make “sort results” the default. Ripgrep documents path sorting as disabling parallelism. Stream discovery order and offer post-completion sorting only when the retained set is bounded.</li>
+        <li>Do not send every hit to GPUI. Batch results and coalesce progress. The table must be virtualized from its first rendered row, satisfying the same gate as the base file pane.</li>
+      </ul>
+    </section>
+
+    <section id="platforms">
+      <span class="section-tag">macOS + Windows</span>
+      <h2>Platform behavior</h2>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Concern</th><th>macOS</th><th>Windows</th><th>Shared rule</th></tr></thead>
+          <tbody>
+            <tr><td>Computer scope</td><td><code>/</code>, but warn that system paths can be slow/noisy.</td><td>Enumerated mounted volumes; never invent a single <code>/</code>.</td><td>Show actual roots and capability/access warnings.</td></tr>
+            <tr><td>Case</td><td>Usually insensitive APFS; Unicode decomposition matters.</td><td>Usually insensitive NTFS; path casing may differ.</td><td>Smart-case query semantics are explicit and independent of filesystem lookup semantics.</td></tr>
+            <tr><td>Paths</td><td>Raw bytes can be non-UTF-8.</td><td>UTF-16, drive letters, UNC, reserved names.</td><td>Keep native path identity; use lossy text only for display/matching with disclosure.</td></tr>
+            <tr><td>Hidden</td><td>Dotfiles + Finder flags.</td><td>Hidden/system attributes.</td><td>Use walker/platform metadata policy; do not equate hidden with leading dot.</td></tr>
+            <tr><td>Links</td><td>Symlinks common.</td><td>Symlink/junction/reparse-point variants.</td><td>Off by default; cycle detection and same-filesystem option.</td></tr>
+            <tr><td>Permissions/locks</td><td>Full Disk Access may block folders.</td><td>ACLs and sharing violations may deny opens.</td><td>Continue search, aggregate warnings, never turn partial failure into zero results.</td></tr>
+            <tr><td>Shortcut</td><td><span class="mono">⌘⇧F</span></td><td><span class="mono">Ctrl+Shift+F</span></td><td>Toolbar button always available and exposes shortcut in tooltip.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="delivery">
+      <span class="section-tag">Gated build order</span>
+      <h2>Delivery sequence</h2>
+      <p class="intro">Each stage leaves the workspace runnable. Do not advance when its gate fails.</p>
+      <div class="phase"><span class="phase-id">PS-0</span><div><h3>Lock semantics and fixtures</h3><p>Write request/result/error types, query truth table, platform matrix, benchmark fixtures, and budgets before choosing UI details. <strong>Gate:</strong> tests cover smart case, globs, paths, cap, cancellation, and partial errors.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-1</span><div><h3>Create the service skeleton</h3><p>Add <code>ferret-search</code>, crate error/config modules, streaming session, cancel-by-drop, bounded channels, and fake engine tests. <strong>Gate:</strong> drop prevents every later generation event.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-2</span><div><h3>Filename walk (F-40)</h3><p>Integrate <code>ignore</code>; kinds, hidden/ignore/symlink policy, scope, extension/date/size/depth filters; streaming progress. <strong>Gate:</strong> 200k fixture meets first-result, memory, cancellation budgets.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-3</span><div><h3>Modal shell and toolbar toggle</h3><p>Add actions, icon, platform keybindings, Root-hosted dialog, focus trap/restore, fields, scope tabs, and virtual results. <strong>Gate:</strong> launch app; inspect both themes and minimum/default sizes; arrows follow focus; table stays smooth under peak stream.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-4</span><div><h3>Content scan (F-41)</h3><p>Add per-worker <code>grep-searcher</code>/<code>grep-regex</code>, literal/regex/word/case modes, binary and encoding policy, context preview, match locations. <strong>Gate:</strong> first-match and instant-cancel budgets across corpus matrix.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-5</span><div><h3>Complete filters and scopes (F-42/F-43)</h3><p>Add range controls, exclusions, custom folder, volume roots, remembered non-sensitive preferences, capability-aware remote surface. <strong>Gate:</strong> no local-path assumptions leak into public result identity.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-6</span><div><h3>Actions, accessibility, resilience</h3><p>Open/reveal/copy/preview hooks, result caps, partial warnings, screen-reader names, keyboard parity, IME-safe debouncing, stale-path behavior. <strong>Gate:</strong> complete interaction/state checklist on both platforms.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-7</span><div><h3>Profile and harden</h3><p>Flamegraphs/allocations, cold-cache runs, long soak/cancellation storms, corrupted/unreadable files, regex limits, dependency/license audit. <strong>Gate:</strong> <code>just lint</code>, <code>just test</code>, search benchmarks, <code>just build</code>, and manual <code>just dev</code> verification all pass.</p></div></div>
+      <div class="callout risk"><strong>Phase ordering constraint</strong><span>This is product Phase 4 and depends on the completed base shell (Phase 1). It may be developed before preview/terminal features, but actions such as Space preview and remote content search stay capability-gated until their owning features exist.</span></div>
+    </section>
+
+    <section id="verification">
+      <span class="section-tag">Acceptance</span>
+      <h2>Verification checklist</h2>
+      <h3>Automated</h3>
+      <ul>
+        <li>Unit tests: parser/builders, case rules, extension/glob normalization, metadata predicates, result IDs, truncation, error conversion, counters.</li>
+        <li>Filesystem integration: temp trees, nested ignore precedence, hidden files, Unicode/non-UTF paths where supported, binary/BOM/UTF-16, huge line, permission denial, changing/deleted files, symlink cycles.</li>
+        <li>Concurrency: bounded queues, cancel races, rapid generation churn, receiver drop, cap reached, worker panic/error containment, no events after Finished.</li>
+        <li>UI tests where GPUI support permits: open/close, focus restore, stale generation rejection, stable selection as batches arrive, empty/error/cap states.</li>
+        <li>Benchmarks checked into <code>xtask</code> or the search crate with machine-readable output and regression thresholds.</li>
+      </ul>
+      <h3>Manual on both targets</h3>
+      <ul>
+        <li>Open by button and shortcut; close by toggle, Done, Esc; focus returns to the top-bar control or prior pane.</li>
+        <li>Light/dark, 1180×760 and 760×480; 100%, 150%, 200% scaling; keyboard-only and screen-reader labels.</li>
+        <li>Rapid typing never flashes stale results. Selection does not jump when rows append. Cancel leaves no sustained CPU/disk use.</li>
+        <li>Search Home/Computer, removable volume, denied tree, very large tree, and a path removed while selected.</li>
+      </ul>
+      <div class="callout good"><strong>Feature-level done condition</strong><span>A regex content search over a large tree begins producing useful rows in well under one second, filename search typically feels immediate, a changed query cancels old work before it can repaint, the results table stays at full frame rate, and memory remains bounded even when every line matches.</span></div>
+    </section>
+
+    <section id="risks">
+      <span class="section-tag">Honest uncertainty</span>
+      <h2>Risks and open decisions</h2>
+      <details open><summary>PS-Q01 · Should filename search offer fuzzy mode at launch?</summary><p><strong>Recommendation:</strong> no for the first vertical slice; add a visible optional mode only if a Nucleo prototype meets streamed-order and selection-stability requirements. Substring semantics match the reference and are easier to explain.</p></details>
+      <details open><summary>PS-Q02 · What exactly is “Root” on Windows?</summary><p><strong>Recommendation:</strong> label it “Computer” and search selected mounted volumes, with all fixed local volumes as an explicit option. Avoid automatically scanning network/removable volumes.</p></details>
+      <details open><summary>PS-Q03 · How much context should content results retain?</summary><p><strong>Recommendation:</strong> one bounded display line plus match ranges and line/column. Read neighboring context lazily for preview; never retain whole file bodies.</p></details>
+      <details open><summary>PS-Q04 · When should indexing be reconsidered?</summary><p>Only after telemetry-free local benchmarks or user-provided traces show repeated Home/Computer searches cannot meet the experience target. Any experiment must be opt-in, path-only first, encrypted-by-OS-at-rest, size-capped, rebuildable, watcher-plus-reconciliation based, and must preserve live verification before opening a result.</p></details>
+      <details open><summary>PS-Q05 · Remote content search contract</summary><p>F-43 leaves this genuinely backend-specific. Prefer a capability enum and explicit UI. An SSH backend may run remote <code>rg</code>/<code>grep</code> when available; S3/WebDAV are filename/metadata-only until a server-side search API exists. Never download an entire remote tree implicitly.</p></details>
+      <h3>Primary risks</h3>
+      <ul>
+        <li><strong>I/O saturation:</strong> unbounded parallel reads can make the whole machine feel slow. Bound content workers separately from traversal and preserve one CPU for UI.</li>
+        <li><strong>Stale paths:</strong> the filesystem changes mid-query. Treat results as observations; re-stat on action and explain if the item moved or vanished.</li>
+        <li><strong>Regex/resource abuse:</strong> linear matching is not free. Cap pattern length, compiled program size, file size, context, matches per file, total rows, and retained bytes.</li>
+        <li><strong>Permission noise:</strong> whole-machine search can generate thousands of denials. Aggregate by category/root, keep useful results visible, and expose details on demand.</li>
+        <li><strong>Scope creep:</strong> fuzzy ranking, archives, indexing, OCR, semantic search, and remote execution are separate capabilities. Do not block the fast local core on them.</li>
+      </ul>
+    </section>
+
+    <section id="sources">
+      <span class="section-tag">Primary research</span>
+      <h2>Research sources</h2>
+      <ul class="sources">
+        <li><a href="plan.html#features">Ferret product plan, F-40–F-43</a> and <a href="ui-base.html">base UI specification</a> — authoritative local feature, phase, theme, focus, and virtualization commitments.</li>
+        <li><a href="https://docs.rs/ignore/latest/ignore/struct.WalkBuilder.html">ignore::WalkBuilder documentation</a> — parallel walking, ignore precedence, hidden/symlink/filesystem/depth/size/thread controls.</li>
+        <li><a href="https://docs.rs/grep-searcher/latest/grep_searcher/struct.SearcherBuilder.html">grep-searcher SearcherBuilder</a> — heap limits, binary detection, encoding and mmap strategy.</li>
+        <li><a href="https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md">ripgrep guide</a> and <a href="https://github.com/BurntSushi/ripgrep/blob/master/README.md">README</a> — automatic filters, sorting/parallelism, binary behavior, buffered versus mapped search.</li>
+        <li><a href="https://docs.rs/regex/latest/regex/#untrusted-input">Rust regex: untrusted input</a> — worst-case bounds and the need to limit user-supplied pattern and haystack sizes.</li>
+        <li><a href="https://docs.rs/nucleo/latest/nucleo/">Nucleo documentation</a> — concurrent lock-free streaming input and background snapshots for optional fuzzy ranking.</li>
+        <li><a href="https://docs.rs/tantivy/latest/tantivy/">Tantivy documentation</a> and <a href="https://www.sqlite.org/fts5.html">SQLite FTS5</a> — persistent indexing alternatives and their semantics/synchronization costs.</li>
+        <li><a href="https://github.com/notify-rs/notify">notify repository</a> — macOS FSEvents/kqueue and Windows ReadDirectoryChangesW watcher backends.</li>
+      </ul>
+      <p class="callout"><strong>Research boundary</strong><span>Library versions shown are the current docs reviewed on 30 Aug 2026 and should be re-resolved by Cargo when implementation begins. The locked dependency graph and compiler errors remain authoritative.</span></p>
+    </section>
+
+    <footer class="foot">Ferret Power Search plan · branch <code>docs/power-search-plan</code> · source commitments F-40, F-41, F-42, F-43</footer>
+  </main>
+</div>
+<script>
+  const button = document.querySelector("#theme");
+  button.addEventListener("click", () => {
+    const root = document.documentElement;
+    const current = root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    root.dataset.theme = current === "dark" ? "light" : "dark";
+  });
+</script>
+</body>
+</html>
