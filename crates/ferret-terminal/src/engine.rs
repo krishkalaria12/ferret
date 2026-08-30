@@ -35,11 +35,15 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    pub(crate) fn new(columns: usize, rows: usize) -> Self {
+    pub(crate) fn new(columns: usize, rows: usize, scrollback_lines: usize) -> Self {
         let size = Size { columns, rows };
+        let config = Config {
+            scrolling_history: scrollback_lines,
+            ..Config::default()
+        };
         Self {
             parser: alacritty_terminal::vte::ansi::Processor::new(),
-            term: Term::new(Config::default(), &size, VoidListener),
+            term: Term::new(config, &size, VoidListener),
             generation: 0,
             columns,
             rows,
@@ -89,7 +93,7 @@ mod tests {
 
     #[test]
     fn parses_text_and_ansi_without_leaking_escape_bytes() {
-        let mut engine = Engine::new(20, 3);
+        let mut engine = Engine::new(20, 3, 100);
         engine.advance(b"hello\r\n\x1b[31mred\x1b[0m");
         let snapshot = engine.snapshot();
         assert_eq!(snapshot.lines[0], "hello");

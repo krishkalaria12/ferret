@@ -32,6 +32,14 @@
   "terminal": {
     "visible": false,
     "height": 176.0,
+    "font_family": null,
+    "font_size": 13.0,
+    "line_height": 1.2,
+    "palette": "Groknight",
+    "scrollback_lines": 10000,
+    "shell": null,
+    "term": "xterm-256color",
+    "shell_integration": true,
     "sync_default": true
   },
   "window": {

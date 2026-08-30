@@ -146,6 +146,33 @@ impl Settings {
             self.terminal.height = clamped;
         }
 
+        let font_size = self.terminal.font_size;
+        if !font_size.is_finite() || !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&font_size) {
+            let clamped = if font_size.is_finite() {
+                font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+            } else {
+                Terminal::default().font_size
+            };
+            warnings.push(Warning::new(
+                "terminal.font_size",
+                format!("{font_size} is outside the usable range {MIN_FONT_SIZE}–{MAX_FONT_SIZE}."),
+                format!("Using {clamped}."),
+            ));
+            self.terminal.font_size = clamped;
+        }
+
+        if !self.terminal.line_height.is_finite()
+            || !(1.0..=2.0).contains(&self.terminal.line_height)
+        {
+            let value = self.terminal.line_height;
+            self.terminal.line_height = Terminal::default().line_height;
+            warnings.push(Warning::new(
+                "terminal.line_height",
+                format!("{value} is outside the usable range 1–2."),
+                format!("Using {}.", self.terminal.line_height),
+            ));
+        }
+
         // The Name column is not optional: a listing with no names is unusable.
         if !self.browser.columns.iter().any(|c| c == "name") {
             warnings.push(Warning::new(

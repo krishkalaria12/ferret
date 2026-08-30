@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ferret_platform::Place;
 use ferret_settings::{FolderView, SortKey, SortOrder, ThemeChoice, ViewMode};
-use ferret_terminal::TerminalSession;
+use ferret_terminal::{TerminalOptions, TerminalSession};
 use ferret_vfs::{Vfs as _, VfsPath};
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
@@ -167,6 +167,8 @@ pub struct Browser {
     terminal_session: Option<TerminalSession>,
     terminal_error: Option<String>,
     terminal_generation: u64,
+    terminal_columns: u16,
+    terminal_rows: u16,
     _terminal_poll: Option<gpui::Task<()>>,
     /// Index of the tab currently being dragged, if any.
     tab_drag: Option<usize>,
@@ -299,6 +301,8 @@ impl Browser {
             terminal_session: None,
             terminal_error: None,
             terminal_generation: 0,
+            terminal_columns: 120,
+            terminal_rows: 24,
             _terminal_poll: None,
             tab_drag: None,
             favorite_drag: None,

@@ -6,7 +6,7 @@ use std::thread;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use crate::engine::Engine;
-use crate::{Result, TerminalError, TerminalSnapshot};
+use crate::{Result, TerminalError, TerminalOptions, TerminalSnapshot};
 
 const DEFAULT_COLUMNS: u16 = 120;
 const DEFAULT_ROWS: u16 = 24;
@@ -21,7 +21,7 @@ pub struct TerminalSession {
 }
 
 impl TerminalSession {
-    pub fn spawn(directory: &Path) -> Result<Self> {
+    pub fn spawn(directory: &Path, options: &TerminalOptions) -> Result<Self> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -35,10 +35,10 @@ impl TerminalSession {
                 source: std::io::Error::other(source.to_string()),
             })?;
 
-        let shell = default_shell();
+        let shell = options.shell.clone().unwrap_or_else(default_shell);
         let mut command = CommandBuilder::new(&shell);
         command.cwd(directory);
-        command.env("TERM", "xterm-256color");
+        command.env("TERM", &options.term);
         #[cfg(not(windows))]
         command.arg("-l");
 
@@ -63,6 +63,7 @@ impl TerminalSession {
         let engine = Arc::new(Mutex::new(Engine::new(
             DEFAULT_COLUMNS as usize,
             DEFAULT_ROWS as usize,
+            options.scrollback_lines,
         )));
         let snapshot = Arc::new(RwLock::new(TerminalSnapshot::default()));
         let reader_engine = engine.clone();

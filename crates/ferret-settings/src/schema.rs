@@ -182,6 +182,22 @@ pub struct Terminal {
     pub visible: bool,
     /// Height in logical pixels. Clamped on load; see `config`.
     pub height: f32,
+    /// Font family used for the grid. `None` selects the platform monospace.
+    pub font_family: Option<String>,
+    /// Grid font size in logical pixels, independent of the application UI.
+    pub font_size: f32,
+    /// Row height as a multiplier of `font_size`.
+    pub line_height: f32,
+    /// Terminal palette name.
+    pub palette: String,
+    /// Maximum number of retained off-screen rows.
+    pub scrollback_lines: usize,
+    /// Optional shell executable override.
+    pub shell: Option<PathBuf>,
+    /// Value exported as `TERM`.
+    pub term: String,
+    /// Whether Ferret may install its prompt/cwd integration.
+    pub shell_integration: bool,
     /// Initial state of the directory-following toggle.
     pub sync_default: bool,
     #[serde(flatten, skip_serializing_if = "Map::is_empty")]
@@ -193,6 +209,14 @@ impl Default for Terminal {
         Self {
             visible: false,
             height: 176.0,
+            font_family: None,
+            font_size: 13.0,
+            line_height: 1.2,
+            palette: "Groknight".into(),
+            scrollback_lines: 10_000,
+            shell: None,
+            term: "xterm-256color".into(),
+            shell_integration: true,
             sync_default: true,
             unknown: Map::new(),
         }

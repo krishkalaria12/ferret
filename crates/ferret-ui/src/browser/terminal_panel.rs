@@ -6,7 +6,6 @@ const MIN_TERMINAL_HEIGHT: f32 = ferret_settings::config::MIN_TERMINAL_HEIGHT;
 const MAX_TERMINAL_HEIGHT: f32 = ferret_settings::config::MAX_TERMINAL_HEIGHT;
 const TERMINAL_HEADER_HEIGHT: f32 = 26.;
 const TERMINAL_SPLITTER_HEIGHT: f32 = 5.;
-const TERMINAL_FONT_SIZE: f32 = 13.;
 
 impl Browser {
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -69,10 +68,20 @@ impl Browser {
             cx.notify();
             return;
         };
-        match TerminalSession::spawn(local) {
+        let settings = &cx.global::<FerretState>().settings.terminal;
+        let options = TerminalOptions {
+            shell: settings.shell.clone(),
+            term: settings.term.clone(),
+            scrollback_lines: settings.scrollback_lines,
+        };
+        match TerminalSession::spawn(local, &options) {
             Ok(session) => {
-                self.terminal_session = Some(session);
                 self.terminal_error = None;
+                if let Err(error) = session.resize(self.terminal_columns, self.terminal_rows, 0, 0)
+                {
+                    self.terminal_error = Some(error.to_string());
+                }
+                self.terminal_session = Some(session);
                 self.terminal_generation = 0;
             }
             Err(error) => {
@@ -139,6 +148,14 @@ impl Browser {
         let dir = self.active().folder.read(cx).dir.clone();
         let cwd = SharedString::from(dir.to_string());
         let focused = self.terminal_focus.is_focused(window);
+        let terminal_settings = &cx.global::<FerretState>().settings.terminal;
+        let font_family = terminal_settings
+            .font_family
+            .clone()
+            .unwrap_or_else(|| default_terminal_font(cx));
+        let font_size = terminal_settings.font_size;
+        let line_height = font_size * terminal_settings.line_height;
+        let terminal_owner = cx.weak_entity();
 
         v_flex()
             .id("terminal-panel")
@@ -204,10 +221,41 @@ impl Browser {
             )
             .child(
                 div()
+                    .on_children_prepainted(
+                        move |children: Vec<gpui::Bounds<gpui::Pixels>>, _, cx| {
+                            let Some(bounds) = children.first() else {
+                                return;
+                            };
+                            // A monospace advance is approximately 0.6 em.
+                            // The run renderer will replace this estimate with
+                            // shaped metrics; the PTY must still resize now.
+                            let cell_width = (font_size * 0.6).max(1.);
+                            let columns = ((f32::from(bounds.size.width) - 24.).max(cell_width)
+                                / cell_width) as u16;
+                            let rows = ((f32::from(bounds.size.height) - 16.).max(line_height)
+                                / line_height) as u16;
+                            if let Some(owner) = terminal_owner.upgrade() {
+                                owner.update(cx, |this, cx| {
+                                    this.resize_terminal_grid(columns.max(2), rows.max(1), cx);
+                                });
+                            }
+                        },
+                    )
                     .id("terminal-body")
                     .relative()
                     .key_context(actions::context::TERMINAL)
                     .track_focus(&self.terminal_focus)
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.focus(&this.terminal_focus, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        this.handle_terminal_key(event, cx);
+                    }))
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
@@ -215,11 +263,12 @@ impl Browser {
                     .py(px(8.))
                     .bg(palette.background)
                     .text_color(palette.foreground)
-                    .text_size(px(TERMINAL_FONT_SIZE))
+                    .text_size(px(font_size))
+                    .line_height(px(line_height))
                     .when(focused, |el| {
                         el.border_1().border_color(palette.cursor.opacity(0.55))
                     })
-                    .child(self.render_terminal_content(cwd, palette)),
+                    .child(self.render_terminal_content(cwd, palette, font_family, line_height)),
             )
     }
 
@@ -264,12 +313,14 @@ impl Browser {
         &self,
         cwd: SharedString,
         palette: crate::theme::TerminalPalette,
+        font_family: String,
+        line_height: f32,
     ) -> impl IntoElement {
         let snapshot = self
             .terminal_session
             .as_ref()
             .map(TerminalSession::snapshot);
-        let mut body = v_flex().gap(px(1.)).font_family("monospace");
+        let mut body = v_flex().size_full().font_family(font_family);
         if let Some(error) = &self.terminal_error {
             return body.child(
                 div()
@@ -279,16 +330,9 @@ impl Browser {
         }
         if let Some(snapshot) = snapshot {
             for line in snapshot.lines {
-                body = body.child(
-                    div()
-                        .h(px(16.))
-                        .whitespace_nowrap()
-                        .child(SharedString::from(if line.is_empty() {
-                            " "
-                        } else {
-                            &line
-                        })),
-                );
+                body = body.child(div().h(px(line_height)).whitespace_nowrap().child(
+                    SharedString::from(if line.is_empty() { " " } else { &line }),
+                ));
             }
             return body;
         }
@@ -297,5 +341,170 @@ impl Browser {
                 .text_color(palette.bright_black)
                 .child(SharedString::from(format!("Starting terminal in {cwd}…"))),
         )
+    }
+
+    fn handle_terminal_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(bytes) = terminal_key_bytes(event) else {
+            return;
+        };
+        let Some(session) = &self.terminal_session else {
+            return;
+        };
+        if let Err(error) = session.write(&bytes) {
+            self.terminal_error = Some(error.to_string());
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn resize_terminal_grid(&mut self, columns: u16, rows: u16, cx: &mut Context<Self>) {
+        if columns == self.terminal_columns && rows == self.terminal_rows {
+            return;
+        }
+        self.terminal_columns = columns;
+        self.terminal_rows = rows;
+        let Some(session) = &self.terminal_session else {
+            return;
+        };
+        if let Err(error) = session.resize(columns, rows, 0, 0) {
+            self.terminal_error = Some(error.to_string());
+        }
+        cx.notify();
+    }
+}
+
+fn terminal_key_bytes(event: &gpui::KeyDownEvent) -> Option<Vec<u8>> {
+    let key = event.keystroke.key.as_str();
+    let modifiers = event.keystroke.modifiers;
+
+    // Command/Windows-key combinations remain application shortcuts.
+    if modifiers.platform {
+        return None;
+    }
+
+    let mut bytes = Vec::new();
+    if modifiers.alt {
+        bytes.push(0x1b);
+    }
+
+    if modifiers.control && key.len() == 1 {
+        let byte = key.as_bytes()[0];
+        if byte.is_ascii() {
+            bytes.push(byte.to_ascii_uppercase() & 0x1f);
+            return Some(bytes);
+        }
+    }
+
+    let sequence = match key {
+        "enter" => "\r",
+        "backspace" => "\x7f",
+        "tab" => "\t",
+        "escape" => "\x1b",
+        "up" => "\x1b[A",
+        "down" => "\x1b[B",
+        "right" => "\x1b[C",
+        "left" => "\x1b[D",
+        "home" => "\x1b[H",
+        "end" => "\x1b[F",
+        "delete" => "\x1b[3~",
+        "pageup" => "\x1b[5~",
+        "pagedown" => "\x1b[6~",
+        _ => {
+            let text = event
+                .keystroke
+                .key_char
+                .as_deref()
+                .or_else(|| (key.chars().count() == 1).then_some(key))?;
+            bytes.extend_from_slice(text.as_bytes());
+            return Some(bytes);
+        }
+    };
+    bytes.extend_from_slice(sequence.as_bytes());
+    Some(bytes)
+}
+
+fn default_terminal_font(cx: &App) -> String {
+    let installed = cx.text_system().all_font_names();
+    let first_installed = |candidates: &[&str]| {
+        candidates
+            .iter()
+            .find(|candidate| installed.iter().any(|font| font == **candidate))
+            .map(|candidate| (*candidate).to_owned())
+    };
+    #[cfg(target_os = "macos")]
+    {
+        // Prefer a Nerd Font when present so configured prompts retain their
+        // private-use glyphs, as they do in Ghostty. Menlo remains the clean
+        // system fallback required by F-12.
+        first_installed(&["JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Menlo"])
+            .unwrap_or_else(|| "monospace".into())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        first_installed(&["CaskaydiaMono Nerd Font", "Cascadia Mono", "Consolas"])
+            .unwrap_or_else(|| "monospace".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "monospace".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(name: &str, character: Option<&str>, modifiers: gpui::Modifiers) -> gpui::KeyDownEvent {
+        gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers,
+                key: name.into(),
+                key_char: character.map(str::to_owned),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn printable_and_navigation_keys_are_encoded_for_the_pty() {
+        assert_eq!(
+            terminal_key_bytes(&key("a", Some("a"), gpui::Modifiers::default())),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            terminal_key_bytes(&key("enter", None, gpui::Modifiers::default())),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            terminal_key_bytes(&key("left", None, gpui::Modifiers::default())),
+            Some(b"\x1b[D".to_vec())
+        );
+    }
+
+    #[test]
+    fn control_c_reaches_the_shell_but_command_shortcuts_do_not() {
+        assert_eq!(
+            terminal_key_bytes(&key(
+                "c",
+                None,
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            )),
+            Some(vec![3])
+        );
+        assert_eq!(
+            terminal_key_bytes(&key(
+                "c",
+                None,
+                gpui::Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+            )),
+            None
+        );
     }
 }
