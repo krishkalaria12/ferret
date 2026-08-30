@@ -164,6 +164,20 @@ struct Watched {
     /// so building or dropping it cannot disturb any other directory.
     _watcher: notify::RecommendedWatcher,
     subscribers: Vec<Subscriber>,
+    /// Whether this registration can still be trusted to deliver.
+    ///
+    /// Cleared when the directory is reported gone, or when the backend
+    /// reports an error against it. A registration watches an object, not a
+    /// name: on Windows `ReadDirectoryChangesW` holds a handle to the
+    /// directory, so deleting it leaves a handle that will never report
+    /// again — and a directory recreated under the same name is a *different*
+    /// object that nothing is watching.
+    ///
+    /// Without this, `mark_gone` would park that dead registration in `idle`
+    /// and the next subscriber to the recreated directory would reclaim it,
+    /// see no events, and show a listing that never refreshes. So a dead
+    /// entry is never parked and never attached to — it is rebuilt.
+    live: bool,
 }
 
 struct Registry {
@@ -205,8 +219,8 @@ impl Registry {
     /// `/private/var/folders/x/...`) and are re-expressed against each
     /// subscriber's own directory on the way out.
     fn dispatch(&self, dir: &Path, result: notify::Result<notify::Event>) {
-        let watched = self.watched.lock();
-        let Some(entry) = watched.get(dir) else {
+        let mut watched = self.watched.lock();
+        let Some(entry) = watched.get_mut(dir) else {
             return; // Unsubscribed while this event was in flight.
         };
 
@@ -217,6 +231,13 @@ impl Registry {
                 // individual paths can repair: this directory re-lists, and
                 // one that has genuinely vanished finds out from its own
                 // `read_dir`, which is the reliable signal.
+                //
+                // The registration goes with it. An error here is reported
+                // against the stream, not against a file, so there is no
+                // reason to believe the stream will report again — and a
+                // subscriber that re-lists in response takes a fresh watch as
+                // part of doing so, which is what rebuilds it.
+                entry.live = false;
                 for subscriber in &entry.subscribers {
                     subscriber.forwarder.forward(WatchEvent::Desynced);
                 }
@@ -228,6 +249,9 @@ impl Registry {
         // something *inside* it is just a change to re-stat.
         let removal = matches!(event.kind, notify::EventKind::Remove(_));
         if removal && event.paths.iter().any(|p| p == dir) {
+            // The registration died with the directory it was watching; see
+            // `Watched::live`. Recreating the name does not revive it.
+            entry.live = false;
             for subscriber in &entry.subscribers {
                 subscriber.forwarder.forward(WatchEvent::Gone);
             }
@@ -278,21 +302,48 @@ impl Registry {
         Ok(watcher)
     }
 
-    /// Attach `subscriber` to `dir` if something already watches it.
+    /// Attach `subscriber` to `dir` if something already watches it *and* that
+    /// registration can still deliver.
     ///
-    /// Hands the subscriber back when nothing does, so the caller can build a
-    /// watcher — which must happen *outside* this lock, because the backend's
-    /// callback thread takes the same one and `notify` makes no promise about
-    /// which thread `watch()` may deliver on.
+    /// Hands the subscriber back otherwise, so the caller can build a watcher
+    /// — which must happen *outside* this lock, because the backend's callback
+    /// thread takes the same one and `notify` makes no promise about which
+    /// thread `watch()` may deliver on.
     fn attach(&self, dir: &Path, subscriber: Subscriber) -> Option<Subscriber> {
         let mut watched = self.watched.lock();
         match watched.get_mut(dir) {
-            Some(entry) => {
+            Some(entry) if entry.live => {
                 entry.subscribers.push(subscriber);
                 None
             }
-            None => Some(subscriber),
+            // Present but dead: joining it would be joining a stream that has
+            // stopped reporting. The caller rebuilds, and `adopt` carries the
+            // existing subscribers onto the new registration.
+            _ => Some(subscriber),
         }
+    }
+
+    /// Install a freshly built watcher for `dir`.
+    ///
+    /// Any subscribers still on a dead registration move across, so a listing
+    /// that was watching a directory which vanished and came back is served by
+    /// the new stream rather than being stranded on the old one. Dropping the
+    /// replaced entry unregisters it.
+    fn adopt(&self, dir: &Path, watcher: notify::RecommendedWatcher, subscriber: Subscriber) {
+        let mut watched = self.watched.lock();
+        let mut subscribers = match watched.remove(dir) {
+            Some(dead) => dead.subscribers,
+            None => Vec::new(),
+        };
+        subscribers.push(subscriber);
+        watched.insert(
+            dir.to_path_buf(),
+            Watched {
+                _watcher: watcher,
+                subscribers,
+                live: true,
+            },
+        );
     }
 
     fn subscribe(self: &Arc<Self>, requested: PathBuf) -> std::io::Result<Watch> {
@@ -325,13 +376,7 @@ impl Registry {
             // unregisters it. Wasteful, not wrong, and it needs two threads
             // opening the same directory in the same instant.
             if let Some(subscriber) = self.attach(&dir, subscriber) {
-                self.watched.lock().insert(
-                    dir.clone(),
-                    Watched {
-                        _watcher: watcher,
-                        subscribers: vec![subscriber],
-                    },
-                );
+                self.adopt(&dir, watcher, subscriber);
             }
         }
 
@@ -349,16 +394,44 @@ impl Registry {
     }
 
     fn unsubscribe(&self, dir: &Path, id: u64) {
-        let now_idle = {
+        /// What losing this subscriber leaves behind.
+        enum Outcome {
+            /// Someone else is still listening.
+            Keep,
+            /// Nobody is listening, but the registration still works.
+            Park,
+            /// Nobody is listening and the registration is dead.
+            Drop,
+        }
+
+        let outcome = {
             let mut watched = self.watched.lock();
             let Some(entry) = watched.get_mut(dir) else {
                 return;
             };
             entry.subscribers.retain(|subscriber| subscriber.id != id);
-            entry.subscribers.is_empty()
+            if !entry.subscribers.is_empty() {
+                Outcome::Keep
+            } else if entry.live {
+                Outcome::Park
+            } else {
+                // Torn down rather than parked, so nothing can reclaim a
+                // registration that no longer reports (see `Watched::live`).
+                // Removing the entry drops its watcher, unregistering it.
+                watched.remove(dir);
+                Outcome::Drop
+            }
         };
-        if !now_idle {
-            return;
+
+        // `watched` is released before `idle` is touched below — holding the
+        // two together is what `Registry::idle` forbids.
+        match outcome {
+            Outcome::Keep => return,
+            Outcome::Drop => {
+                self.idle.lock().retain(|parked| parked != dir);
+                return;
+            }
+            Outcome::Park => {}
         }
 
         // Parked, not torn down: building a watcher spawns a thread and an
@@ -438,6 +511,17 @@ impl Watch {
     fn is_registered(dir: &Path) -> bool {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         registry().watched.lock().contains_key(&dir)
+    }
+
+    /// Whether `dir`'s registration is still believed to deliver.
+    #[cfg(test)]
+    fn is_live(dir: &Path) -> bool {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        registry()
+            .watched
+            .lock()
+            .get(&dir)
+            .is_some_and(|entry| entry.live)
     }
 }
 
@@ -601,6 +685,53 @@ mod tests {
         drop((a, b));
         fs::remove_dir_all(&one).ok();
         fs::remove_dir_all(&two).ok();
+    }
+
+    #[test]
+    fn a_vanished_directory_is_never_parked_for_reuse() {
+        // A registration watches an object, not a name. Parking a dead one
+        // and handing it to whoever opens the recreated directory is a pane
+        // that quietly never refreshes again — the failure this guards.
+        //
+        // What is asserted is the registry's policy, not the delivery
+        // failure: FSEvents resolves by path and does keep reporting through
+        // a delete/recreate, so macOS cannot observe the stale-handle symptom.
+        // Windows can — `ReadDirectoryChangesW` holds a handle to the
+        // directory object — and the policy is what protects it.
+        let root = tempdir("recreated");
+        // Captured before the delete, because the registry is keyed on the
+        // canonical path and `canonicalize` fails once the directory is gone
+        // — which would otherwise make every probe below trivially true.
+        let key = root.canonicalize().unwrap();
+        let watch = Watch::start(root.clone()).unwrap();
+        assert!(Watch::is_live(&key));
+
+        fs::remove_dir_all(&root).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut reported_gone = false;
+        while std::time::Instant::now() < deadline && !reported_gone {
+            while let Ok(event) = watch.events.try_recv() {
+                reported_gone |= event == WatchEvent::Gone;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reported_gone, "removing the directory should report Gone");
+        assert!(!Watch::is_live(&key), "and must mark the registration dead");
+
+        drop(watch);
+        assert!(
+            !Watch::is_registered(&key),
+            "a dead registration is torn down, not parked as idle"
+        );
+
+        // The name is now a different directory, and it must be watchable.
+        fs::create_dir_all(&root).unwrap();
+        let again = Watch::start(root.clone()).unwrap();
+        assert!(Watch::is_live(&key), "the rebuilt registration is live");
+        expect_change(&[("again", &again)], &root);
+
+        drop(again);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
