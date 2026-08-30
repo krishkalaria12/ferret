@@ -155,6 +155,21 @@ impl Browser {
             .unwrap_or_else(|| default_terminal_font(cx));
         let font_size = terminal_settings.font_size;
         let line_height = font_size * terminal_settings.line_height;
+        let font = gpui::font(font_family.clone());
+        let measure_run = gpui::TextRun {
+            len: 1,
+            font,
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let cell_width = f32::from(
+            window
+                .text_system()
+                .layout_line("M", px(font_size), &[measure_run], None)
+                .width,
+        );
         let terminal_owner = cx.weak_entity();
 
         v_flex()
@@ -226,10 +241,7 @@ impl Browser {
                             let Some(bounds) = children.first() else {
                                 return;
                             };
-                            // A monospace advance is approximately 0.6 em.
-                            // The run renderer will replace this estimate with
-                            // shaped metrics; the PTY must still resize now.
-                            let cell_width = (font_size * 0.6).max(1.);
+                            let cell_width = cell_width.max(1.);
                             let columns = ((f32::from(bounds.size.width) - 24.).max(cell_width)
                                 / cell_width) as u16;
                             let rows = ((f32::from(bounds.size.height) - 16.).max(line_height)
@@ -268,7 +280,14 @@ impl Browser {
                     .when(focused, |el| {
                         el.border_1().border_color(palette.cursor.opacity(0.55))
                     })
-                    .child(self.render_terminal_content(cwd, palette, font_family, line_height)),
+                    .child(self.render_terminal_content(
+                        cwd,
+                        palette,
+                        font_family,
+                        line_height,
+                        cell_width,
+                        focused,
+                    )),
             )
     }
 
@@ -315,12 +334,14 @@ impl Browser {
         palette: crate::theme::TerminalPalette,
         font_family: String,
         line_height: f32,
+        cell_width: f32,
+        focused: bool,
     ) -> impl IntoElement {
         let snapshot = self
             .terminal_session
             .as_ref()
             .map(TerminalSession::snapshot);
-        let mut body = v_flex().size_full().font_family(font_family);
+        let mut body = v_flex().relative().size_full().font_family(font_family);
         if let Some(error) = &self.terminal_error {
             return body.child(
                 div()
@@ -329,11 +350,28 @@ impl Browser {
             );
         }
         if let Some(snapshot) = snapshot {
-            for line in snapshot.lines {
-                body = body.child(div().h(px(line_height)).whitespace_nowrap().child(
-                    SharedString::from(if line.is_empty() { " " } else { &line }),
-                ));
+            for row in snapshot.rows {
+                let mut line = h_flex()
+                    .h(px(line_height))
+                    .w_full()
+                    .flex_shrink_0()
+                    .items_center();
+                for run in row.runs {
+                    line = line.child(render_terminal_run(run, palette, cell_width, line_height));
+                }
+                body = body.child(line);
             }
+            body = body.when(snapshot.cursor.visible, |body| {
+                body.child(render_terminal_cursor(
+                    snapshot.cursor.row,
+                    snapshot.cursor.column,
+                    snapshot.cursor.shape,
+                    focused,
+                    palette,
+                    cell_width,
+                    line_height,
+                ))
+            });
             return body;
         }
         body.child(
@@ -371,6 +409,132 @@ impl Browser {
         }
         cx.notify();
     }
+}
+
+fn render_terminal_run(
+    run: TerminalRun,
+    palette: crate::theme::TerminalPalette,
+    cell_width: f32,
+    line_height: f32,
+) -> impl IntoElement {
+    let TerminalStyle {
+        foreground,
+        background,
+        bold,
+        dim,
+        italic,
+        underline,
+        strikeout,
+        inverse,
+    } = run.style;
+    let mut foreground = resolve_terminal_color(foreground, palette);
+    let mut background = resolve_terminal_color(background, palette);
+    if inverse {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+    if dim {
+        foreground = foreground.opacity(0.62);
+    }
+
+    div()
+        .h(px(line_height))
+        .w(px(run.columns as f32 * cell_width))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .bg(background)
+        .text_color(foreground)
+        .when(bold, |el| el.font_weight(gpui::FontWeight::BOLD))
+        .when(italic, |el| el.italic())
+        .when(underline, |el| el.underline())
+        .when(strikeout, |el| el.line_through())
+        .child(SharedString::from(run.text))
+}
+
+fn render_terminal_cursor(
+    row: usize,
+    column: usize,
+    shape: CursorShape,
+    focused: bool,
+    palette: crate::theme::TerminalPalette,
+    cell_width: f32,
+    line_height: f32,
+) -> impl IntoElement {
+    let hollow = !focused || shape == CursorShape::HollowBlock;
+    div()
+        .absolute()
+        .left(px(column as f32 * cell_width))
+        .top(px(row as f32 * line_height))
+        .w(px(match shape {
+            CursorShape::Beam => 2.,
+            _ => cell_width,
+        }))
+        .h(px(match shape {
+            CursorShape::Underline => 2.,
+            _ => line_height,
+        }))
+        .when(shape == CursorShape::Underline, |el| {
+            el.top(px((row + 1) as f32 * line_height - 2.))
+        })
+        .when(hollow, |el| {
+            el.border_1().border_color(palette.cursor.opacity(0.9))
+        })
+        .when(!hollow, |el| el.bg(palette.cursor.opacity(0.72)))
+}
+
+fn resolve_terminal_color(
+    color: TerminalColor,
+    palette: crate::theme::TerminalPalette,
+) -> gpui::Hsla {
+    let named = [
+        palette.black,
+        palette.red,
+        palette.green,
+        palette.yellow,
+        palette.blue,
+        palette.magenta,
+        palette.cyan,
+        palette.white,
+        palette.bright_black,
+        palette.bright_red,
+        palette.bright_green,
+        palette.bright_yellow,
+        palette.bright_blue,
+        palette.bright_magenta,
+        palette.bright_cyan,
+        palette.bright_white,
+    ];
+    match color {
+        TerminalColor::Foreground => palette.foreground,
+        TerminalColor::Background => palette.background,
+        TerminalColor::Cursor => palette.cursor,
+        TerminalColor::Named(index) => named[index.min(15) as usize],
+        TerminalColor::Indexed(index @ 0..=15) => named[index as usize],
+        TerminalColor::Indexed(index @ 16..=231) => {
+            let index = index - 16;
+            let component = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+            terminal_rgb(
+                component(index / 36),
+                component((index % 36) / 6),
+                component(index % 6),
+            )
+        }
+        TerminalColor::Indexed(index) => {
+            let gray = 8 + (index - 232) * 10;
+            terminal_rgb(gray, gray, gray)
+        }
+        TerminalColor::Rgb { red, green, blue } => terminal_rgb(red, green, blue),
+    }
+}
+
+fn terminal_rgb(red: u8, green: u8, blue: u8) -> gpui::Hsla {
+    gpui::Rgba {
+        r: red as f32 / 255.,
+        g: green as f32 / 255.,
+        b: blue as f32 / 255.,
+        a: 1.,
+    }
+    .into()
 }
 
 fn terminal_key_bytes(event: &gpui::KeyDownEvent) -> Option<Vec<u8>> {
