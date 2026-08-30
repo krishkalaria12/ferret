@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ferret", "crates/ferret-platform",
+    "crates/ferret-search",
     "crates/ferret-settings",
     "crates/ferret-terminal",
     "crates/ferret-ui",
@@ -54,6 +55,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 
 ferret-platform = { path = "crates/ferret-platform" }
+ferret-search = { path = "crates/ferret-search" }
 ferret-ui = { path = "crates/ferret-ui" }
 ferret-settings = { path = "crates/ferret-settings" }
 ferret-terminal = { path = "crates/ferret-terminal" }
@@ -101,6 +103,10 @@ jiff = "0.2"
 # `ignore` will own because honouring .gitignore is that feature. One walker
 # per job, never both for the same job.
 jwalk = "0.9"
+# D-34 / F-40. Search needs ignore-file semantics, which bulk-operation walker
+# `jwalk` deliberately does not provide. The first live-search engine uses the
+# serial iterator on Ferret's shared worker pool; no second implicit pool.
+ignore = "0.4"
 notify = "7"
 portable-pty = "=0.9.0"
 # Not for speed first: `std`'s poisoning was doing active harm. Every lock in
@@ -112,6 +118,10 @@ parking_lot = "0.12"
 # A-12. Sorting 200,000 rows on a header click is embarrassingly parallel, and
 # is safe to parallelise only now that the comparator no longer allocates.
 rayon = "1"
+# F-40. One compiled Unicode-aware literal matcher per query. This avoids
+# allocating a lowercased filename for every visited path while preserving
+# explicit case-sensitive, insensitive and smart-case behavior.
+regex = "1"
 rust-embed = "8"
 # Bounded collections that never reach the heap: at most four table columns,
 # at most two of them hideable.

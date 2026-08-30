@@ -1920,6 +1920,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferret-search"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "ferret-vfs",
+ "ignore",
+ "regex",
+ "smol",
+ "smol_str",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "ferret-settings"
 version = "0.1.0"
 dependencies = [
