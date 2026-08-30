@@ -816,7 +816,7 @@ footer {
     <div class="an-row"><div class="an-cell an-title">change count</div><div class="an-cell">A filled dot and a number: how many files differ from HEAD, staged and unstaged together, plus untracked roots. Absent when the tree is clean.</div><div class="an-cell an-new">new</div></div>
     <div class="an-row"><div class="an-cell an-title">ahead / behind</div><div class="an-cell"><span class="mono">↑n</span> and <span class="mono">↓n</span>, each shown only when non-zero, and neither shown at all without an upstream.</div><div class="an-cell an-new">new</div></div>
     <div class="an-row"><div class="an-cell an-title">Pull</div><div class="an-cell">Ghost button. Disabled while any git action is in flight.</div><div class="an-cell an-new">new</div></div>
-    <div class="an-row"><div class="an-cell an-title">Push</div><div class="an-cell">Ghost button. Present only when there is an upstream and something to push.</div><div class="an-cell an-new">new</div></div>
+    <div class="an-row"><div class="an-cell an-title">Push</div><div class="an-cell">Ghost button. Present when there is something to push — commits ahead of an upstream, or a branch with commits and no upstream at all, where pushing is how it gets one.</div><div class="an-cell an-new">new</div></div>
     <div class="an-row"><div class="an-cell an-title">Commit…</div><div class="an-cell">Ghost button, ellipsis because it opens a dialog. Disabled when there is nothing to commit.</div><div class="an-cell an-new">new</div></div>
   </div>
 
@@ -839,8 +839,10 @@ footer {
   <ul>
     <li>A title row: a filled circular check glyph in the accent, <b>Commit Changes</b>, and
     the repository's directory name beneath it in muted text.</li>
-    <li><b>Message</b> — a <code>Textarea</code>, five rows, autofocused, with the library's
-    focus ring. Empty by default; Ferret does not pre-fill commit messages.</li>
+    <li><b>Message</b> — a <code>Textarea</code> five rows tall, autofocused, with the
+    library's focus ring. Empty by default; Ferret does not pre-fill commit messages.
+    Sized with <code>Textarea::h</code> rather than <code>TextareaState::rows</code>,
+    which governs the auto-grow ceiling and leaves the field one line tall.</li>
     <li>A checkbox: <b>Stage all changes first (git add -A)</b>, checked by default, and
     disabled with an explanatory tooltip when everything is already staged.</li>
     <li>A footer: <b>Cancel</b> (outline) and <b>Commit</b> (primary). Commit is disabled
@@ -1119,6 +1121,13 @@ u &lt;XY&gt; &lt;sub&gt; &lt;m1&gt; &lt;m2&gt; &lt;m3&gt; &lt;mW&gt; &lt;h1&gt; 
     carrying git's stderr verbatim, trimmed only of trailing whitespace and capped at
     <code>MAX_MESSAGE_CHARS</code>. Ferret never invents a friendlier message for a git
     error, because the friendly version is the one that cannot be searched for.</p>
+    <p><b>One refinement, added after seeing it.</b> A refused
+    <code>pull --ff-only</code> prints eight <code>hint:</code> lines of advice and
+    <em>then</em> the <code>fatal:</code> line that says what happened — correct for
+    a terminal read top to bottom, and wrong in a toast, where it buries the answer.
+    The first <code>fatal:</code> or <code>error:</code> line is therefore lifted to
+    the front and every other line follows in its original order. That is a
+    reordering, not an edit: nothing is dropped, reworded or summarised.</p>
   </div>
 
   <h3>Timeouts</h3>
@@ -1198,9 +1207,21 @@ u &lt;XY&gt; &lt;sub&gt; &lt;m1&gt; &lt;m2&gt; &lt;m3&gt; &lt;mW&gt; &lt;h1&gt; 
     <li><span class="step">3</span> <b><code>GitPanel</code> and the status-bar segment (F-50).</b> Discovery on navigation, one refresh, the branch chip and the counts. The app now shows a branch. No actions, no badges.</li>
     <li><span class="step">4</span> <b>The refresh triggers (D-48).</b> Watchers, debounce, generations. Verified by editing a file in the terminal panel and watching the count change without touching Ferret.</li>
     <li><span class="step">5</span> <b>Badges in the listing (F-51).</b> The snapshot handle into <code>FilePane</code>, the Name cell's dot, the directory roll-up. <code>just budget</code> immediately afterwards — this is the step that can fail Gate 7.</li>
-    <li><span class="step">6</span> <b><code>ops.rs</code>, then the commit dialog (F-52).</b> Stage-all and commit, with the dialog as its own entity (D-46).</li>
-    <li><span class="step">7</span> <b>Pull and push (F-53).</b> The single-flight guard (D-50), the notifications (D-51), the timeouts.</li>
-    <li><span class="step">8</span> <b>Windows pass.</b> Path separators through the parser, <code>git.exe</code> discovery, the <code>CREATE_NO_WINDOW</code> flag so no console flashes on every status read.</li>
+    <li><span class="step">6</span> <b>Mount the dialog and notification layers.</b>
+    <code>Root::new</code> as the window's first entity is necessary and not
+    sufficient: <code>Root::render</code> draws the mounted view and the tooltip and
+    native-menu overlays only, so <code>RootView::render</code> has to mount
+    <code>Root::render_dialog_layer</code>, <code>render_sheet_layer</code> and
+    <code>render_notification_layer</code> itself. Without them
+    <code>open_dialog</code> stores a builder nothing calls and
+    <code>push_notification</code> queues a toast nobody sees — both silent at
+    compile time <em>and</em> at runtime. Phase 1 shipped without them, so every
+    error toast its file operations pushed was invisible. This is a fifth part of
+    <code>AGENTS.md</code>'s bootstrap contract, and it has to land before the two
+    features below can be seen at all.</li>
+    <li><span class="step">7</span> <b><code>ops.rs</code>, then the commit dialog (F-52).</b> Stage-all and commit, with the dialog as its own entity (D-46).</li>
+    <li><span class="step">8</span> <b>Pull and push (F-53).</b> The single-flight guard (D-50), the notifications (D-51), the timeouts.</li>
+    <li><span class="step">9</span> <b>Windows pass.</b> Path separators through the parser, <code>git.exe</code> discovery, the <code>CREATE_NO_WINDOW</code> flag so no console flashes on every status read.</li>
   </ol>
 </section>
 
@@ -1211,9 +1232,14 @@ u &lt;XY&gt; &lt;sub&gt; &lt;m1&gt; &lt;m2&gt; &lt;m3&gt; &lt;mW&gt; &lt;h1&gt; 
 
   <h3>Gates</h3>
   <ul>
-    <li><b>Gate 7 (no per-frame O(directory) work).</b> Point the pane at the fixture's
-    <code>flat/</code> inside a repository and scroll. <code>just budget</code> must be
-    unchanged by this feature — the badge lookup allocates nothing.</li>
+    <li><b>Gate 7 (no per-frame O(directory) work).</b> <code>just budget</code> must
+    be <em>unchanged</em> by this feature, and it has to run against a
+    <em>populated</em> index to mean anything: an empty snapshot returns on its
+    first <code>?</code> before it ever hashes a path, so a version of the lookup
+    that allocated per row would sail through. The budget therefore builds its own
+    status by parsing synthetic porcelain over every third row of the 20,000-row
+    fixture. Measured: 2.02 allocations per visible row per frame against a limit of
+    3 — the same figure as before the feature existed.</li>
     <li><b>Gate 3 (both themes).</b> Five new tokens, each defined for light and dark, in one
     resolve function so there is no path that defines one and not the other.</li>
     <li><b>Gate 4 (both platforms).</b> Two keybindings, both bound. No console window on
