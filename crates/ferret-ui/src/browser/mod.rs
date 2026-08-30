@@ -8,10 +8,13 @@
 //! watcher and lets the old listing task see a dead entity and stop.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+
 use ferret_platform::Place;
-use ferret_settings::{FolderView, SortKey, SortOrder, ThemeChoice, ViewMode};
+use ferret_settings::{FolderView, ThemeChoice, ViewMode};
 use ferret_terminal::{
     CursorShape, TerminalBackend, TerminalColor, TerminalOptions, TerminalRun, TerminalSession,
     TerminalStyle,
@@ -37,7 +40,7 @@ use gpui_component::{
 };
 
 use crate::actions;
-use crate::folder::{Folder, FolderEvent};
+use crate::folder::{Folder, FolderEvent, ListingProfile, SortRules};
 use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
 use crate::state::FerretState;
@@ -172,7 +175,21 @@ pub struct Browser {
     terminal_generation: u64,
     terminal_columns: u16,
     terminal_rows: u16,
-    _terminal_poll: Option<gpui::Task<()>>,
+    /// The newest directory waiting to be injected, held until the shell can
+    /// safely take it (§6). Only ever one: someone arrow-keying down a tree
+    /// should produce one `cd`, not forty.
+    terminal_pending_sync: Option<PathBuf>,
+    /// The last directory actually written, so a queue that catches up with
+    /// where the shell already is writes nothing at all.
+    terminal_synced_to: Option<PathBuf>,
+    /// Whether the user has typed something the injected line would complete.
+    terminal_input_dirty: bool,
+    /// When the terminal last saw a keystroke. A keystroke inside the idle
+    /// window restarts it — it is the one signal that a human is mid-thought.
+    terminal_last_key: Option<Instant>,
+    /// Runs only while a session exists; a window whose terminal was never
+    /// opened schedules nothing.
+    terminal_poll: Option<gpui::Task<()>>,
     /// Index of the tab currently being dragged, if any.
     tab_drag: Option<usize>,
     /// Index of the favourite currently being dragged, if any.
@@ -182,7 +199,7 @@ pub struct Browser {
     /// `gpui-component`'s `Tab` stops propagation of its own pointer events,
     /// so a per-tab listener never runs; the strip therefore does its own hit
     /// testing, and this is the geometry it needs.
-    tab_lefts: std::sync::Arc<std::sync::Mutex<Vec<gpui::Pixels>>>,
+    tab_lefts: Arc<Mutex<Vec<gpui::Pixels>>>,
     clipboard: Option<(Vec<VfsPath>, bool)>,
 
     /// `Some` while the path bar renders an editable input.
@@ -193,7 +210,18 @@ pub struct Browser {
     /// Held so the filter input keeps notifying the folder.
     _filter_subscription: Subscription,
 
-    volumes_cache: Option<(Instant, Vec<Place>)>,
+    /// Mounted volumes as of the last background probe.
+    ///
+    /// Render only ever reads this. Probing means a `read_dir("/Volumes")`
+    /// plus a `metadata` per entry, and a stale network mount can make that
+    /// take seconds — which, on the render path, is seconds of frozen window.
+    volumes: Vec<Place>,
+    /// The well-known folders, as of the same probe. Also never touched from
+    /// render: each one is an `is_dir()` (A-28).
+    places: Vec<Place>,
+    /// Re-probes both every [`VOLUMES_TTL`]. Held so the loop stops when the
+    /// browser goes away.
+    place_refresh: Option<gpui::Task<()>>,
 
     /// Focus for the sidebar, so Tab can reach it and it can show that it has
     /// focus (§8: "Focus must be visible").
@@ -306,47 +334,30 @@ impl Browser {
             terminal_generation: 0,
             terminal_columns: 120,
             terminal_rows: 24,
-            _terminal_poll: None,
+            terminal_pending_sync: None,
+            terminal_synced_to: None,
+            terminal_input_dirty: false,
+            terminal_last_key: None,
+            terminal_poll: None,
             tab_drag: None,
             favorite_drag: None,
-            tab_lefts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            tab_lefts: Arc::new(Mutex::new(Vec::new())),
             clipboard: None,
             path_editing: None,
             filter_input,
             _filter_subscription: filter_subscription,
-            volumes_cache: None,
+            volumes: Vec::new(),
+            places: Vec::new(),
+            place_refresh: None,
             sidebar_focus: cx.focus_handle(),
         };
         this.push_tab(start_directory(), window, cx);
         if this.terminal_visible {
+            // Starts the poll as a side effect; a window that opens with the
+            // panel closed never arms one.
             this.restart_terminal(cx);
         }
-        this._terminal_poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let alive = this
-                    .update(cx, |this, cx| {
-                        if !this.terminal_visible {
-                            return;
-                        }
-                        let generation = this
-                            .terminal_session
-                            .as_ref()
-                            .map(|session| session.snapshot().generation)
-                            .unwrap_or(0);
-                        if generation != this.terminal_generation {
-                            this.terminal_generation = generation;
-                            cx.notify();
-                        }
-                    })
-                    .is_ok();
-                if !alive {
-                    break;
-                }
-            }
-        }));
+        this.start_place_refresh(cx);
         this
     }
 
@@ -470,20 +481,6 @@ enum Region {
     Terminal,
 }
 
-trait SortKeyAndOrder {
-    fn sort_key_and_order(&self) -> (SortKey, SortOrder);
-}
-
-impl SortKeyAndOrder for FolderView {
-    fn sort_key_and_order(&self) -> (SortKey, SortOrder) {
-        (self.sort_key, self.sort_order)
-    }
-}
-
-fn smol_block_on<F: std::future::Future>(fut: F) -> F::Output {
-    smol::block_on(fut)
-}
-
 /// One toast for a batch operation. A single failure shows its own message
 /// unedited — every `VfsError` names its subject — and a batch leads with the
 /// count so the toast does not become a wall of near-identical lines.
@@ -522,6 +519,37 @@ mod tests {
             .expect("failures must produce a message");
         assert!(message.starts_with("2 items could not paste"), "{message}");
         assert!(message.contains("a failed"), "the first error survives");
+    }
+
+    /// The string half of the clipboard, which is what actually round-trips
+    /// on the pinned GPUI revision (D-42).
+    fn paths_from_text(text: &str) -> Vec<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(std::path::Path::new)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn pasted_text_is_only_taken_as_paths_when_it_looks_like_paths() {
+        // What Ferret itself writes, and what a terminal would paste back.
+        assert_eq!(
+            paths_from_text("/a/one.txt\n/a/two.txt"),
+            ["/a/one.txt", "/a/two.txt"]
+        );
+        // Blank lines and stray indentation survive a trip through a text
+        // editor without becoming empty paths.
+        assert_eq!(paths_from_text("\n  /a/one.txt  \n\n"), ["/a/one.txt"]);
+
+        // Ordinary prose is not a file list. Relative fragments are dropped
+        // here; anything that survives and is not real is dropped by the
+        // paste task's existence check, off the window thread.
+        assert!(paths_from_text("Dear Sir or Madam,\n\nI write to you").is_empty());
+        assert!(paths_from_text("notes.txt").is_empty(), "not absolute");
+        assert!(paths_from_text("").is_empty());
     }
 
     #[test]

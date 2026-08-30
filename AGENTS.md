@@ -35,7 +35,7 @@ Already done, do not redo:
 | | |
 | --- | --- |
 | `ferret-vfs` | `Vfs` trait, `LocalFs`, `VfsPath`. Streaming listings, cancel-by-drop. |
-| `ferret-settings` | Settings schema, keymap, per-folder view preferences. |
+| `ferret-settings` | Settings schema and per-folder view preferences. |
 | `crates/ferret-ui/assets/icons/` | 64 bundled file icons and their mapping table. |
 | `xtask` | Fixture generator and listing benchmark. |
 
@@ -62,6 +62,35 @@ cheaper to satisfy now than to retrofit.
    back to permanent deletion.
 6. **Run it.** `cargo check` passing proves nothing about GPUI: every failure
    mode in the bootstrap contract below is silent at compile time.
+7. **No per-frame work may be O(the directory).** A `Render` impl, a table
+   delegate method, or anything they call may not scan, clone or re-derive
+   something proportional to the number of entries. Six of the twenty-six
+   findings in `docs/audit.html` were this one rule, and unlike a timing
+   budget it is checkable by reading a diff rather than by how fast the
+   reviewer's machine is. It applies to *per-interaction* work too — a
+   marquee drag changes the selection on every mouse-move. `just budget` is
+   the mechanical backstop for both.
+
+### One walker per job (D-34)
+
+Two parallel directory walkers will end up in this tree, and it is very easy to
+finish with both doing the same job in different files — at which point nobody
+can say how many threads are walking the disk. The split:
+
+| Walker | Owns | Why |
+| --- | --- | --- |
+| `jwalk` | Bulk file work with no ignore semantics: tree copy, and folder-size-on-demand and the operations queue's conflict scan when they land. | Lower overhead, and the job is "visit everything fast". |
+| `ignore` (Phase 5) | Filename and content search. | Honouring `.gitignore` is the entire feature. |
+
+Neither is used for the other's job. And neither is used for a **single**
+directory listing: reading the names out of one directory is a serial syscall
+stream that no walker changes, so `read_dir` stays as it is and the per-entry
+`stat` calls are what go parallel (D-33).
+
+Everything data-parallel runs on `ferret_vfs::pool`, never on rayon's implicit
+global pool — a bare `par_iter` silently creates a second one, alongside smol's
+blocking pool and GPUI's executor, and three pools each sized to the core count
+oversubscribe the machine.
 
 ### Finished when
 
@@ -116,7 +145,7 @@ base shippable.
 | --- | --- | --- |
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
-| `crates/ferret-settings` | `ferret-settings` | The settings schema, per-folder view preferences, the keymap. Knows nothing about GPUI or the filesystem layer. |
+| `crates/ferret-settings` | `ferret-settings` | The settings schema and per-folder view preferences. Knows nothing about GPUI or the filesystem layer. Every key it ships is read by something, and a test enforces that (D-41). |
 | `crates/ferret-vfs` | `ferret-vfs` | The `Vfs` trait, the local backend, path handling. Knows nothing about GPUI. |
 | `xtask` | `xtask` | Development tasks: the performance fixture and the listing benchmark. |
 
@@ -170,7 +199,9 @@ Windows.
 | `just lint` | `fmt --check` plus `clippy -D warnings`. | Before a PR or after non-trivial changes. |
 | `just test` | Run workspace tests. | When behavior changes or tests are added. |
 | `cargo xtask fixture` | Build the performance fixture. | Once, before benchmarking or testing the file pane. |
-| `cargo xtask bench` | Measure listing performance against budget. | After touching `ferret-vfs` or the file pane. Exits non-zero past budget. |
+| `cargo xtask bench` | Measure listing performance against budget — time to first row, to a full listing, and to one where every row can draw its size and date. | After touching `ferret-vfs` or the file pane. Exits non-zero past budget. |
+| `just budget` | Assert the allocations-per-frame budget (`docs/audit.html` §10) with dhat. Runs alone; installs a global allocator. | After touching anything a `Render` impl or a table delegate calls, or the selection. |
+| `cargo run --release --features profile` | Frame, layout and paint spans in the Tracy profiler, through GPUI's own instrumentation. | When a stall needs locating rather than guessing at. |
 
 Do not claim a command passed unless you actually ran it. If a command cannot run
 because of the local environment, report the command and the exact blocker.
@@ -459,7 +490,7 @@ place to add tests in this project — write them against a temp directory.
 - Adding a `rev` to `gpui` without pinning `gpui-component` to a matching commit.
 - Dropping `gpui_platform`'s `runtime_shaders` feature, which is what lets macOS build without full Xcode.
 - Assuming macOS path, permission or shell semantics. Windows has drive letters, UNC paths, UTF-16 names, reserved names (`CON`, `NUL`, `COM1`) and needs Developer Mode for symlinks.
-- Collecting a directory listing into a `Vec` before yielding it. `cargo xtask bench` exists to catch this; time-to-first-row is 0.3 ms against 143 ms for a full 200,000-entry listing, and that gap is the whole point.
+- Collecting a directory listing into a `Vec` before yielding it. `cargo xtask bench` exists to catch this; time-to-first-row is ~0.35 ms against ~260 ms for a full 200,000-entry listing, and that gap is the whole point.
 - Adding a `ferret-vfs` type that duplicates something `std` already provides. It is a thin wrapper over the platform, not a filesystem.
 - Declaring a bare `std::result::Result` in a crate that has its own alias, or hard-coding a magic number next to the code that reads it. Both have a designated home.
 - Writing an error variant that does not name what it failed on.

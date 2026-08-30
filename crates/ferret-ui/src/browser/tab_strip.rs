@@ -16,10 +16,7 @@ impl Browser {
 
         // Each tab reports its left edge from inside its own prefix slot,
         // which is the only element in a `Tab` this crate owns.
-        self.tab_lefts
-            .lock()
-            .unwrap()
-            .resize(self.tabs.len(), px(0.));
+        self.tab_lefts.lock().resize(self.tabs.len(), px(0.));
 
         let tabs = self
             .tabs
@@ -41,7 +38,7 @@ impl Browser {
                             .items_center()
                             .pl(px(8.))
                             .on_prepaint(move |bounds, _, _| {
-                                if let Some(slot) = lefts.lock().unwrap().get_mut(ix) {
+                                if let Some(slot) = lefts.lock().get_mut(ix) {
                                     *slot = bounds.origin.x;
                                 }
                             })
@@ -135,7 +132,7 @@ impl Browser {
     /// at or before the pointer. `None` before the first paint, or left of the
     /// first tab.
     fn tab_at(&self, x: gpui::Pixels) -> Option<usize> {
-        let lefts = self.tab_lefts.lock().unwrap();
+        let lefts = self.tab_lefts.lock();
         lefts
             .iter()
             .rposition(|&left| left <= x)

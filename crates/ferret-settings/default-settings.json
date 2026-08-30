@@ -2,8 +2,6 @@
   "appearance": {
     "theme": "system",
     "ui_font_size": 13.0,
-    "row_density": "comfortable",
-    "alternate_row_colors": true,
     "vibrancy": false
   },
   "browser": {
@@ -13,11 +11,6 @@
     "directories_first": true,
     "natural_sort": true,
     "show_hidden": false,
-    "columns": [
-      "name",
-      "modified",
-      "size"
-    ],
     "confirm_permanent_delete": true,
     "enter_opens": true,
     "remember_folder_views": true
@@ -40,11 +33,6 @@
     "scrollback_lines": 10000,
     "shell": null,
     "term": "xterm-256color",
-    "shell_integration": true,
     "sync_default": true
-  },
-  "window": {
-    "restore_session": true,
-    "default_directory": null
   }
 }

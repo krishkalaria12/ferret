@@ -23,4 +23,11 @@ pub enum TerminalError {
     },
     #[error("Ferret couldn't communicate with the terminal: {0}")]
     Io(#[from] std::io::Error),
+    /// `cmd.exe` has no escape for a quote inside a quoted argument, so a path
+    /// containing one cannot be injected safely at all (§6, quoting table).
+    #[error("{shell} cannot be sent a path containing a quote: {directory}")]
+    Unquotable {
+        shell: &'static str,
+        directory: PathBuf,
+    },
 }

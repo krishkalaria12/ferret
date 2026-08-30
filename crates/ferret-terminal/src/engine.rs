@@ -93,6 +93,8 @@ mod tests {
             b"\x1b[31;1mred bold\x1b[0m \x1b[38;2;12;34;56mtruecolor\x1b[0m",
             b"abc\x1b[2DZ\x1b[?1h",
             b"\x1b[?1049halternate\x1b[?1049lprimary",
+            b"\x1b[?1049hstill in vim",
+            b"\x1b[?2004hbracketed",
         ];
         for bytes in corpus {
             let mut alacritty = alacritty::AlacrittyEngine::new(40, 4, 100);
@@ -109,6 +111,16 @@ mod tests {
             assert_eq!(alacritty.cursor, ghostty.cursor, "input: {bytes:?}");
             assert_eq!(
                 alacritty.application_cursor_keys, ghostty.application_cursor_keys,
+                "input: {bytes:?}"
+            );
+            // Directory sync reads both of these before it writes into
+            // someone's shell, so the two engines have to agree on them.
+            assert_eq!(
+                alacritty.alternate_screen, ghostty.alternate_screen,
+                "input: {bytes:?}"
+            );
+            assert_eq!(
+                alacritty.bracketed_paste, ghostty.bracketed_paste,
                 "input: {bytes:?}"
             );
         }

@@ -45,6 +45,12 @@ impl GhosttyEngine {
             pty_writes,
         })
     }
+
+    fn mode(&self, mode: Mode) -> Result<bool> {
+        self.terminal
+            .mode(mode)
+            .map_err(|error| engine_error(error.to_string()))
+    }
 }
 
 impl TerminalEngine for GhosttyEngine {
@@ -63,10 +69,13 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn snapshot(&mut self) -> Result<TerminalSnapshot> {
-        let application_cursor_keys = self
-            .terminal
-            .mode(Mode::DECCKM)
-            .map_err(|error| engine_error(error.to_string()))?;
+        let application_cursor_keys = self.mode(Mode::DECCKM)?;
+        // 1049 is what a modern program sets; the two older modes are still
+        // emitted by long-lived scripts and by `less` on some systems.
+        let alternate_screen = self.mode(Mode::ALT_SCREEN_SAVE)?
+            || self.mode(Mode::ALT_SCREEN)?
+            || self.mode(Mode::ALT_SCREEN_LEGACY)?;
+        let bracketed_paste = self.mode(Mode::BRACKETED_PASTE)?;
         let snapshot = self
             .render_state
             .update(&self.terminal)
@@ -149,6 +158,8 @@ impl TerminalEngine for GhosttyEngine {
                 },
             },
             application_cursor_keys,
+            alternate_screen,
+            bracketed_paste,
             generation: self.generation,
         })
     }

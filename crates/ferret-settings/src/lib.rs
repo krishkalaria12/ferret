@@ -23,8 +23,8 @@ mod schema;
 pub use errors::{Result, SettingsError, Warning};
 pub use folder_prefs::{FolderPrefs, FolderView};
 pub use schema::{
-    Appearance, Browser, Keymap, RowDensity, Settings, Sidebar, SortKey, SortOrder, Terminal,
-    TerminalBackend, ThemeChoice, ViewMode, WindowSettings,
+    Appearance, Browser, Settings, Sidebar, SortKey, SortOrder, Terminal, TerminalBackend,
+    ThemeChoice, ViewMode,
 };
 
 use config::{
@@ -76,9 +76,10 @@ impl Settings {
             browser: take_section(&mut root, "browser", &mut warnings),
             sidebar: take_section(&mut root, "sidebar", &mut warnings),
             terminal: take_section(&mut root, "terminal", &mut warnings),
-            window: take_section(&mut root, "window", &mut warnings),
-            keymap: take_section(&mut root, "keymap", &mut warnings),
-            // Whatever is left is from a version that knows more than this one.
+            // Whatever is left is from a version that knows more than this
+            // one — or a `window`/`keymap` section from a version that had
+            // them declared before D-41 removed them. Either way it is kept
+            // verbatim and written back, which is rule 2.
             unknown: root,
         };
 
@@ -127,7 +128,6 @@ impl Settings {
             ));
             self.sidebar.width = clamped;
         }
-
         let height = self.terminal.height;
         if !height.is_finite() || !(MIN_TERMINAL_HEIGHT..=MAX_TERMINAL_HEIGHT).contains(&height) {
             let clamped = if height.is_finite() {
@@ -171,16 +171,6 @@ impl Settings {
                 format!("{value} is outside the usable range 1–2."),
                 format!("Using {}.", self.terminal.line_height),
             ));
-        }
-
-        // The Name column is not optional: a listing with no names is unusable.
-        if !self.browser.columns.iter().any(|c| c == "name") {
-            warnings.push(Warning::new(
-                "browser.columns",
-                "doesn't include \"name\".",
-                "Adding it back — the file list needs it.",
-            ));
-            self.browser.columns.insert(0, "name".into());
         }
     }
 }
@@ -229,16 +219,20 @@ mod tests {
 
     #[test]
     fn unrecognised_keys_survive_a_round_trip() {
-        // A newer Ferret wrote a nested key this version has never heard of.
-        // Opening in this build must not delete it.
+        // A newer Ferret wrote a whole section this version has never heard
+        // of, and a nested key inside one it does know. Opening in this build
+        // must not delete either.
         let original = r#"{
-            "terminal": { "font_size": 12 },
+            "constellations": { "orion": true },
+            "terminal": { "font_size": 12, "future_option": true },
             "appearance": { "theme": "dark", "future_option": true }
         }"#;
         let (settings, _) = Settings::from_json(original);
+        assert_eq!(settings.terminal.font_size, 12.0, "the known key is read");
         let round_tripped = settings.to_json();
 
-        assert!(round_tripped.contains("font_size"), "{round_tripped}");
+        assert!(round_tripped.contains("constellations"), "{round_tripped}");
+        assert!(round_tripped.contains("orion"), "{round_tripped}");
         assert!(round_tripped.contains("future_option"), "{round_tripped}");
     }
 
@@ -302,20 +296,18 @@ mod tests {
     }
 
     #[test]
-    fn the_name_column_cannot_be_removed() {
-        let (settings, warnings) =
-            Settings::from_json(r#"{ "browser": { "columns": ["size", "modified"] } }"#);
-        assert_eq!(settings.browser.columns[0], "name");
-        assert_eq!(warnings.len(), 1);
-    }
-
-    #[test]
-    fn a_keymap_entry_can_unbind_rather_than_rebind() {
-        let (settings, warnings) =
-            Settings::from_json(r#"{ "keymap": { "cmd-t": "tab::New", "cmd-w": null } }"#);
-        assert_eq!(settings.keymap["cmd-t"].as_deref(), Some("tab::New"));
-        assert_eq!(settings.keymap["cmd-w"], None);
-        assert!(warnings.is_empty());
+    fn a_removed_section_is_kept_rather_than_dropped() {
+        // `window` and `keymap` were removed by D-41 because nothing read
+        // them. A file that still has them must not lose them — that is rule
+        // 2, and it is what lets the sections come back when the features
+        // that read them are built.
+        let (settings, warnings) = Settings::from_json(
+            r#"{ "window": { "restore_session": false }, "keymap": { "cmd-t": "tab::New" } }"#,
+        );
+        assert!(warnings.is_empty(), "an unknown section is not an error");
+        let round_tripped = settings.to_json();
+        assert!(round_tripped.contains("restore_session"), "{round_tripped}");
+        assert!(round_tripped.contains("cmd-t"), "{round_tripped}");
     }
 
     #[test]
@@ -323,6 +315,83 @@ mod tests {
         let (reparsed, warnings) = Settings::from_json(&Settings::default().to_json());
         assert_eq!(reparsed, Settings::default());
         assert!(warnings.is_empty());
+    }
+
+    /// Every key the settings file offers must do something (D-41).
+    ///
+    /// Twelve did not: declared, defaulted, serialised into
+    /// `default-settings.json` — which the crate ships and calls
+    /// "documentation the user reads and copies from" — and read by nothing.
+    /// One of them was `confirm_permanent_delete`, so the file told people
+    /// they could turn off a delete confirmation that was in fact
+    /// unconditional.
+    ///
+    /// This cannot be a compile-time check: "is read" is not a property the
+    /// type system sees. So it is a grep, which is crude and would have caught
+    /// all twelve on the day each was written. It runs over the workspace
+    /// source outside this crate, because a key read only by its own
+    /// definition is exactly the failure being tested for.
+    #[test]
+    fn every_setting_is_read_by_something() {
+        let shipped = Settings::default().to_json();
+        let root: Value = serde_json::from_str(&shipped).expect("defaults must serialise");
+        let Value::Object(sections) = root else {
+            panic!("the settings file is an object");
+        };
+
+        // `crates/` from `crates/ferret-settings/src/lib.rs`.
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/ferret-settings has a parent")
+            .to_path_buf();
+        let mut sources = String::new();
+        collect_rust_sources(&crates, &mut sources);
+        assert!(
+            sources.len() > 10_000,
+            "found almost no source to search — the walk is wrong, not the settings"
+        );
+
+        let mut unread = Vec::new();
+        for (section, value) in &sections {
+            let Value::Object(keys) = value else {
+                continue; // A scalar at the top level is not a section.
+            };
+            for key in keys.keys() {
+                // `settings.browser.show_hidden` reaches the code as
+                // `show_hidden`, and a field is always named to be read.
+                if !sources.contains(key.as_str()) {
+                    unread.push(format!("{section}.{key}"));
+                }
+            }
+        }
+
+        assert!(
+            unread.is_empty(),
+            "these settings are shipped in default-settings.json and read by nothing: {unread:?}\n\
+             Either wire each one up, or remove it until the feature that reads it exists (D-41)."
+        );
+    }
+
+    /// Every `.rs` file under `dir`, concatenated, skipping this crate.
+    fn collect_rust_sources(dir: &std::path::Path, out: &mut String) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skipped: a setting named only by its own declaration is the
+                // thing this test exists to catch.
+                if path.file_name().is_some_and(|n| n == "ferret-settings") {
+                    continue;
+                }
+                collect_rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push_str(&text);
+            }
+        }
     }
 
     #[test]

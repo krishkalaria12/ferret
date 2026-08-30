@@ -3,10 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use crate::engine;
+use crate::shell::{ShellKind, change_directory_command};
 use crate::{ActiveTerminalBackend, Result, TerminalError, TerminalOptions, TerminalSnapshot};
 
 const DEFAULT_COLUMNS: u16 = 120;
@@ -17,6 +19,11 @@ pub struct TerminalSession {
     snapshot: Arc<RwLock<TerminalSnapshot>>,
     engine: Sender<EngineCommand>,
     backend: ActiveTerminalBackend,
+    shell_kind: ShellKind,
+    /// When the PTY last produced output. The Tier 2 safety check in §6 is an
+    /// idle window, so somebody has to hold the clock; the engine thread is the
+    /// only place that sees every byte.
+    last_output: Arc<Mutex<Instant>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -24,7 +31,12 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     pub fn spawn(directory: &Path, options: &TerminalOptions) -> Result<Self> {
-        let (engine, snapshot, backend) = spawn_engine(options)?;
+        let Engine {
+            commands: engine,
+            snapshot,
+            backend,
+            last_output,
+        } = spawn_engine(options)?;
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -90,6 +102,8 @@ impl TerminalSession {
             snapshot,
             engine,
             backend,
+            shell_kind: ShellKind::detect(&shell),
+            last_output,
             writer,
             master: pair.master,
             killer,
@@ -98,6 +112,21 @@ impl TerminalSession {
 
     pub fn backend(&self) -> ActiveTerminalBackend {
         self.backend
+    }
+
+    /// The dialect of the shell that actually started, which is what decides
+    /// how a path may be handed to it.
+    pub fn shell_kind(&self) -> ShellKind {
+        self.shell_kind
+    }
+
+    /// How long the PTY has been silent. Zero output is the closest thing a
+    /// Tier 2 session has to "no program is running" (D-26).
+    pub fn idle_for(&self) -> Duration {
+        self.last_output
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .elapsed()
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
@@ -114,9 +143,33 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Inject a `cd` into the running shell.
+    ///
+    /// Whether this is *safe* to call is the caller's decision — it depends on
+    /// the alternate-screen flag and the input line, which only the panel
+    /// tracks (§6). This only guarantees the line is correct for the shell.
     pub fn change_directory(&self, directory: &Path) -> Result<()> {
-        let command = change_directory_command(directory);
+        let command = change_directory_command(self.shell_kind, directory)?;
         self.write(command.as_bytes())
+    }
+
+    /// Write pasted text, wrapped in bracketed-paste markers when the program
+    /// has asked for them (mode 2004).
+    ///
+    /// Without the wrapper an embedded escape would be read as a keypress, so
+    /// the unbracketed form strips them: pasting into a plain `read` should
+    /// never move the cursor or change a mode.
+    pub fn paste(&self, text: &str) -> Result<()> {
+        // A shell reads one command per carriage return, and a pasted `\r\n`
+        // would submit twice.
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        if self.snapshot().bracketed_paste {
+            self.write(b"\x1b[200~")?;
+            self.write(text.as_bytes())?;
+            return self.write(b"\x1b[201~");
+        }
+        let sanitized: String = text.chars().filter(|c| *c != '\x1b').collect();
+        self.write(sanitized.as_bytes())
     }
 
     pub fn resize(
@@ -170,17 +223,21 @@ enum EngineCommand {
     },
 }
 
-fn spawn_engine(
-    options: &TerminalOptions,
-) -> Result<(
-    Sender<EngineCommand>,
-    Arc<RwLock<TerminalSnapshot>>,
-    ActiveTerminalBackend,
-)> {
+/// What the engine thread hands back once it has a working VT.
+struct Engine {
+    commands: Sender<EngineCommand>,
+    snapshot: Arc<RwLock<TerminalSnapshot>>,
+    backend: ActiveTerminalBackend,
+    last_output: Arc<Mutex<Instant>>,
+}
+
+fn spawn_engine(options: &TerminalOptions) -> Result<Engine> {
     let (commands, receiver) = mpsc::channel();
     let (initialized, initialization) = mpsc::channel();
     let snapshot = Arc::new(RwLock::new(TerminalSnapshot::default()));
     let worker_snapshot = snapshot.clone();
+    let last_output = Arc::new(Mutex::new(Instant::now()));
+    let worker_last_output = last_output.clone();
     let requested = options.backend;
     let scrollback_lines = options.scrollback_lines;
     thread::Builder::new()
@@ -221,6 +278,9 @@ fn spawn_engine(
                 match command {
                     EngineCommand::AttachWriter(writer) => pty_writer = Some(writer),
                     EngineCommand::Advance(bytes) => {
+                        *worker_last_output
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = Instant::now();
                         let replies = engine.advance(&bytes);
                         if let Some(writer) = &pty_writer {
                             write_engine_replies(writer, replies);
@@ -258,7 +318,12 @@ fn spawn_engine(
             "terminal engine failed during startup",
         ))
     })??;
-    Ok((commands, snapshot, backend))
+    Ok(Engine {
+        commands,
+        snapshot,
+        backend,
+        last_output,
+    })
 }
 
 fn write_engine_replies(writer: &Arc<Mutex<Box<dyn Write + Send>>>, replies: Vec<Vec<u8>>) {
@@ -290,8 +355,10 @@ impl Drop for TerminalSession {
 fn default_shell() -> PathBuf {
     #[cfg(windows)]
     {
-        // Windows PowerShell is present on every supported Windows release;
-        // using it also keeps the literal-path `cd` injection below valid.
+        // Windows PowerShell is present on every supported Windows release.
+        // What it is *not* is a given: `terminal.shell` may point at cmd.exe or
+        // Git Bash, which is why `ShellKind` is read back off the spawned path
+        // rather than assumed from the platform.
         PathBuf::from("powershell.exe")
     }
     #[cfg(not(windows))]
@@ -299,31 +366,5 @@ fn default_shell() -> PathBuf {
         std::env::var_os("SHELL")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/bin/zsh"))
-    }
-}
-
-#[cfg(not(windows))]
-fn change_directory_command(directory: &Path) -> String {
-    let escaped = directory.to_string_lossy().replace('\'', "'\\''");
-    format!("cd -- '{escaped}'\n")
-}
-
-#[cfg(windows)]
-fn change_directory_command(directory: &Path) -> String {
-    let escaped = directory.to_string_lossy().replace('\'', "''");
-    format!("Set-Location -LiteralPath '{escaped}'\r\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(not(windows))]
-    #[test]
-    fn quotes_posix_paths_for_cd() {
-        assert_eq!(
-            change_directory_command(Path::new("/tmp/it's here")),
-            "cd -- '/tmp/it'\\''s here'\n"
-        );
     }
 }

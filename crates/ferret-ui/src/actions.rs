@@ -35,6 +35,10 @@ actions!(
         ToggleTerminal,
         FocusTerminalOrPane,
         ToggleTerminalSync,
+        /// Paste is its own action inside the terminal: the pane's `Paste`
+        /// moves files, and encoding the shortcut itself would send the shell
+        /// a raw `0x16` instead of the clipboard (§9).
+        TerminalPaste,
         NewTab,
         CloseTab,
         FocusPathBar,

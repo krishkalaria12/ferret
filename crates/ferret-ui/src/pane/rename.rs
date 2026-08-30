@@ -18,6 +18,15 @@ pub(super) struct Renaming {
 }
 
 impl FilePane {
+    /// Start a rename as soon as a background creation appears in the folder
+    /// model. Watcher delivery is asynchronous, so the first render may still
+    /// have no row; `render` retains this request until a `RowsChanged` event
+    /// makes the path available.
+    pub fn request_rename_when_visible(&mut self, path: VfsPath, cx: &mut Context<Self>) {
+        self.pending_rename = Some(path);
+        cx.notify();
+    }
+
     pub fn begin_rename(&mut self, path: VfsPath, window: &mut Window, cx: &mut Context<Self>) {
         let Some(name) = path.file_name() else {
             return;

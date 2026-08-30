@@ -7,9 +7,11 @@
 mod engine;
 mod errors;
 mod session;
+mod shell;
 
 pub use errors::{Result, TerminalError};
 pub use session::TerminalSession;
+pub use shell::ShellKind;
 
 use std::path::PathBuf;
 
@@ -54,6 +56,12 @@ pub struct TerminalSnapshot {
     pub rows: Vec<TerminalRow>,
     pub cursor: TerminalCursor,
     pub application_cursor_keys: bool,
+    /// Mode 1049/1047/47. A full-screen program owns the grid, so nothing may
+    /// be injected into the shell while this is set (§6).
+    pub alternate_screen: bool,
+    /// Mode 2004: the program has asked for pasted text to arrive wrapped in
+    /// `ESC [ 200 ~` … `ESC [ 201 ~` so it can tell it from typing.
+    pub bracketed_paste: bool,
     pub generation: u64,
 }
 

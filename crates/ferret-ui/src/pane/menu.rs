@@ -25,7 +25,7 @@ impl FilePane {
         }
         // Icon tiles and column rows open their menu on the way out to here;
         // a menu already placed at this event's position is theirs.
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         if self
             .space_menu
             .as_ref()
@@ -122,7 +122,7 @@ impl FilePane {
             },
         );
 
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         self.space_menu = Some(SpaceMenu {
             position: event.position - origin,
             menu,

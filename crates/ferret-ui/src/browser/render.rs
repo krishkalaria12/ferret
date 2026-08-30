@@ -131,6 +131,9 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::ToggleTerminalSync, _, cx| {
                 this.toggle_terminal_sync(cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &actions::TerminalPaste, _, cx| this.paste_into_terminal(cx)),
+            )
             .on_action(cx.listener(|this, _: &actions::NewTab, window, cx| {
                 let dir = this.active().folder.read(cx).dir.clone();
                 this.push_tab(dir, window, cx);

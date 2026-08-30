@@ -108,7 +108,10 @@ impl TerminalEngine for AlacrittyEngine {
     }
 
     fn snapshot(&mut self) -> Result<TerminalSnapshot> {
-        let application_cursor_keys = self.term.mode().contains(TermMode::APP_CURSOR);
+        let mode = self.term.mode();
+        let application_cursor_keys = mode.contains(TermMode::APP_CURSOR);
+        let alternate_screen = mode.contains(TermMode::ALT_SCREEN);
+        let bracketed_paste = mode.contains(TermMode::BRACKETED_PASTE);
         let content = self.term.renderable_content();
         let default_style = TerminalStyle {
             foreground: TerminalColor::Foreground,
@@ -164,6 +167,8 @@ impl TerminalEngine for AlacrittyEngine {
                 visible: content.cursor.shape != AlacrittyCursorShape::Hidden,
             },
             application_cursor_keys,
+            alternate_screen,
+            bracketed_paste,
             generation: self.generation,
         })
     }

@@ -8,6 +8,11 @@ use gpui_component::Root;
 actions!(ferret, [Quit]);
 
 fn main() {
+    // Names the main thread in the profiler timeline. Compiles to nothing
+    // without `--features profile`; see that feature's comment in Cargo.toml.
+    #[cfg(feature = "profile")]
+    profiling::register_thread!("main");
+
     // `Assets` supplies the SVGs behind `IconName` and Ferret's own icons;
     // without it every icon renders blank.
     gpui_platform::application()
@@ -36,22 +41,43 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     // Window lifecycle belongs to the binary, not to a view.
     cx.on_action(|_: &browser_actions::NewWindow, cx| open_main_window(cx));
+
+    // Config writes are debounced (A-09), so quitting inside the debounce
+    // window would lose the last sort click. This is the flush, and the only
+    // place a config write is allowed to block.
+    cx.on_app_quit(|cx: &mut App| {
+        ferret_ui::flush_pending_saves(cx);
+        async {}
+    })
+    .detach();
 }
 
 fn bind_keys(cx: &mut App) {
     use browser_actions::context;
 
+    // `docs/terminal.html` §9: inside a focused terminal, keys belong to the
+    // terminal. Only the intercept list below survives there; every other
+    // application binding is scoped out of the terminal with this, so Ctrl-R
+    // reaches shell history rather than refreshing the file pane, Ctrl-L
+    // clears the screen, Ctrl-W deletes a word, and Ctrl-C stays SIGINT.
+    //
+    // `Some(context::…)` bindings need no such guard — a context that is not
+    // the terminal's cannot be active while the terminal has focus.
+    const OUTSIDE_TERMINAL: Option<&str> = Some("!Terminal");
+
     cx.bind_keys([
-        // Quit — both platforms, always.
+        // Quit — both platforms, always. Ctrl-Q is XON/XOFF flow control in a
+        // terminal, so it stops being a quit key while one has focus.
         KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("ctrl-q", Quit, None),
-        // History and hierarchy.
+        KeyBinding::new("ctrl-q", Quit, OUTSIDE_TERMINAL),
+        // History and hierarchy. Alt is Meta to a shell, so the Alt pairs are
+        // scoped out alongside the Ctrl ones.
         KeyBinding::new("cmd-[", browser_actions::Back, None),
-        KeyBinding::new("alt-left", browser_actions::Back, None),
+        KeyBinding::new("alt-left", browser_actions::Back, OUTSIDE_TERMINAL),
         KeyBinding::new("cmd-]", browser_actions::Forward, None),
-        KeyBinding::new("alt-right", browser_actions::Forward, None),
+        KeyBinding::new("alt-right", browser_actions::Forward, OUTSIDE_TERMINAL),
         KeyBinding::new("cmd-up", browser_actions::Up, None),
-        KeyBinding::new("alt-up", browser_actions::Up, None),
+        KeyBinding::new("alt-up", browser_actions::Up, OUTSIDE_TERMINAL),
         // The mirror of Up: descend into the cursor row.
         KeyBinding::new(
             "cmd-down",
@@ -63,37 +89,55 @@ fn bind_keys(cx: &mut App) {
             browser_actions::EnterDirectory,
             Some(context::FILE_PANE),
         ),
-        // Refresh.
+        // Refresh. Ctrl-R is reverse history search in a shell.
         KeyBinding::new("cmd-r", browser_actions::Refresh, None),
         KeyBinding::new("f5", browser_actions::Refresh, None),
         // Hidden files.
         // The action was declared and handled but never bound, so the sidebar
         // could only be toggled from the toolbar button.
         KeyBinding::new("cmd-b", browser_actions::ToggleSidebar, None),
-        KeyBinding::new("ctrl-b", browser_actions::ToggleSidebar, None),
+        KeyBinding::new("ctrl-b", browser_actions::ToggleSidebar, OUTSIDE_TERMINAL),
+        // The two panel bindings from §9's intercept list, and the only ones
+        // that stay global: they are how you get back out of a focused
+        // terminal in the first place.
         KeyBinding::new("cmd-j", browser_actions::ToggleTerminal, None),
         KeyBinding::new("ctrl-j", browser_actions::ToggleTerminal, None),
         KeyBinding::new("ctrl-`", browser_actions::FocusTerminalOrPane, None),
         KeyBinding::new("cmd-shift-.", browser_actions::ToggleHidden, None),
-        KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, None),
+        KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, OUTSIDE_TERMINAL),
+        // Sync toggle, mirroring the panel's header control.
+        KeyBinding::new("cmd-shift-s", browser_actions::ToggleTerminalSync, None),
+        KeyBinding::new("ctrl-shift-s", browser_actions::ToggleTerminalSync, None),
+        // Terminal clipboard. Plain Ctrl-V is a literal-next in readline and
+        // Ctrl-C is SIGINT, which is why Windows uses the Shift forms.
+        KeyBinding::new(
+            "cmd-v",
+            browser_actions::TerminalPaste,
+            Some(context::TERMINAL),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-v",
+            browser_actions::TerminalPaste,
+            Some(context::TERMINAL),
+        ),
         // View modes.
         KeyBinding::new("cmd-1", browser_actions::ViewAsList, None),
-        KeyBinding::new("ctrl-1", browser_actions::ViewAsList, None),
+        KeyBinding::new("ctrl-1", browser_actions::ViewAsList, OUTSIDE_TERMINAL),
         KeyBinding::new("cmd-2", browser_actions::ViewAsColumns, None),
-        KeyBinding::new("ctrl-2", browser_actions::ViewAsColumns, None),
+        KeyBinding::new("ctrl-2", browser_actions::ViewAsColumns, OUTSIDE_TERMINAL),
         KeyBinding::new("cmd-3", browser_actions::ViewAsIcons, None),
-        KeyBinding::new("ctrl-3", browser_actions::ViewAsIcons, None),
+        KeyBinding::new("ctrl-3", browser_actions::ViewAsIcons, OUTSIDE_TERMINAL),
         // Windows.
         KeyBinding::new("cmd-n", browser_actions::NewWindow, None),
-        KeyBinding::new("ctrl-n", browser_actions::NewWindow, None),
-        // Tabs.
+        KeyBinding::new("ctrl-n", browser_actions::NewWindow, OUTSIDE_TERMINAL),
+        // Tabs. Ctrl-W deletes a word in a shell; Ctrl-T transposes characters.
         KeyBinding::new("cmd-t", browser_actions::NewTab, None),
-        KeyBinding::new("ctrl-t", browser_actions::NewTab, None),
+        KeyBinding::new("ctrl-t", browser_actions::NewTab, OUTSIDE_TERMINAL),
         KeyBinding::new("cmd-w", browser_actions::CloseTab, None),
-        KeyBinding::new("ctrl-w", browser_actions::CloseTab, None),
-        // Path bar.
+        KeyBinding::new("ctrl-w", browser_actions::CloseTab, OUTSIDE_TERMINAL),
+        // Path bar. Ctrl-L clears the screen.
         KeyBinding::new("cmd-l", browser_actions::FocusPathBar, None),
-        KeyBinding::new("ctrl-l", browser_actions::FocusPathBar, None),
+        KeyBinding::new("ctrl-l", browser_actions::FocusPathBar, OUTSIDE_TERMINAL),
         // Tab moves between sidebar, path bar and file pane (§8). Bound in
         // each region's own context — including the table's, which otherwise
         // claims Tab to walk its columns and would trap focus in the pane.
@@ -119,9 +163,9 @@ fn bind_keys(cx: &mut App) {
             browser_actions::FocusPrevRegion,
             Some(context::SIDEBAR),
         ),
-        // Inline filter.
+        // Inline filter. Ctrl-F moves the cursor forward in a shell.
         KeyBinding::new("cmd-f", browser_actions::FocusFilter, None),
-        KeyBinding::new("ctrl-f", browser_actions::FocusFilter, None),
+        KeyBinding::new("ctrl-f", browser_actions::FocusFilter, OUTSIDE_TERMINAL),
         KeyBinding::new(
             "escape",
             browser_actions::CancelEdit,
@@ -234,13 +278,44 @@ fn apply_startup_theme(cx: &mut App) {
     // Ferret's palette first: `sync_system_appearance` and `change` both
     // re-apply whichever theme config is registered, so registering after
     // them would leave the library's colours on screen until the next toggle.
-    ferret_ui::register_theme(vibrancy(cx), cx);
+    let font_size = cx.global::<FerretState>().settings.appearance.ui_font_size;
+    ferret_ui::register_theme(vibrancy(cx), font_size, cx);
 
     match cx.global::<FerretState>().settings.appearance.theme {
         ThemeChoice::System => Theme::sync_system_appearance(None, cx),
         ThemeChoice::Light => Theme::change(ThemeMode::Light, None, cx),
         ThemeChoice::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
+}
+
+/// Keep the window's theme in step with the OS while Ferret runs (A-31).
+///
+/// `apply_startup_theme` reads the appearance once, which is not what
+/// `theme: "system"` promises — and "system" is the default, so before this
+/// every user on macOS's own Auto appearance had a window that was the wrong
+/// colour for half of each day.
+///
+/// Guarded on the setting rather than always following: someone who has
+/// explicitly chosen Light or Dark has said they do not want the OS deciding,
+/// and that has to survive sunset. The check is inside the callback, not
+/// outside it, so changing the setting at runtime takes effect without
+/// re-registering anything.
+fn follow_system_appearance(window: &mut gpui::Window, _cx: &mut App) -> gpui::Subscription {
+    use ferret_settings::ThemeChoice;
+    use gpui_component::Theme;
+
+    window.observe_window_appearance(|window, cx| {
+        let follows = matches!(
+            cx.global::<FerretState>().settings.appearance.theme,
+            ThemeChoice::System
+        );
+        if follows {
+            // `Some(window)` rather than `None`: the library reads the
+            // window's own appearance when it has one, which is the value
+            // that just changed.
+            Theme::sync_system_appearance(Some(window), cx);
+        }
+    })
 }
 
 /// Whether to draw the window translucent over a blurred desktop.
@@ -313,6 +388,14 @@ fn open_main_window(cx: &mut App) {
             })
             .expect("failed to open the Ferret window");
 
+        // Detached rather than held: the observer lives in the window's own
+        // subscriber set, so it is dropped when the window is. Holding the
+        // handle here would only add a second thing to keep alive for exactly
+        // as long.
+        let _ = window.update(cx, |_, window, cx| {
+            follow_system_appearance(window, cx).detach();
+        });
+
         // Asked for a second time, after the renderer exists. This does not
         // currently change anything — see `vibrancy` — but it is the call the
         // platform documents, and it is where a fix would land.
@@ -326,4 +409,29 @@ fn open_main_window(cx: &mut App) {
         cx.update(|cx| cx.activate(true));
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{KeyBindingContextPredicate, KeyContext};
+
+    /// `KeyBinding::new` panics on a predicate it cannot parse, and every one
+    /// here runs at startup — a typo in `!Terminal` would be a launch crash
+    /// rather than a wrong keystroke.
+    #[test]
+    fn the_terminal_guard_parses_and_excludes_only_the_terminal() {
+        let predicate = KeyBindingContextPredicate::parse("!Terminal")
+            .expect("the guard on every application binding must parse");
+
+        let context = |name| vec![KeyContext::try_from(name).expect("a bare context name parses")];
+
+        assert!(
+            predicate.depth_of(&context("Terminal")).is_none(),
+            "Ctrl-R and friends must reach the shell"
+        );
+        assert!(
+            predicate.depth_of(&context("FilePane")).is_some(),
+            "and must still work everywhere else"
+        );
+    }
 }

@@ -7,19 +7,26 @@ const MAX_TERMINAL_HEIGHT: f32 = ferret_settings::config::MAX_TERMINAL_HEIGHT;
 const TERMINAL_HEADER_HEIGHT: f32 = 26.;
 const TERMINAL_SPLITTER_HEIGHT: f32 = 5.;
 
+/// Repaint cadence while the panel is on screen — one frame at 60 Hz.
+const TERMINAL_VISIBLE_TICK: Duration = Duration::from_millis(16);
+/// Cadence while the panel is hidden but the session is still alive. Nothing
+/// is being drawn, so the only job left is retrying a held `cd`.
+const TERMINAL_HIDDEN_TICK: Duration = Duration::from_millis(250);
+/// D-26. With no shell integration, silence is the only evidence we have that
+/// no program owns the PTY, so a held `cd` waits out a full second of it.
+const TERMINAL_SYNC_IDLE: Duration = Duration::from_secs(1);
+
 impl Browser {
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_visible = !self.terminal_visible;
         {
             let state = cx.global_mut::<FerretState>();
             state.settings.terminal.visible = self.terminal_visible;
-            state.save_settings();
+            state.touch_settings();
         }
+        crate::state::arm_config_save(cx);
         if self.terminal_visible {
-            if self.terminal_session.is_none() {
-                self.restart_terminal(cx);
-            }
-            window.focus(&self.terminal_focus, cx);
+            self.show_terminal(window, cx);
         } else {
             use gpui::Focusable as _;
             let pane_focus = self.active().pane.read(cx).focus_handle(cx);
@@ -34,8 +41,12 @@ impl Browser {
             self.terminal_visible = true;
             let state = cx.global_mut::<FerretState>();
             state.settings.terminal.visible = true;
-            state.save_settings();
-            window.focus(&self.terminal_focus, cx);
+            state.touch_settings();
+            crate::state::arm_config_save(cx);
+            // Opening the panel has to start a shell here too. The poller
+            // cannot create one, so skipping this leaves the panel reading
+            // "Starting terminal…" until it is closed and reopened.
+            self.show_terminal(window, cx);
             cx.notify();
             return;
         }
@@ -50,11 +61,24 @@ impl Browser {
         cx.notify();
     }
 
+    /// The one path that makes an opened panel usable: a session if there is
+    /// none, focus, and the poll that draws its output.
+    fn show_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_session.is_none() {
+            self.restart_terminal(cx);
+        } else {
+            self.start_terminal_poll(cx);
+        }
+        window.focus(&self.terminal_focus, cx);
+    }
+
     pub(super) fn toggle_terminal_sync(&mut self, cx: &mut Context<Self>) {
         self.terminal_sync = self.terminal_sync.toggle();
         if self.terminal_sync.is_enabled() {
             let dir = self.active().folder.read(cx).dir.clone();
             self.sync_terminal_to(&dir, cx);
+        } else {
+            self.terminal_pending_sync = None;
         }
         cx.notify();
     }
@@ -63,6 +87,7 @@ impl Browser {
         let dir = self.active().folder.read(cx).dir.clone();
         let Some(local) = dir.as_local() else {
             self.terminal_session = None;
+            self.terminal_poll = None;
             self.terminal_error =
                 Some("Terminal sessions currently require a local folder.".into());
             cx.notify();
@@ -79,6 +104,9 @@ impl Browser {
                 ferret_settings::TerminalBackend::Alacritty => TerminalBackend::Alacritty,
             },
         };
+        self.terminal_pending_sync = None;
+        self.terminal_input_dirty = false;
+        self.terminal_last_key = None;
         match TerminalSession::spawn(local, &options) {
             Ok(session) => {
                 self.terminal_error = None;
@@ -88,18 +116,25 @@ impl Browser {
                 }
                 self.terminal_session = Some(session);
                 self.terminal_generation = 0;
+                // The shell was spawned in this directory, so nothing is owed.
+                self.terminal_synced_to = Some(local.to_path_buf());
+                self.start_terminal_poll(cx);
             }
             Err(error) => {
                 self.terminal_session = None;
+                self.terminal_poll = None;
                 self.terminal_error = Some(error.to_string());
             }
         }
         cx.notify();
     }
 
-    /// Forward sync is an explicit command injected into the one persistent
-    /// shell (F-11). This first slice does not expose keyboard input yet, so
-    /// injection cannot overwrite a partially typed command.
+    /// Queue a directory for the shell to follow (F-11).
+    ///
+    /// The pane has already navigated by the time this runs and never waits on
+    /// the result: if the shell cannot take the `cd` right now the newest
+    /// target simply sits here until [`Self::flush_terminal_sync`] finds a safe
+    /// moment.
     pub(super) fn sync_terminal_to(&mut self, dir: &VfsPath, cx: &mut Context<Self>) {
         if !self.terminal_sync.is_enabled() || self.terminal_session.is_none() {
             return;
@@ -107,13 +142,133 @@ impl Browser {
         let Some(local) = dir.as_local() else {
             return;
         };
-        if let Some(session) = &self.terminal_session
-            && let Err(error) = session.change_directory(local)
-        {
-            self.terminal_error = Some(error.to_string());
-            self.terminal_sync = TerminalSyncState::Off;
-            cx.notify();
+        if self.terminal_synced_to.as_deref() == Some(local) {
+            self.terminal_pending_sync = None;
+            return;
         }
+        self.terminal_pending_sync = Some(local.to_path_buf());
+        self.flush_terminal_sync(cx);
+    }
+
+    /// Write the queued `cd` if — and only if — every §6 precondition holds.
+    ///
+    /// In the ordinary case, a shell sitting at a prompt with nothing typed,
+    /// all of them pass at once and the `cd` goes out immediately.
+    fn flush_terminal_sync(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.terminal_pending_sync.clone() else {
+            return;
+        };
+        if !self.terminal_sync.is_enabled() {
+            self.terminal_pending_sync = None;
+            return;
+        }
+        let Some(session) = &self.terminal_session else {
+            return;
+        };
+        // A full-screen program owns the grid and its stdin: this is the check
+        // that keeps a `cd` out of `vim`, `less` and `cat > file`.
+        if session.snapshot().alternate_screen {
+            return;
+        }
+        // Ferret has no OSC 133 marks yet, so it cannot see the input line
+        // directly. What it can see is its own keystrokes, and a newline is
+        // what returns the line to empty.
+        if self.terminal_input_dirty {
+            return;
+        }
+        let typing_recently = self
+            .terminal_last_key
+            .is_some_and(|at| at.elapsed() < TERMINAL_SYNC_IDLE);
+        if typing_recently || session.idle_for() < TERMINAL_SYNC_IDLE {
+            return;
+        }
+        match session.change_directory(&target) {
+            Ok(()) => {
+                self.terminal_pending_sync = None;
+                self.terminal_synced_to = Some(target);
+            }
+            Err(error) => {
+                // An unquotable path or a dead PTY: dropping the queue stops
+                // the poller retrying the same failure forever.
+                self.terminal_error = Some(error.to_string());
+                self.terminal_pending_sync = None;
+                self.terminal_sync = TerminalSyncState::Off;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drive repaints and the held `cd`, for exactly as long as there is a
+    /// session to drive.
+    ///
+    /// Both jobs need a timer and neither exists without a session, so an idle
+    /// file-manager window — the common case, with the panel closed and no
+    /// shell ever started — schedules nothing at all.
+    fn start_terminal_poll(&mut self, cx: &mut Context<Self>) {
+        // Always replaces rather than skipping when one is already held:
+        // dropping the previous task cancels it, so opening the panel twice
+        // cannot leave two pollers ticking against the same session. The
+        // loop below never touches this field — cancelling a task from
+        // inside itself is exactly the shape that deadlocks.
+        self.terminal_poll = Some(cx.spawn(async move |this, cx| {
+            let mut interval = TERMINAL_VISIBLE_TICK;
+            loop {
+                cx.background_executor().timer(interval).await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        // The session is what there was to poll for. When it
+                        // goes, so does the timer; the next one that starts
+                        // gets a fresh task from here.
+                        if this.terminal_session.is_none() {
+                            return false;
+                        }
+                        this.flush_terminal_sync(cx);
+                        interval = if this.terminal_visible {
+                            TERMINAL_VISIBLE_TICK
+                        } else {
+                            TERMINAL_HIDDEN_TICK
+                        };
+                        if this.terminal_visible {
+                            let generation = this
+                                .terminal_session
+                                .as_ref()
+                                .map_or(0, |session| session.snapshot().generation);
+                            if generation != this.terminal_generation {
+                                this.terminal_generation = generation;
+                                cx.notify();
+                            }
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Paste the clipboard into the shell (§9), rather than encoding the paste
+    /// shortcut itself and sending that.
+    pub(super) fn paste_into_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        let Some(session) = &self.terminal_session else {
+            return;
+        };
+        if let Err(error) = session.paste(&text) {
+            self.terminal_error = Some(error.to_string());
+        }
+        // Pasted text lands on the input line exactly as typed text would, and
+        // a trailing newline submits it.
+        self.terminal_input_dirty = !text.ends_with('\n') && !text.ends_with('\r');
+        self.terminal_last_key = Some(Instant::now());
+        cx.notify();
     }
 
     pub(super) fn update_terminal_drag(&mut self, y: gpui::Pixels, cx: &mut Context<Self>) {
@@ -135,7 +290,8 @@ impl Browser {
         let height = self.terminal_height;
         let state = cx.global_mut::<FerretState>();
         state.settings.terminal.height = height;
-        state.save_settings();
+        state.touch_settings();
+        crate::state::arm_config_save(cx);
         cx.notify();
     }
 
@@ -320,16 +476,23 @@ impl Browser {
 
     fn sync_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (label, bg) = match self.terminal_sync {
-            TerminalSyncState::On => ("Sync", theme.primary),
-            TerminalSyncState::Off => ("Sync Off", theme.secondary),
+        // A held `cd` is not a failure and not "off" — it is the third state
+        // §6 asks the control to show, so the user can see the shell is busy
+        // rather than assuming sync has silently stopped working.
+        let (label, tooltip, bg) = match (self.terminal_sync, self.terminal_pending_sync.is_some())
+        {
+            (TerminalSyncState::On, true) => {
+                ("Sync…", "Waiting for the shell to be ready", theme.warning)
+            }
+            (TerminalSyncState::On, false) => ("Sync", "Follow Folder", theme.primary),
+            (TerminalSyncState::Off, _) => ("Sync Off", "Follow Folder", theme.secondary),
         };
         Button::new("terminal-sync")
             .small()
             .label(label)
             .bg(bg)
             .text_color(crate::theme::text_on(bg, theme.foreground))
-            .tooltip("Follow Folder")
+            .tooltip(tooltip)
             .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal_sync(cx)))
     }
 
@@ -397,6 +560,10 @@ impl Browser {
         if let Err(error) = session.write(&bytes) {
             self.terminal_error = Some(error.to_string());
         }
+        // Whether the input line is now dirty is the §6 precondition Ferret
+        // can answer without shell integration, and this is where it changes.
+        self.terminal_input_dirty = !submits_or_clears_the_input_line(&bytes);
+        self.terminal_last_key = Some(Instant::now());
         cx.stop_propagation();
         cx.notify();
     }
@@ -600,6 +767,24 @@ fn terminal_key_bytes(
     Some(bytes)
 }
 
+/// Whether these bytes leave the shell's input line empty again.
+///
+/// Deliberately conservative: anything not on this list is treated as typing,
+/// because the cost of guessing wrong is a `cd` appended to a half-written
+/// `rm`. Real emptiness comes from OSC 133's `B` mark, which is what replaces
+/// this once shell integration lands.
+fn submits_or_clears_the_input_line(bytes: &[u8]) -> bool {
+    matches!(
+        bytes,
+        b"\r"      // Enter — runs the line
+            | b"\n"
+            | [0x03] // Ctrl-C — abandons it
+            | [0x15] // Ctrl-U — kills it
+            | [0x1b, 0x03]
+            | [0x1b, 0x15]
+    )
+}
+
 fn default_terminal_font(cx: &App) -> String {
     let installed = cx.text_system().all_font_names();
     let first_installed = |candidates: &[&str]| {
@@ -697,5 +882,20 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The gate that keeps an injected `cd` from completing a half-typed
+    /// command: only the keys that empty the line clear the flag.
+    #[test]
+    fn only_submitting_or_killing_the_line_leaves_it_clean() {
+        assert!(submits_or_clears_the_input_line(b"\r"));
+        assert!(submits_or_clears_the_input_line(&[0x03]));
+        assert!(submits_or_clears_the_input_line(&[0x15]));
+
+        assert!(!submits_or_clears_the_input_line(b"r"));
+        assert!(!submits_or_clears_the_input_line(b"\x7f"));
+        assert!(!submits_or_clears_the_input_line(b"\x1b[D"));
+        // A `\r` inside a longer sequence is not a submission.
+        assert!(!submits_or_clears_the_input_line(b"rm \r"));
     }
 }
