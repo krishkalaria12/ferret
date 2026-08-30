@@ -257,6 +257,10 @@ impl Browser {
         if active_changed {
             let directory = self.active().folder.read(cx).dir.clone();
             self.sync_terminal_to(&directory, cx);
+            // The tab that closed may have been the one in a repository, so the
+            // segment has to follow the tab that is now on screen rather than
+            // keep describing one nobody can see.
+            self.git_follow(&directory, cx);
         }
         cx.notify();
     }

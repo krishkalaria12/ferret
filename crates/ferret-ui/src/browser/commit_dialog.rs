@@ -128,6 +128,12 @@ impl Browser {
         let Some(repo) = self.git.repo() else {
             return;
         };
+        // ⌘⇧C is a shortcut people repeat. `open_dialog` pushes onto a stack,
+        // so without this a second press mounts a second copy of the same
+        // dialog over the first and Cancel only dismisses one of them.
+        if window.has_active_dialog(cx) {
+            return;
+        }
         let name = SharedString::from(repo.name().to_string());
 
         let dialog = match &self.commit_dialog {
