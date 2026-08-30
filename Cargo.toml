@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ferret", "crates/ferret-platform",
+    "crates/ferret", "crates/ferret-git",
+    "crates/ferret-platform",
     "crates/ferret-settings",
     "crates/ferret-terminal",
     "crates/ferret-ui",
@@ -53,6 +54,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 # source, every gpui-component icon renders empty.
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 
+ferret-git = { path = "crates/ferret-git" }
 ferret-platform = { path = "crates/ferret-platform" }
 ferret-ui = { path = "crates/ferret-ui" }
 ferret-settings = { path = "crates/ferret-settings" }

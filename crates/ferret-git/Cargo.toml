@@ -1,0 +1,21 @@
+[package]
+name = "ferret-git"
+description = "Ferret's GPUI-free Git integration: repository discovery, status and operations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferret-vfs.workspace = true
+# The status index keys on paths read from the user's own disk, never on
+# attacker-chosen input — the same reasoning as `ferret-ui`'s folder indices.
+foldhash.workspace = true
+smol_str.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `CREATE_NO_WINDOW`, so a status read on a watcher event does not flash a
+# console window over the user's desktop several times a minute.
+windows-sys.workspace = true
