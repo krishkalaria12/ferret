@@ -1,7 +1,7 @@
 use crate::config::{FIRST_LISTING_BATCH, LISTING_BATCH_SIZE, LISTING_BUFFER};
 use crate::{
-    Capabilities, DirEntryBatch, Entry, EntryKind, Metadata, ReadDirStream, RemoveMode, Result,
-    SymlinkTarget, Vfs, VfsError, VfsPath,
+    Capabilities, DirEntryBatch, Entry, EntryKind, ListingDetail, Metadata, ReadDirStream,
+    RemoveMode, Result, SymlinkTarget, Vfs, VfsError, VfsPath,
 };
 use async_trait::async_trait;
 use futures::stream::StreamExt;
@@ -45,10 +45,14 @@ impl Vfs for LocalFs {
             // where a second round trip is genuinely expensive, will want to
             // say `false` and let the file pane chase metadata separately.
             metadata_in_listing: true,
+            // `UF_HIDDEN` lives in `st_flags` on Unix, so it costs the same
+            // `stat` as size and dates; `FindFirstFileEx` hands the Windows
+            // attributes over with the name.
+            hidden_in_listing: cfg!(windows),
         }
     }
 
-    fn read_dir(&self, dir: &VfsPath) -> ReadDirStream {
+    fn read_dir(&self, dir: &VfsPath, detail: ListingDetail) -> ReadDirStream {
         let dir = dir.clone();
         let root = match Self::require_local(&dir) {
             Ok(root) => root,
@@ -81,7 +85,7 @@ impl Vfs for LocalFs {
                         Err(source) => {
                             if !pending.is_empty()
                                 && tx
-                                    .send_blocking(Ok(resolve(&mut pending, batch_size)))
+                                    .send_blocking(Ok(resolve(&mut pending, batch_size, detail)))
                                     .is_err()
                             {
                                 return;
@@ -101,7 +105,7 @@ impl Vfs for LocalFs {
                         continue;
                     }
                     if tx
-                        .send_blocking(Ok(resolve(&mut pending, batch_size)))
+                        .send_blocking(Ok(resolve(&mut pending, batch_size, detail)))
                         .is_err()
                     {
                         return; // consumer went away: stop walking.
@@ -110,7 +114,7 @@ impl Vfs for LocalFs {
                 }
 
                 if !pending.is_empty() {
-                    let _ = tx.send_blocking(Ok(resolve(&mut pending, batch_size)));
+                    let _ = tx.send_blocking(Ok(resolve(&mut pending, batch_size, detail)));
                 }
             })
             .await;
@@ -302,13 +306,22 @@ impl Vfs for LocalFs {
 /// first rows still arrive after `LISTING_BATCH_SIZE` names rather than after
 /// the whole directory, and a dropped stream leaves at most one batch of
 /// stats in flight rather than a directory's worth.
-fn resolve(entries: &mut Vec<fs::DirEntry>, next_capacity: usize) -> DirEntryBatch {
+fn resolve(
+    entries: &mut Vec<fs::DirEntry>,
+    next_capacity: usize,
+    detail: ListingDetail,
+) -> DirEntryBatch {
     let batch = std::mem::take(entries);
     entries.reserve(next_capacity);
-    crate::pool::install(move || batch.into_par_iter().map(convert).collect())
+    crate::pool::install(move || {
+        batch
+            .into_par_iter()
+            .map(|entry| convert(entry, detail))
+            .collect()
+    })
 }
 
-fn convert(entry: fs::DirEntry) -> Entry {
+fn convert(entry: fs::DirEntry, detail: ListingDetail) -> Entry {
     // `DirEntry::path` joins the parent and file name. Keep that allocation
     // alive for every path-dependent operation below rather than rebuilding it
     // for symlink resolution and broken-link reporting.
@@ -339,10 +352,14 @@ fn convert(entry: fs::DirEntry) -> Entry {
         None => EntryKind::Other,
     };
 
-    // Always, on both platforms (D-33). On Windows this is served from what
-    // `FindFirstFileEx` already returned; on Unix it is a `stat`, running here
-    // on a pool thread rather than on the file pane's second pass.
-    let metadata = entry.metadata().ok().map(|md| to_metadata(&md, &path));
+    // On both platforms when asked for (D-33). On Windows this is served from
+    // what `FindFirstFileEx` already returned; on Unix it is a `stat`, running
+    // here on a pool thread rather than on the file pane's second pass — and
+    // it is the one call a `NamesOnly` listing exists to skip.
+    let metadata = detail
+        .wants_metadata()
+        .then(|| entry.metadata().ok().map(|md| to_metadata(&md, &path)))
+        .flatten();
 
     // One `readlink`, and only for links that resolve to nothing — the row
     // has to name what it is pointing at.
@@ -562,8 +579,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn collect(fs: &LocalFs, dir: &VfsPath) -> BTreeMap<String, Entry> {
+        collect_with(fs, dir, ListingDetail::Full)
+    }
+
+    fn collect_with(fs: &LocalFs, dir: &VfsPath, detail: ListingDetail) -> BTreeMap<String, Entry> {
         smol::block_on(async {
-            let mut stream = fs.read_dir(dir);
+            let mut stream = fs.read_dir(dir, detail);
             let mut entries = BTreeMap::new();
             while let Some(item) = stream.next().await {
                 if let Ok(batch) = item {
@@ -607,8 +628,12 @@ mod tests {
     #[test]
     fn missing_directory_yields_one_error_not_a_panic() {
         let missing = VfsPath::local("/definitely/not/here/ferret");
-        let results: Vec<_> =
-            smol::block_on(async { LocalFs::new().read_dir(&missing).collect().await });
+        let results: Vec<_> = smol::block_on(async {
+            LocalFs::new()
+                .read_dir(&missing, ListingDetail::Full)
+                .collect()
+                .await
+        });
         assert_eq!(results.len(), 1);
         assert!(results[0].as_ref().unwrap_err().is_gone());
     }
@@ -650,7 +675,8 @@ mod tests {
         }
 
         smol::block_on(async {
-            let mut stream = LocalFs::new().read_dir(&VfsPath::local(root.clone()));
+            let mut stream =
+                LocalFs::new().read_dir(&VfsPath::local(root.clone()), ListingDetail::Full);
             assert!(stream.next().await.is_some());
             drop(stream); // the producer's next send fails and it returns
         });
@@ -669,7 +695,7 @@ mod tests {
 
         let batches: Vec<DirEntryBatch> = smol::block_on(async {
             LocalFs::new()
-                .read_dir(&VfsPath::local(root.clone()))
+                .read_dir(&VfsPath::local(root.clone()), ListingDetail::Full)
                 .filter_map(|item| async move { item.ok() })
                 .collect()
                 .await
@@ -709,6 +735,63 @@ mod tests {
             "got {:?}",
             entries["dangling"].kind
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn names_only_skips_the_stat_that_fills_metadata() {
+        let root = tempdir("detail");
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+
+        let fs_ = LocalFs::new();
+        let dir = VfsPath::local(root.clone());
+
+        // Full is the contract every column in the file pane is written
+        // against: the row is complete when it appears (D-33).
+        let full = collect_with(&fs_, &dir, ListingDetail::Full);
+        assert_eq!(full["a.txt"].metadata.map(|m| m.len), Some(5));
+        assert!(full["sub"].metadata.is_some());
+
+        // NamesOnly still classifies every entry — the chevron, the icon and
+        // the sort by name all come from the directory read itself — but the
+        // per-entry `stat` is gone.
+        let names = collect_with(&fs_, &dir, ListingDetail::NamesOnly);
+        assert_eq!(names.len(), 2, "the same entries are listed");
+        assert_eq!(names["a.txt"].kind, EntryKind::File);
+        assert_eq!(names["sub"].kind, EntryKind::Dir);
+        assert!(names["sub"].is_dir_like());
+        assert!(
+            names["a.txt"].metadata.is_none(),
+            "NamesOnly must not pay for size and dates"
+        );
+        assert_eq!(
+            names["a.txt"].display_len(),
+            None,
+            "and a row must report no size rather than a wrong one"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn names_only_still_hides_dotfiles_by_name() {
+        // The platform's own hidden flag rides the `stat` NamesOnly skips, so
+        // on Unix only the name-based half survives. That is exactly why
+        // `ListingProfile::detail` refuses NamesOnly while hidden entries are
+        // being filtered — see `hidden_in_listing`.
+        let root = tempdir("detail-hidden");
+        fs::write(root.join(".secret"), b"").unwrap();
+        fs::write(root.join("plain"), b"").unwrap();
+
+        let names = collect_with(
+            &LocalFs::new(),
+            &VfsPath::local(root.clone()),
+            ListingDetail::NamesOnly,
+        );
+        assert!(names[".secret"].is_hidden());
+        assert!(!names["plain"].is_hidden());
 
         fs::remove_dir_all(&root).ok();
     }
@@ -819,7 +902,7 @@ mod link_target_tests {
         let fs_impl = LocalFs::new();
         let entries: Vec<Entry> = smol::block_on(async {
             fs_impl
-                .read_dir(&VfsPath::local(root.clone()))
+                .read_dir(&VfsPath::local(root.clone()), ListingDetail::Full)
                 .filter_map(|r| async move { r.ok() })
                 .flat_map(futures::stream::iter)
                 .collect()

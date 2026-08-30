@@ -33,6 +33,46 @@ pub struct Capabilities {
     /// number of passes — assuming two would throw away the Windows win, and
     /// assuming one would stall macOS on a 200,000-entry directory.
     pub metadata_in_listing: bool,
+    /// The platform's own hidden flag arrives with the name, rather than
+    /// riding the same call as size and dates.
+    ///
+    /// True on Windows, where `FindFirstFileEx` returns the `HIDDEN` and
+    /// `SYSTEM` attributes alongside everything else. False on Unix, where
+    /// `UF_HIDDEN` lives in `st_flags` and the only way to read it is the
+    /// `stat` that also yields size and dates.
+    ///
+    /// This is what decides whether [`ListingDetail::NamesOnly`] is free or
+    /// changes what the user sees: `/` marks twelve of its entries `UF_HIDDEN`
+    /// and nothing else hides them, so a listing that skipped the `stat` there
+    /// would show `bin`, `etc`, `usr` and the rest while the pane beside it
+    /// hid them.
+    pub hidden_in_listing: bool,
+}
+
+/// How much of each entry a listing's consumer actually needs.
+///
+/// Names and kinds come free with the directory read. Everything else does
+/// not — on Unix it is a `stat` per entry — and a consumer that draws neither
+/// a size nor a date should not pay for one.
+///
+/// Callers must not treat this as a hint about *cost*: it changes what the
+/// entries contain. [`Entry::is_hidden`] falls back to the name alone when
+/// there is no [`Metadata`], and a sort by size or date over
+/// [`ListingDetail::NamesOnly`] entries is a sort over zeroes. See
+/// [`Capabilities::hidden_in_listing`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ListingDetail {
+    /// Name and kind only, including whether a symlink still resolves.
+    NamesOnly,
+    /// Everything: size, modification time and the platform's hidden flag.
+    #[default]
+    Full,
+}
+
+impl ListingDetail {
+    pub fn wants_metadata(self) -> bool {
+        matches!(self, ListingDetail::Full)
+    }
 }
 
 /// How thoroughly to remove something.
@@ -70,7 +110,12 @@ pub trait Vfs: Send + Sync + 'static {
     /// An `Err` item is a single unreadable child and the stream continues; a
     /// failure to open the directory at all arrives as the first item and ends
     /// it. Successful items are never empty.
-    fn read_dir(&self, dir: &VfsPath) -> ReadDirStream;
+    ///
+    /// `detail` says what the caller will draw. A backend may always return
+    /// more than was asked for — [`ListingDetail::NamesOnly`] is permission to
+    /// skip work, not a promise that the fields are absent — but it must never
+    /// return less than [`ListingDetail::Full`] requests.
+    fn read_dir(&self, dir: &VfsPath, detail: ListingDetail) -> ReadDirStream;
 
     /// Fill in the second metadata tier for one entry.
     ///

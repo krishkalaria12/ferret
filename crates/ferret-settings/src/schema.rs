@@ -53,6 +53,19 @@ pub enum SortKey {
     Kind,
 }
 
+impl SortKey {
+    /// Whether ordering by this key needs each entry's [`Metadata`].
+    ///
+    /// Name and Kind come from the directory read itself. Modified and Size do
+    /// not, and a listing that skipped the `stat` would sort every row as
+    /// equal — so a consumer that wants to skip it has to check here first.
+    ///
+    /// [`Metadata`]: https://docs.rs/ferret-vfs
+    pub fn needs_metadata(self) -> bool {
+        matches!(self, SortKey::Modified | SortKey::Size)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortOrder {

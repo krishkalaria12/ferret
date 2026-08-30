@@ -16,7 +16,7 @@ use crate::config::{
 };
 use anyhow::{Context, Result};
 use ferret_vfs::config::METADATA_BATCH_SIZE;
-use ferret_vfs::{Entry, LocalFs, Vfs, VfsPath};
+use ferret_vfs::{Entry, ListingDetail, LocalFs, Vfs, VfsPath};
 use futures::StreamExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -76,7 +76,9 @@ fn measure(fs: &LocalFs, label: &str, dir: &Path) -> Result<Measurement> {
         let mut errors = 0usize;
         let mut listed: Vec<Entry> = Vec::new();
 
-        let mut stream = fs.read_dir(&path);
+        // Full: the budget is written against what the file pane actually
+        // asks for, which is every field.
+        let mut stream = fs.read_dir(&path, ListingDetail::Full);
         while let Some(item) = stream.next().await {
             if first.is_none() {
                 first = Some(started.elapsed());

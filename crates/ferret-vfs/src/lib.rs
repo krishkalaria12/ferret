@@ -6,13 +6,13 @@
 //! stream**.
 //!
 //! ```no_run
-//! use ferret_vfs::{LocalFs, Vfs, VfsPath};
+//! use ferret_vfs::{ListingDetail, LocalFs, Vfs, VfsPath};
 //! use futures::StreamExt;
 //!
 //! # fn main() {
 //! smol::block_on(async {
 //!     let fs = LocalFs::new();
-//!     let mut entries = fs.read_dir(&VfsPath::local("/tmp"));
+//!     let mut entries = fs.read_dir(&VfsPath::local("/tmp"), ListingDetail::Full);
 //!     while let Some(batch) = entries.next().await {
 //!         if let Ok(batch) = batch {
 //!             for entry in batch {
@@ -48,5 +48,5 @@ pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
 pub use errors::{Result, VfsError};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
-pub use vfs::{Capabilities, DirEntryBatch, ReadDirStream, RemoveMode, Vfs};
+pub use vfs::{Capabilities, DirEntryBatch, ListingDetail, ReadDirStream, RemoveMode, Vfs};
 pub use watch::{Watch, WatchEvent};

@@ -106,7 +106,11 @@ impl Browser {
 
         let fs = cx.global::<FerretState>().fs;
         cx.spawn(async move |this, cx| {
-            let mut stream = fs.read_dir(&VfsPath::local(dir));
+            // Full, not NamesOnly: `matches_completion` hides entries the
+            // pane would hide, and on Unix that flag rides the same `stat` as
+            // size and dates. Completing in `/` would otherwise start offering
+            // `bin`, `usr` and `var`.
+            let mut stream = fs.read_dir(&VfsPath::local(dir), ferret_vfs::ListingDetail::Full);
             let wanted = prefix.as_str();
             let mut matches = Vec::with_capacity(MAX_COMPLETIONS);
             'listing: while let Some(Ok(batch)) = futures::StreamExt::next(&mut stream).await {
