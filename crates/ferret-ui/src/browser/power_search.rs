@@ -8,11 +8,11 @@ use ferret_search::{
     SearchService as _,
 };
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon,
+    ActiveTheme as _, Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -25,6 +25,9 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(140);
 const DIALOG_WIDTH: f32 = 860.;
 const DIALOG_HEIGHT: f32 = 610.;
 const ROW_HEIGHT: f32 = 34.;
+/// Dialog padding plus its two one-pixel borders.
+const DIALOG_CHROME: f32 = 34.;
+const MIN_MARGIN_TOP: f32 = 24.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SearchKind {
@@ -253,13 +256,13 @@ fn open_result(
     let is_dir = result.kind.is_dir_like();
     let path = result.path;
     let _ = browser.update(cx, |browser, cx| {
-        browser.dismiss_power_search(cx);
         if is_dir {
             browser.navigate(path, window, cx);
         } else {
             browser.open_with_default(path, window, cx);
         }
     });
+    window.close_dialog(cx);
 }
 
 impl Render for PowerSearch {
@@ -337,7 +340,7 @@ impl Render for PowerSearch {
 
         v_flex()
             .w_full()
-            .h_full()
+            .h(px(DIALOG_HEIGHT))
             .text_size(px(13.))
             .child(
                 h_flex()
@@ -358,12 +361,7 @@ impl Render for PowerSearch {
                         Button::new("power-search-done")
                             .ghost()
                             .label("Done")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let browser = this.browser.clone();
-                                let _ = browser.update(cx, |browser, cx| {
-                                    browser.dismiss_power_search(cx);
-                                });
-                            })),
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
                     ),
             )
             .child(
@@ -551,50 +549,32 @@ impl Render for PowerSearch {
 
 impl Browser {
     pub(super) fn toggle_power_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.power_search.is_some() {
-            self.dismiss_power_search(cx);
+        if window.has_active_dialog(cx) {
+            window.close_dialog(cx);
             return;
         }
         let current_folder = self.active().folder.read(cx).dir.clone();
-        let browser = cx.weak_entity();
-        let search = cx.new(|cx| PowerSearch::new(browser, current_folder, window, cx));
+        let search = match &self.power_search {
+            Some(existing) => existing.clone(),
+            None => {
+                let browser = cx.weak_entity();
+                let created = cx.new(|cx| PowerSearch::new(browser, current_folder, window, cx));
+                self.power_search = Some(created.clone());
+                created
+            }
+        };
         let focus = search.read(cx).name_input.read(cx).focus_handle(cx).clone();
-        self.power_search = Some(search);
         window.focus(&focus, cx);
+        window.open_dialog(cx, move |dialog, window, _cx| {
+            let viewport = f32::from(window.viewport_size().height);
+            let top = ((viewport - (DIALOG_HEIGHT + DIALOG_CHROME)) / 2.).max(MIN_MARGIN_TOP);
+            dialog
+                .w(px(DIALOG_WIDTH))
+                .margin_top(px(top))
+                .p_0()
+                .close_button(false)
+                .child(search.clone())
+        });
         cx.notify();
-    }
-
-    fn dismiss_power_search(&mut self, cx: &mut Context<Self>) {
-        self.power_search = None;
-        cx.notify();
-    }
-
-    pub(super) fn render_power_search_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let search = self.power_search.clone()?;
-        Some(
-            v_flex()
-                .id("power-search-overlay")
-                .absolute()
-                .inset_0()
-                .items_center()
-                .justify_center()
-                .bg(cx.theme().overlay)
-                .child(
-                    div()
-                        .w(px(DIALOG_WIDTH))
-                        .h(px(DIALOG_HEIGHT))
-                        .overflow_hidden()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().background)
-                        .shadow_xl()
-                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(search),
-                )
-                .into_any_element(),
-        )
     }
 }
