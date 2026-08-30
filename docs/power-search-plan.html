@@ -188,10 +188,10 @@
     <header class="masthead">
       <p class="eyebrow">Detailed implementation plan · F-40–F-43 · 30 Aug 2026</p>
       <h1>Power Search, at filesystem speed.</h1>
-      <p class="lede">A streaming, cancellable filename and content search for Ferret. It opens from a right-side top-bar toggle, preserves every control visible in the supplied reference, and adds the smallest set of high-value capabilities that do not compromise latency.</p>
+      <p class="lede">An indexed, continuously refreshed filename and content search for Ferret, with a live-scan fallback for arbitrary regex and unindexed roots. It opens from a right-side top-bar toggle, preserves every control visible in the supplied reference, and adds the smallest set of high-value capabilities that improve latency without sacrificing correctness.</p>
       <dl class="facts">
         <div><dt>Owner</dt><dd><code>ferret-search</code> + <code>ferret-ui</code></dd></div>
-        <div><dt>Mode</dt><dd>Index-free, in-process</dd></div>
+        <div><dt>Mode</dt><dd>Persistent index + daemon</dd></div>
         <div><dt>Targets</dt><dd>macOS · Windows</dd></div>
         <div><dt>Primary gate</dt><dd>&lt;100 ms first local result</dd></div>
       </dl>
@@ -200,12 +200,13 @@
     <section id="verdict">
       <span class="section-tag">Decision summary</span>
       <h2>Executive verdict</h2>
-      <p class="intro">Build the existing Phase 4 commitment as one modal Power Search surface, but keep the engine independent of GPUI. One filesystem walk feeds filename matches and content workers concurrently; bounded channels stream batches into a virtualized result table; generation IDs and cancel-by-drop prevent stale work from reaching the UI.</p>
-      <div class="callout good"><strong>Recommended baseline</strong><span><code>ignore</code> for traversal and ignore rules; <code>grep-searcher</code> + <code>grep-regex</code> for content; existing <code>async-channel</code>/<code>smol</code> for bounded delivery and tasks; no persistent index, no subprocess, no new async runtime.</span></div>
-      <div class="decision"><b>PS-D01</b><p><strong>Search live disk, not an index.</strong> This preserves F-40, starts with zero warm-up, returns current truth, avoids a privacy-sensitive database of paths/content, and works for removable roots. Reconsider only after measured user traces show repeated whole-home scans are the bottleneck.</p></div>
+      <p class="intro">Build the existing Phase 4 commitment as one modal Power Search surface backed by a GPUI-free service and a supervised background daemon. The daemon maintains a persistent path/content index; live filesystem scans cover new, stale, unindexed, remote, and arbitrary-regex cases. Bounded channels stream result batches into a virtualized table; generation IDs and cancel-by-drop prevent stale work from reaching the UI.</p>
+      <div class="callout good"><strong>Recommended baseline</strong><span><code>Tantivy</code> for indexed content and fields; <code>rusqlite</code> for path metadata, crawl state, history and saved searches; <code>notify</code> plus reconciliation scans for freshness; <code>nucleo</code> for fuzzy path ranking; and <code>ignore</code> + <code>grep-searcher</code> + <code>grep-regex</code> for initial indexing, live fallback and arbitrary regex.</span></div>
+      <div class="decision"><b>PS-D01</b><p><strong>Use a hybrid persistent index.</strong> Indexed Home/current-folder queries should return in tens of milliseconds. The index is a performance layer, never the sole truth: watcher events update it, reconciliation repairs missed events, and opening a result re-stats the path. Unindexed or stale scopes transparently stream live results while indexing continues.</p></div>
       <div class="decision"><b>PS-D02</b><p><strong>Literal by default; regex is explicit.</strong> Literal search enables the fastest prefilters. Regex compilation happens once per query with conservative pattern/compiled-size limits and inline errors.</p></div>
-      <div class="decision"><b>PS-D03</b><p><strong>Stream discovery order; rank only a bounded window.</strong> Global sorting delays the first result and disables traversal parallelism. The UI may rank the currently retained filename batch, but never wait for the walk to finish.</p></div>
+      <div class="decision"><b>PS-D03</b><p><strong>Rank indexed results; stream live discovery.</strong> Indexed candidates may be relevance-ranked immediately. Live fallback never waits for a global sort, which would delay first results and disable traversal parallelism; it ranks only a bounded retained window before merging.</p></div>
       <div class="decision"><b>PS-D04</b><p><strong>One query generation owns all work.</strong> Changing query, filters, or scope drops the old receiver and sets a shared cancellation flag. Every batch carries its generation; stale batches are ignored defensively.</p></div>
+      <div class="decision"><b>PS-D05</b><p><strong>The daemon is supervised and optional at runtime.</strong> Ferret starts one per-user helper on demand, negotiates a versioned local protocol, restarts it after failure, and falls back to in-process live search if it is unavailable. No network listener, elevated privilege, or always-required login item.</p></div>
     </section>
 
     <section id="source">
@@ -239,7 +240,8 @@
       </ul>
       <h3>Non-goals for first delivery</h3>
       <ul>
-        <li>No persistent content index, background daemon, OCR, semantic/vector search, archive decompression, PCRE2, or searching inside proprietary document formats.</li>
+        <li>No OCR, semantic/vector search, archive decompression, PCRE2, or searching inside proprietary document formats. The persistent index covers supported text and metadata only.</li>
+        <li>No cloud-hosted index, network API, telemetry, cross-device synchronization, or system-wide privileged service. Index data stays per-user and local.</li>
         <li>No attempt to provide regex backreferences/look-around; the Rust regex syntax is fast and bounded precisely because those are excluded.</li>
         <li>No global result sort that waits for completion. No unlimited result retention. No UI-thread filesystem access.</li>
       </ul>
@@ -302,16 +304,32 @@
       <h2>Architecture</h2>
       <div class="flow" aria-label="Power Search data flow">
         <div><small>01 · ferret-ui</small><b>Query snapshot</b><p>Inputs, scope, generation, filters. GPUI owns display state only.</p></div>
-        <div><small>02 · ferret-search</small><b>Planner + walker</b><p>Compile matchers once. Traverse in parallel. Apply cheap metadata gates first.</p></div>
-        <div><small>03 · worker pool</small><b>Content scan</b><p>Bounded work queue, per-worker searcher, cancellation checks between files and matches.</p></div>
-        <div><small>04 · bounded stream</small><b>Batched results</b><p>Generation-tagged batches, progress deltas, warnings, terminal outcome.</p></div>
+        <div><small>02 · search daemon</small><b>Hybrid planner</b><p>Route indexed, fuzzy and live-regex work; enforce generation cancellation and limits.</p></div>
+        <div><small>03 · dual engines</small><b>Index + live scan</b><p>Tantivy/SQLite answer warm queries; ripgrep covers dirty, unindexed and regex paths.</p></div>
+        <div><small>04 · merge stream</small><b>Deduplicated batches</b><p>Stable IDs, freshness flags, progress deltas, warnings and terminal outcome.</p></div>
       </div>
       <h3>New crate: <code>ferret-search</code></h3>
-      <p>This is the point at which a second service needs <code>VfsPath</code>/<code>EntryKind</code>. Prefer moving only truly shared domain types to <code>ferret-core</code> if necessary; do not make <code>ferret-search</code> depend on <code>ferret-ui</code> or <code>gpui-component</code>. The first implementation may accept local <code>PathBuf</code> roots and a capability-aware remote adapter later, but the public request/result types must not assume slash paths.</p>
+      <p>This is the point at which a second service needs <code>VfsPath</code>/<code>EntryKind</code>. Prefer moving only truly shared domain types to <code>ferret-core</code> if necessary; do not make <code>ferret-search</code> depend on <code>ferret-ui</code> or <code>gpui-component</code>. The service library owns query planning and can run in-process for tests/fallback; a small <code>ferret-searchd</code> binary owns the persistent index lifecycle. Public request/result types must not assume slash paths.</p>
       <pre class="callout"><code>SearchService::start(SearchRequest) -&gt; SearchSession
 SearchSession { events: Receiver&lt;SearchEvent&gt;, cancel-on-drop }
 SearchEvent = Batch { generation, results } | Progress(...) | Warning(...) | Finished(...)
 SearchResult = File { path, metadata } | Content { path, line, column, ranges, preview }</code></pre>
+      <h3>Daemon and index lifecycle</h3>
+      <ul>
+        <li><strong>Process model:</strong> one unprivileged daemon per signed-in user, launched on demand by Ferret and kept alive while useful. A lock file or platform mutex prevents duplicates; idle shutdown is configurable.</li>
+        <li><strong>Local protocol:</strong> versioned framed messages over a Unix-domain socket on macOS and named pipe on Windows. Authenticate through filesystem/pipe ACLs and a per-launch nonce; never bind TCP.</li>
+        <li><strong>Stores:</strong> Tantivy segments hold tokenized content and searchable fields; SQLite holds canonical path identity, file fingerprint, crawl/index state, roots, exclusions, recent queries and saved filters.</li>
+        <li><strong>Freshness:</strong> <code>notify</code> marks paths/roots dirty, a debounced queue applies incremental updates, and periodic plus startup reconciliation catches dropped/coalesced watcher events.</li>
+        <li><strong>Recovery:</strong> writes are transactional or segment-atomic. Corrupt/incompatible indexes are quarantined and rebuilt from source; search falls back to live scanning during rebuild.</li>
+        <li><strong>Privacy:</strong> index roots are explicit and inspectable; excluded paths never enter either store. The settings UI shows size, last refresh, paused/error state, rebuild and delete controls.</li>
+      </ul>
+      <h3>Hybrid query planner</h3>
+      <ul>
+        <li>Filename/path substring and metadata filters query SQLite/trigram fields; optional fuzzy ranking runs bounded candidates through Nucleo.</li>
+        <li>Token, phrase and prefix content queries use Tantivy. Candidate hits are filtered against current SQLite metadata and re-statted before destructive or open actions.</li>
+        <li>Arbitrary content regex, unindexed roots, stale dirty paths and unsupported remote backends use the ripgrep live path. Indexed and live streams deduplicate by stable file identity plus match location.</li>
+        <li>While initial indexing runs, return indexed hits immediately and stream live hits for uncovered portions. Progress distinguishes “search complete” from “index still building.”</li>
+      </ul>
       <h3>Backpressure and scheduling</h3>
       <ul>
         <li>Use a bounded file-work queue and bounded UI-event channel. A slow frame must park search producers instead of materializing the tree.</li>
@@ -339,42 +357,47 @@ SearchResult = File { path, metadata } | Content { path, line, column, ranges, p
             <tr><td><code>ignore 0.4.33</code></td><td>Parallel traversal, hidden/gitignore/custom glob rules</td><td class="yes">Adopt</td><td>Ripgrep’s walker; <code>build_parallel</code>, thread controls, max depth/size, symlink and same-filesystem policy. MIT OR Unlicense.</td></tr>
             <tr><td><code>grep-searcher 0.1.17</code></td><td>Buffered/mmap-aware line search, encoding/BOM, binary detection</td><td class="yes">Adopt</td><td>Correct incremental search and sinks are harder than they look; built for this exact workload. MIT OR Unlicense.</td></tr>
             <tr><td><code>grep-regex 0.1.14</code></td><td>Regex matcher compatible with grep-searcher</td><td class="yes">Adopt</td><td>Linear-time Rust regex family, smart case/whole word and line-aware optimizations. MIT OR Unlicense.</td></tr>
-            <tr><td><code>nucleo 0.5.0</code></td><td>Concurrent streamed fuzzy filename ranking</td><td class="hold">Optional experiment</td><td>Excellent fit for live streaming and path scoring, but fuzzy semantics are an addition and reordered rows can harm selection stability. MPL-2.0.</td></tr>
+            <tr><td><code>nucleo 0.5.0</code></td><td>Concurrent fuzzy filename/path ranking</td><td class="yes">Adopt</td><td>Excellent fit for path scoring and bounded candidate reranking. Keep substring as the default match mode and preserve selection by stable result ID. MPL-2.0.</td></tr>
             <tr><td><code>regex-automata</code></td><td>Lower-level engine control</td><td class="no">Do not add directly</td><td><code>grep-regex</code> already owns the correct integration; direct use increases complexity without an identified gap.</td></tr>
             <tr><td><code>rayon</code>/<code>jwalk</code>/<code>walkdir</code></td><td>Parallel/general traversal</td><td class="no">Not for v1</td><td><code>ignore</code> already supplies work-stealing traversal plus ignore semantics. A second pool/walker duplicates policy; <code>jwalk</code> also declares itself unmaintained.</td></tr>
-            <tr><td><code>Tantivy 0.26.1</code></td><td>Persistent full-text index</td><td class="no">Reject for baseline</td><td>Excellent Lucene-like engine, but token index semantics do not equal arbitrary live grep/regex; indexing/freshness/disk/privacy contradict F-40.</td></tr>
-            <tr><td>SQLite FTS5</td><td>Persistent token/trigram index</td><td class="no">Reject for baseline</td><td>Trigram can accelerate substrings, but external-content synchronization becomes Ferret’s responsibility and regex still needs verification on disk.</td></tr>
-            <tr><td><code>notify</code></td><td>Index freshness</td><td class="hold">Reuse only if indexing later</td><td>Already in <code>ferret-vfs</code>; native backends differ and events can be lossy, so an index still needs reconciliation scans.</td></tr>
+            <tr><td><code>Tantivy 0.26.1</code></td><td>Persistent full-text index</td><td class="yes">Adopt</td><td>Lucene-like token, phrase, prefix, field and ranked search with incremental multithreaded indexing. Arbitrary regex remains a live-scan path.</td></tr>
+            <tr><td><code>rusqlite 0.40.2</code> + SQLite FTS5</td><td>Path metadata, crawl state, history, trigram substring candidates</td><td class="yes">Adopt</td><td>Transactional metadata and compact trigram path lookup. Ferret owns synchronization, handled by the daemon’s watcher and reconciliation pipeline.</td></tr>
+            <tr><td><code>notify 7</code></td><td>Incremental index freshness</td><td class="yes">Adopt/reuse</td><td>Already in <code>ferret-vfs</code>. Native events are freshness hints, not sole truth; scheduled reconciliation detects missed/coalesced changes.</td></tr>
             <tr><td><code>memmap2</code></td><td>Map file bodies</td><td class="no">No direct dependency</td><td>Let <code>grep-searcher</code> choose. mmap is often worse across many small files and has file-mutation hazards.</td></tr>
           </tbody>
         </table>
       </div>
       <h3>Proposed Cargo edges</h3>
-      <p>Add workspace dependencies for <code>ignore</code>, <code>grep-searcher</code>, and <code>grep-regex</code>, then a path dependency for <code>ferret-search</code>. Reuse existing <code>async-channel</code>, <code>smol</code>, <code>thiserror</code>, and <code>ferret-vfs</code>. Do not add Tokio, Rayon, a database, or a subprocess wrapper.</p>
+      <p>Add workspace dependencies for <code>tantivy</code>, <code>rusqlite</code> (with a deliberate bundled/system SQLite policy), <code>nucleo</code>, <code>ignore</code>, <code>grep-searcher</code>, and <code>grep-regex</code>, then path dependencies for the <code>ferret-search</code> library and <code>ferret-searchd</code> binary. Reuse existing <code>notify</code>, <code>async-channel</code>, <code>smol</code>, <code>thiserror</code>, and <code>ferret-vfs</code>. Do not add Tokio or a second general-purpose thread pool unless profiling proves the existing engines insufficient.</p>
       <div class="callout"><strong>Licensing</strong><span>Verify each pinned crate’s license in <code>Cargo.lock</code>/<code>cargo deny</code> during implementation. The recommended ripgrep crates are permissively licensed and compatible with Ferret’s GPL distribution; document bundled notices if required.</span></div>
     </section>
 
     <section id="performance">
       <span class="section-tag">Hard gates</span>
       <h2>Performance contract</h2>
-      <p class="intro">“Fast” must be testable on cold and warm caches. Keep traversal, matching, event delivery, model update, and paint timings separate so the bottleneck is visible.</p>
+      <p class="intro">“Fast” must be testable with a ready index, during initial indexing, after missed watcher events, and through the live fallback. Keep IPC, index lookup, traversal, matching, merging, model update and paint timings separate so the bottleneck is visible.</p>
       <div class="scroller">
         <table>
           <thead><tr><th>Metric</th><th>Target</th><th>Fixture / condition</th><th>Failure response</th></tr></thead>
           <tbody>
             <tr><td>Keystroke → old query cancelled</td><td>&lt;16 ms observable; &lt;50 ms worker quiescence</td><td>200k flat + deep mixed tree</td><td>Stop feature work; fix cancellation granularity/backpressure.</td></tr>
-            <tr><td>Filename first result, warm metadata</td><td>p95 &lt;100 ms</td><td>200k local entries, selective literal</td><td>Profile allocations/syscalls; avoid sort and per-entry stat.</td></tr>
-            <tr><td>Content first match, warm cache</td><td>p95 &lt;250 ms; always &lt;1 s</td><td>Large source tree, match near early traversal</td><td>Review queue ordering, worker startup, matcher reuse.</td></tr>
+            <tr><td>Indexed filename first result</td><td>p95 &lt;30 ms service; &lt;50 ms visible</td><td>2 million indexed paths, selective substring</td><td>Profile SQLite query plan, candidate cap, IPC and UI batching.</td></tr>
+            <tr><td>Indexed content first result</td><td>p95 &lt;50 ms service; &lt;100 ms visible</td><td>10 GB indexed text corpus, token/phrase query</td><td>Review Tantivy schema, segment count, warm reader and stored-field cost.</td></tr>
+            <tr><td>Live regex first match</td><td>p95 &lt;250 ms; always &lt;1 s warm</td><td>Large source tree, match near early traversal</td><td>Review queue ordering, worker startup and matcher reuse.</td></tr>
+            <tr><td>Watcher → searchable update</td><td>p95 &lt;1 s after burst settles</td><td>Create/modify/rename/delete storm</td><td>Profile debounce, commit frequency and reader reload.</td></tr>
+            <tr><td>Initial index throughput</td><td>Measured budget per platform; UI remains responsive</td><td>1 million files / representative 10 GB corpus</td><td>Throttle I/O/CPU, batch commits, skip unsupported/oversized content.</td></tr>
+            <tr><td>Daemon idle cost</td><td>~0% CPU; bounded resident memory; no periodic disk churn</td><td>Index current, no filesystem changes</td><td>Fix polling, reader/worker retention or reconciliation cadence.</td></tr>
             <tr><td>UI frame while streaming</td><td>p95 &lt;16.7 ms at 60 Hz</td><td>Maximum result throughput</td><td>Increase batching; cap per-frame model work; verify virtualization.</td></tr>
             <tr><td>Result memory</td><td>Bounded by configured cap; no growth after cap</td><td>Query matching every file/line</td><td>Discard excess detail; retain counters only.</td></tr>
-            <tr><td>Idle overhead</td><td>0 worker CPU, 0 search I/O</td><td>Dialog closed/open with empty query</td><td>Fix leaked sessions/tasks or eager scans.</td></tr>
+            <tr><td>Index storage</td><td>Configurable cap with visible accounting and safe eviction/rebuild</td><td>Large Home and multi-volume roots</td><td>Tune stored fields/compression; exclude caches/build output by policy.</td></tr>
           </tbody>
         </table>
       </div>
       <h3>Benchmark matrix</h3>
       <ul>
-        <li>Flat 200,000-entry fixture; deep tree; many tiny files; few multi-GB files; binary-heavy tree; generated minified lines; inaccessible directories; symlink cycle; Unicode names; cold and warm filesystem cache.</li>
+        <li>Flat 200,000-entry fixture; 2 million indexed paths; 10 GB text corpus; deep tree; many tiny files; few multi-GB files; binary-heavy tree; generated minified lines; inaccessible directories; symlink cycle; Unicode names.</li>
         <li>Literal rare/common, regex anchored/unanchored, Unicode classes, case-insensitive, filename-only, content-only, combined filters, cap-hit, cancel after 1/10/100 ms.</li>
+        <li>Empty/new/current/stale/corrupt index; daemon cold start/restart/crash; watcher burst/drop simulation; rename across roots; removable volume disconnect; schema migration and full rebuild.</li>
         <li>macOS APFS (case-sensitive and insensitive if available), Windows NTFS, removable/network volume. Report CPU count, storage, cache state, files/bytes scanned, ignored/skipped counts.</li>
       </ul>
       <h3>Important implementation corrections to the older product plan</h3>
@@ -382,6 +405,7 @@ SearchResult = File { path, metadata } | Content { path, line, column, ranges, p
         <li>Do not force mmap for “large files.” Ripgrep’s own documentation notes buffered reads usually win for directory searches; let the searcher choose and benchmark any threshold.</li>
         <li>Do not make “sort results” the default. Ripgrep documents path sorting as disabling parallelism. Stream discovery order and offer post-completion sorting only when the retained set is bounded.</li>
         <li>Do not send every hit to GPUI. Batch results and coalesce progress. The table must be virtualized from its first rendered row, satisfying the same gate as the base file pane.</li>
+        <li>Do not commit the index once per filesystem event. Debounce bursts, batch document changes and reload readers after commits; foreground queries always outrank indexing work.</li>
       </ul>
     </section>
 
@@ -409,13 +433,14 @@ SearchResult = File { path, metadata } | Content { path, line, column, ranges, p
       <h2>Delivery sequence</h2>
       <p class="intro">Each stage leaves the workspace runnable. Do not advance when its gate fails.</p>
       <div class="phase"><span class="phase-id">PS-0</span><div><h3>Lock semantics and fixtures</h3><p>Write request/result/error types, query truth table, platform matrix, benchmark fixtures, and budgets before choosing UI details. <strong>Gate:</strong> tests cover smart case, globs, paths, cap, cancellation, and partial errors.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-1</span><div><h3>Create the service skeleton</h3><p>Add <code>ferret-search</code>, crate error/config modules, streaming session, cancel-by-drop, bounded channels, and fake engine tests. <strong>Gate:</strong> drop prevents every later generation event.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-2</span><div><h3>Filename walk (F-40)</h3><p>Integrate <code>ignore</code>; kinds, hidden/ignore/symlink policy, scope, extension/date/size/depth filters; streaming progress. <strong>Gate:</strong> 200k fixture meets first-result, memory, cancellation budgets.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-3</span><div><h3>Modal shell and toolbar toggle</h3><p>Add actions, icon, platform keybindings, Root-hosted dialog, focus trap/restore, fields, scope tabs, and virtual results. <strong>Gate:</strong> launch app; inspect both themes and minimum/default sizes; arrows follow focus; table stays smooth under peak stream.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-4</span><div><h3>Content scan (F-41)</h3><p>Add per-worker <code>grep-searcher</code>/<code>grep-regex</code>, literal/regex/word/case modes, binary and encoding policy, context preview, match locations. <strong>Gate:</strong> first-match and instant-cancel budgets across corpus matrix.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-5</span><div><h3>Complete filters and scopes (F-42/F-43)</h3><p>Add range controls, exclusions, custom folder, volume roots, remembered non-sensitive preferences, capability-aware remote surface. <strong>Gate:</strong> no local-path assumptions leak into public result identity.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-6</span><div><h3>Actions, accessibility, resilience</h3><p>Open/reveal/copy/preview hooks, result caps, partial warnings, screen-reader names, keyboard parity, IME-safe debouncing, stale-path behavior. <strong>Gate:</strong> complete interaction/state checklist on both platforms.</p></div></div>
-      <div class="phase"><span class="phase-id">PS-7</span><div><h3>Profile and harden</h3><p>Flamegraphs/allocations, cold-cache runs, long soak/cancellation storms, corrupted/unreadable files, regex limits, dependency/license audit. <strong>Gate:</strong> <code>just lint</code>, <code>just test</code>, search benchmarks, <code>just build</code>, and manual <code>just dev</code> verification all pass.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-1</span><div><h3>Create the service and protocol skeleton</h3><p>Add <code>ferret-search</code>, <code>ferret-searchd</code>, shared request/event types, versioned local IPC, supervised launch, in-process fallback, bounded channels and fake-engine tests. <strong>Gate:</strong> protocol mismatch/crash is recoverable and drop prevents every later generation event.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-2</span><div><h3>Persistent path index and initial crawl (F-40)</h3><p>Add SQLite schema/migrations, indexed roots, <code>ignore</code> crawler, fingerprints, kinds, hidden/ignore/symlink policy, extension/date/size/depth fields and FTS5 trigram path search. <strong>Gate:</strong> 2 million paths meet query, crawl, storage, restart and migration budgets.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-3</span><div><h3>Incremental freshness</h3><p>Connect <code>notify</code>, dirty queues, batched updates, periodic/startup reconciliation, volume disconnect handling and rebuild/quarantine flows. <strong>Gate:</strong> watcher storm/drop tests converge to filesystem truth without busy idle I/O.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-4</span><div><h3>Modal shell and toolbar toggle</h3><p>Add actions, icon, platform keybindings, Root-hosted dialog, focus trap/restore, fields, scope tabs, index status and virtual results. <strong>Gate:</strong> both themes/sizes pass; arrows follow focus; table stays smooth while indexing and streaming.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-5</span><div><h3>Indexed content and live regex (F-41)</h3><p>Add Tantivy schema/writer/reader, token/phrase/prefix queries, snippets and ranking; add <code>grep-searcher</code>/<code>grep-regex</code> for arbitrary regex, dirty paths and unindexed scopes. <strong>Gate:</strong> indexed and live latency budgets pass and merged results deduplicate correctly.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-6</span><div><h3>Complete filters and scopes (F-42/F-43)</h3><p>Add range controls, exclusions, custom folder, volume roots, indexed-root management, history/saved filters and capability-aware remote surface. <strong>Gate:</strong> no local-path assumptions leak into public result identity.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-7</span><div><h3>Actions, accessibility and resilience</h3><p>Open/reveal/copy/preview hooks, result caps, partial warnings, screen-reader names, keyboard parity, IME-safe debouncing, stale-path behavior, daemon recovery and index controls. <strong>Gate:</strong> complete interaction/state checklist on both platforms.</p></div></div>
+      <div class="phase"><span class="phase-id">PS-8</span><div><h3>Profile and harden</h3><p>Flamegraphs/allocations, cold start, initial crawl, long soak, cancellation storms, corruption/migration, regex limits, storage accounting and dependency/license audit. <strong>Gate:</strong> <code>just lint</code>, <code>just test</code>, search benchmarks, <code>just build</code>, and manual <code>just dev</code> verification all pass.</p></div></div>
       <div class="callout risk"><strong>Phase ordering constraint</strong><span>This is product Phase 4 and depends on the completed base shell (Phase 1). It may be developed before preview/terminal features, but actions such as Space preview and remote content search stay capability-gated until their owning features exist.</span></div>
     </section>
 
@@ -426,7 +451,8 @@ SearchResult = File { path, metadata } | Content { path, line, column, ranges, p
       <ul>
         <li>Unit tests: parser/builders, case rules, extension/glob normalization, metadata predicates, result IDs, truncation, error conversion, counters.</li>
         <li>Filesystem integration: temp trees, nested ignore precedence, hidden files, Unicode/non-UTF paths where supported, binary/BOM/UTF-16, huge line, permission denial, changing/deleted files, symlink cycles.</li>
-        <li>Concurrency: bounded queues, cancel races, rapid generation churn, receiver drop, cap reached, worker panic/error containment, no events after Finished.</li>
+        <li>Concurrency/daemon: bounded queues, cancel races, rapid generation churn, receiver drop, cap reached, process crash/restart, protocol mismatch, duplicate-launch prevention, no events after Finished.</li>
+        <li>Index correctness: schema migration, atomic commit, watcher burst/drop, reconciliation, fingerprint change, rename/delete, stale hit verification, corruption quarantine, rebuild and indexed/live deduplication.</li>
         <li>UI tests where GPUI support permits: open/close, focus restore, stale generation rejection, stable selection as batches arrive, empty/error/cap states.</li>
         <li>Benchmarks checked into <code>xtask</code> or the search crate with machine-readable output and regression thresholds.</li>
       </ul>
@@ -434,19 +460,19 @@ SearchResult = File { path, metadata } | Content { path, line, column, ranges, p
       <ul>
         <li>Open by button and shortcut; close by toggle, Done, Esc; focus returns to the top-bar control or prior pane.</li>
         <li>Light/dark, 1180×760 and 760×480; 100%, 150%, 200% scaling; keyboard-only and screen-reader labels.</li>
-        <li>Rapid typing never flashes stale results. Selection does not jump when rows append. Cancel leaves no sustained CPU/disk use.</li>
+        <li>Rapid typing never flashes stale results. Selection does not jump when rows append. Cancel stops query-specific CPU/disk work; separately disclosed background indexing may continue at throttled priority.</li>
         <li>Search Home/Computer, removable volume, denied tree, very large tree, and a path removed while selected.</li>
       </ul>
-      <div class="callout good"><strong>Feature-level done condition</strong><span>A regex content search over a large tree begins producing useful rows in well under one second, filename search typically feels immediate, a changed query cancels old work before it can repaint, the results table stays at full frame rate, and memory remains bounded even when every line matches.</span></div>
+      <div class="callout good"><strong>Feature-level done condition</strong><span>Indexed filename and token/phrase content searches feel immediate across millions of paths, arbitrary regex over a large tree begins producing useful rows in well under one second, watcher updates become searchable promptly, stale/corrupt/unavailable index states fall back safely, a changed query cancels old work before repaint, and UI/memory remain bounded during indexing and result storms.</span></div>
     </section>
 
     <section id="risks">
       <span class="section-tag">Honest uncertainty</span>
       <h2>Risks and open decisions</h2>
-      <details open><summary>PS-Q01 · Should filename search offer fuzzy mode at launch?</summary><p><strong>Recommendation:</strong> no for the first vertical slice; add a visible optional mode only if a Nucleo prototype meets streamed-order and selection-stability requirements. Substring semantics match the reference and are easier to explain.</p></details>
+      <details open><summary>PS-Q01 · How should fuzzy filename matching appear?</summary><p><strong>Recommendation:</strong> ship explicit “Substring” and “Fuzzy” modes, defaulting to substring to match the reference. Nucleo reranks a bounded indexed candidate set; stable result IDs keep selection fixed while scores update.</p></details>
       <details open><summary>PS-Q02 · What exactly is “Root” on Windows?</summary><p><strong>Recommendation:</strong> label it “Computer” and search selected mounted volumes, with all fixed local volumes as an explicit option. Avoid automatically scanning network/removable volumes.</p></details>
       <details open><summary>PS-Q03 · How much context should content results retain?</summary><p><strong>Recommendation:</strong> one bounded display line plus match ranges and line/column. Read neighboring context lazily for preview; never retain whole file bodies.</p></details>
-      <details open><summary>PS-Q04 · When should indexing be reconsidered?</summary><p>Only after telemetry-free local benchmarks or user-provided traces show repeated Home/Computer searches cannot meet the experience target. Any experiment must be opt-in, path-only first, encrypted-by-OS-at-rest, size-capped, rebuildable, watcher-plus-reconciliation based, and must preserve live verification before opening a result.</p></details>
+      <details open><summary>PS-Q04 · Which roots are indexed by default?</summary><p><strong>Recommendation:</strong> index Home by default with standard cache/build/vendor exclusions, then let users add/remove roots and inspect estimated size. Do not automatically index network shares, removable volumes, system roots or remote mounts. Every root remains pausable, rebuildable and deletable.</p></details>
       <details open><summary>PS-Q05 · Remote content search contract</summary><p>F-43 leaves this genuinely backend-specific. Prefer a capability enum and explicit UI. An SSH backend may run remote <code>rg</code>/<code>grep</code> when available; S3/WebDAV are filename/metadata-only until a server-side search API exists. Never download an entire remote tree implicitly.</p></details>
       <h3>Primary risks</h3>
       <ul>
@@ -454,7 +480,9 @@ SearchResult = File { path, metadata } | Content { path, line, column, ranges, p
         <li><strong>Stale paths:</strong> the filesystem changes mid-query. Treat results as observations; re-stat on action and explain if the item moved or vanished.</li>
         <li><strong>Regex/resource abuse:</strong> linear matching is not free. Cap pattern length, compiled program size, file size, context, matches per file, total rows, and retained bytes.</li>
         <li><strong>Permission noise:</strong> whole-machine search can generate thousands of denials. Aggregate by category/root, keep useful results visible, and expose details on demand.</li>
-        <li><strong>Scope creep:</strong> fuzzy ranking, archives, indexing, OCR, semantic search, and remote execution are separate capabilities. Do not block the fast local core on them.</li>
+        <li><strong>Index growth/privacy:</strong> a content index duplicates searchable information and reveals paths. Keep it per-user, access-controlled, capped, inspectable and completely deletable; exclude sensitive roots by default.</li>
+        <li><strong>Daemon complexity:</strong> lifecycle, IPC, schema migration and crash recovery create new failure modes. Preserve the in-process live fallback and make every store rebuildable from source.</li>
+        <li><strong>Scope creep:</strong> archives, OCR, semantic search and remote execution are separate capabilities. Do not block the indexed local core on them.</li>
       </ul>
     </section>
 
