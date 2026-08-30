@@ -91,6 +91,7 @@ impl Render for Browser {
         v_flex()
             .id("browser-root")
             .size_full()
+            .relative()
             .key_context("Browser")
             // Drags start on a 5 px divider or a tab but continue wherever the
             // pointer goes, so both are followed from the root.
@@ -112,6 +113,9 @@ impl Render for Browser {
             .on_action(
                 cx.listener(|this, _: &actions::Forward, window, cx| this.go_forward(window, cx)),
             )
+            .when_some(self.render_power_search_overlay(cx), |root, overlay| {
+                root.child(overlay)
+            })
             .on_action(cx.listener(|this, _: &actions::Up, window, cx| this.go_up(window, cx)))
             .on_action(cx.listener(|this, _: &actions::Refresh, _, cx| this.refresh(cx)))
             .on_action(cx.listener(|this, _: &actions::ToggleHidden, _, cx| this.toggle_hidden(cx)))

@@ -8,11 +8,11 @@ use ferret_search::{
     SearchService as _,
 };
 use gpui::{
-    AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    AnyElement, AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, WindowExt as _,
+    ActiveTheme as _, Icon,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -43,7 +43,7 @@ impl SearchKind {
     }
 }
 
-struct PowerSearch {
+pub(super) struct PowerSearch {
     browser: WeakEntity<Browser>,
     current_folder: VfsPath,
     name_input: Entity<InputState>,
@@ -253,13 +253,13 @@ fn open_result(
     let is_dir = result.kind.is_dir_like();
     let path = result.path;
     let _ = browser.update(cx, |browser, cx| {
+        browser.dismiss_power_search(cx);
         if is_dir {
             browser.navigate(path, window, cx);
         } else {
             browser.open_with_default(path, window, cx);
         }
     });
-    window.close_dialog(cx);
 }
 
 impl Render for PowerSearch {
@@ -358,7 +358,12 @@ impl Render for PowerSearch {
                         Button::new("power-search-done")
                             .ghost()
                             .label("Done")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let browser = this.browser.clone();
+                                let _ = browser.update(cx, |browser, cx| {
+                                    browser.dismiss_power_search(cx);
+                                });
+                            })),
                     ),
             )
             .child(
@@ -546,36 +551,50 @@ impl Render for PowerSearch {
 
 impl Browser {
     pub(super) fn toggle_power_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.power_search_open {
-            window.close_dialog(cx);
-            self.power_search_open = false;
+        if self.power_search.is_some() {
+            self.dismiss_power_search(cx);
             return;
         }
         let current_folder = self.active().folder.read(cx).dir.clone();
         let browser = cx.weak_entity();
-        let search = cx.new(|cx| PowerSearch::new(browser.clone(), current_folder, window, cx));
+        let search = cx.new(|cx| PowerSearch::new(browser, current_folder, window, cx));
         let focus = search.read(cx).name_input.read(cx).focus_handle(cx).clone();
-        self.power_search_open = true;
-        window.open_dialog(cx, move |dialog, _, _| {
-            let browser = browser.clone();
-            dialog
-                .width(px(DIALOG_WIDTH))
-                // Direct dialog children sit in a flex region. Their own
-                // fixed height does not establish the absolute popup's
-                // intrinsic height, so without sizing the dialog surface the
-                // body collapses and the opened layer appears invisible.
-                .h(px(DIALOG_HEIGHT))
-                .margin_top(px(58.))
-                .p_0()
-                .close_button(false)
-                .on_close(move |_, _, cx| {
-                    let _ = browser.update(cx, |browser, cx| {
-                        browser.power_search_open = false;
-                        cx.notify();
-                    });
-                })
-                .child(search.clone())
-        });
+        self.power_search = Some(search);
         window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn dismiss_power_search(&mut self, cx: &mut Context<Self>) {
+        self.power_search = None;
+        cx.notify();
+    }
+
+    pub(super) fn render_power_search_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.power_search.clone()?;
+        Some(
+            v_flex()
+                .id("power-search-overlay")
+                .absolute()
+                .inset_0()
+                .items_center()
+                .justify_center()
+                .bg(cx.theme().overlay)
+                .child(
+                    div()
+                        .w(px(DIALOG_WIDTH))
+                        .h(px(DIALOG_HEIGHT))
+                        .overflow_hidden()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
+                        .shadow_xl()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(search),
+                )
+                .into_any_element(),
+        )
     }
 }

@@ -205,8 +205,9 @@ pub struct Browser {
 
     /// `Some` while the path bar renders an editable input.
     path_editing: Option<PathEdit>,
-    /// Whether this window's Power Search dialog is the active dialog.
-    power_search_open: bool,
+    /// Mounted in this view's own overlay layer so the modal does not depend
+    /// on gpui-component's separate dialog-root plumbing.
+    power_search: Option<Entity<power_search::PowerSearch>>,
     /// The inline name filter, always mounted at the right of the path bar.
     filter_input: Entity<InputState>,
     /// Held so the filter input keeps notifying the folder.
@@ -346,7 +347,7 @@ impl Browser {
             tab_lefts: Arc::new(Mutex::new(Vec::new())),
             clipboard: None,
             path_editing: None,
-            power_search_open: false,
+            power_search: None,
             filter_input,
             _filter_subscription: filter_subscription,
             volumes: Vec::new(),
