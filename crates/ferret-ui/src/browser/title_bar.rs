@@ -106,6 +106,16 @@ impl Browser {
         // edge read as debris rather than as a toolbar.
         let action_group = segmented_group(theme)
             .child(
+                Button::new("power-search-toggle")
+                    .ghost()
+                    .with_size(px(TOOLBAR_BUTTON_SIZE))
+                    .icon(Icon::new(gpui_component::IconName::Search))
+                    .tooltip("Power Search")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_power_search(window, cx)),
+                    ),
+            )
+            .child(
                 tool_button("new-file", toolbar_icon::NEW_FILE, "New File")
                     .on_click(cx.listener(|this, _, window, cx| this.new_file(window, cx))),
             )

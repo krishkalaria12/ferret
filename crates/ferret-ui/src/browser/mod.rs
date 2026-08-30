@@ -47,6 +47,7 @@ use crate::state::FerretState;
 
 mod mutations;
 mod path_bar;
+mod power_search;
 mod render;
 mod sidebar;
 mod tab_strip;
@@ -204,7 +205,6 @@ pub struct Browser {
 
     /// `Some` while the path bar renders an editable input.
     path_editing: Option<PathEdit>,
-
     /// The inline name filter, always mounted at the right of the path bar.
     filter_input: Entity<InputState>,
     /// Held so the filter input keeps notifying the folder.

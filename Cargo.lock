@@ -1961,6 +1961,7 @@ dependencies = [
  "dhat",
  "dirs",
  "ferret-platform",
+ "ferret-search",
  "ferret-settings",
  "ferret-terminal",
  "ferret-vfs",
