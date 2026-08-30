@@ -106,12 +106,26 @@ impl Browser {
 
         let fs = cx.global::<FerretState>().fs;
         cx.spawn(async move |this, cx| {
-            let mut stream = fs.read_dir(&VfsPath::local(dir));
-            let mut entries = Vec::new();
-            while let Some(Ok(entry)) = futures::StreamExt::next(&mut stream).await {
-                entries.push(entry);
+            // Full, not NamesOnly: `matches_completion` hides entries the
+            // pane would hide, and on Unix that flag rides the same `stat` as
+            // size and dates. Completing in `/` would otherwise start offering
+            // `bin`, `usr` and `var`.
+            let mut stream = fs.read_dir(&VfsPath::local(dir), ferret_vfs::ListingDetail::Full);
+            let wanted = prefix.as_str();
+            let mut matches = Vec::with_capacity(MAX_COMPLETIONS);
+            'listing: while let Some(Ok(batch)) = futures::StreamExt::next(&mut stream).await {
+                for entry in batch {
+                    if !matches_completion(&entry, wanted) {
+                        continue;
+                    }
+                    if let Some(path) = entry.path.as_local().map(Path::to_path_buf) {
+                        matches.push(path);
+                        if matches.len() == MAX_COMPLETIONS {
+                            break 'listing;
+                        }
+                    }
+                }
             }
-            let matches = matching_directories(&entries, &prefix);
 
             let _ = this.update(cx, |this, cx| {
                 let Some(edit) = this.path_editing.as_mut() else {
@@ -399,19 +413,23 @@ fn completion_target(text: &str) -> Option<(PathBuf, String)> {
 /// Directories only: the path bar navigates, and offering files would only
 /// produce completions that cannot be accepted. Hidden entries stay out
 /// unless the prefix reaches for them explicitly.
+#[cfg(test)]
 fn matching_directories(entries: &[ferret_vfs::Entry], prefix: &str) -> Vec<PathBuf> {
-    let wanted = prefix.to_lowercase();
     let mut hits: Vec<&ferret_vfs::Entry> = entries
         .iter()
-        .filter(|e| e.is_dir_like())
-        .filter(|e| !e.is_hidden() || wanted.starts_with('.'))
-        .filter(|e| e.name.to_lowercase().starts_with(&wanted))
+        .filter(|e| matches_completion(e, prefix))
         .collect();
-    hits.sort_by(|a, b| crate::format::natural_compare(&a.name, &b.name));
+    hits.sort_by(|a, b| crate::format::natural_compare(a.name(), b.name()));
     hits.into_iter()
         .take(MAX_COMPLETIONS)
         .filter_map(|e| e.path.as_local().map(Path::to_path_buf))
         .collect()
+}
+
+fn matches_completion(entry: &ferret_vfs::Entry, wanted: &str) -> bool {
+    entry.is_dir_like()
+        && (!entry.is_hidden() || wanted.starts_with('.'))
+        && crate::format::starts_with_ignore_case(entry.name(), wanted)
 }
 
 /// `~` and `~/…` expand against the home directory; everything else is taken
@@ -522,26 +540,24 @@ mod tests {
     }
 
     fn dir_entry(name: &str, hidden: bool) -> ferret_vfs::Entry {
-        ferret_vfs::Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind: ferret_vfs::EntryKind::Dir,
-            metadata: Some(ferret_vfs::Metadata {
-                hidden,
-                ..Default::default()
-            }),
-            link_target: None,
-        }
+        ferret_vfs::Entry::new(
+            VfsPath::local(format!("/x/{name}")),
+            name,
+            ferret_vfs::EntryKind::Dir,
+        )
+        .with_metadata(Some(ferret_vfs::Metadata {
+            hidden,
+            ..Default::default()
+        }))
     }
 
     fn file_entry(name: &str) -> ferret_vfs::Entry {
-        ferret_vfs::Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind: ferret_vfs::EntryKind::File,
-            metadata: Some(ferret_vfs::Metadata::default()),
-            link_target: None,
-        }
+        ferret_vfs::Entry::new(
+            VfsPath::local(format!("/x/{name}")),
+            name,
+            ferret_vfs::EntryKind::File,
+        )
+        .with_metadata(Some(ferret_vfs::Metadata::default()))
     }
 
     #[test]

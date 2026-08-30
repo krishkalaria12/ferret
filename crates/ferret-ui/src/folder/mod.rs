@@ -9,31 +9,51 @@
 //!    walk finishes — re-sorting mid-stream jumbles rows under the user's
 //!    cursor for no benefit on directories small enough to care.
 //! 2. **Selection survives re-sorting.** Selection, anchor and cursor are
-//!    stored as paths, never indices. A watcher reload reshuffles rows; the
-//!    user's selection must not follow the shuffle.
+//!    stored as [`EntryId`]s, never as display rows. A watcher reload
+//!    reshuffles rows; the user's selection must not follow the shuffle.
+//!
+//! Rule 2 used to be spelled "as paths, never indices" (D-36). The property
+//! it was protecting is *stability under re-sorting*, and an `EntryId` has
+//! that while costing a `u32` hash instead of a heap allocation and a hash of
+//! a sixty-byte string. What an id does not survive is a reload, which throws
+//! the whole slab away — so a reload carries the user's selection across as
+//! paths and re-resolves it. See [`CarriedState`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use ferret_settings::{SortKey, SortOrder};
-use ferret_vfs::{Entry, Vfs, VfsError, VfsPath, WatchEvent};
+use ferret_vfs::config::METADATA_BATCH_SIZE;
+use ferret_vfs::{Capabilities, Entry, ListingDetail, Vfs, VfsError, VfsPath, WatchEvent};
 use futures::StreamExt;
 use gpui::{Context, EventEmitter};
+use smol_str::SmolStr;
 
 mod expansion;
 mod listing;
 mod sort;
 
+pub use sort::SortRules;
+
+#[cfg(all(test, feature = "dhat-heap"))]
+mod alloc_budget;
 #[cfg(test)]
 mod streaming_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod watch_tests;
 
-/// How many entries accumulate before a batch is flushed to the model.
+/// The hasher for every index in this module.
 ///
-/// Large enough that a 200,000-entry walk costs ~50 model updates rather than
-/// 200,000; small enough that rows visibly stream in.
-pub const BATCH_SIZE: usize = 4_096;
+/// These maps are keyed on [`EntryId`]s and on names read from the user's own
+/// disk, never on attacker-chosen input, so SipHash was buying HashDoS
+/// resistance against a threat model Ferret does not have — at a cost paid on
+/// every watcher burst. See `docs/audit.html` §9; a map keyed on
+/// server-supplied names would want a seeded hasher instead.
+type FastMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
+type FastSet<T> = HashSet<T, foldhash::fast::RandomState>;
 
 /// How often the metadata backfill reports progress to the UI.
 pub const META_NOTIFY_EVERY: Duration = Duration::from_millis(120);
@@ -75,67 +95,233 @@ pub enum FolderEvent {
     Gone,
 }
 
+/// What a consumer of a listing actually needs from it (A-14).
+///
+/// A `Folder` had one lifecycle and every consumer paid for all of it.
+/// Pressing Cmd-2 in a large directory built three ancestor `Folder`s and each
+/// one attached an OS watcher, started a full metadata backfill and resolved
+/// platform icons — for a column that draws an icon, a name and a chevron, and
+/// that is thrown away the moment you leave column view.
+///
+/// The same seam is what Phase 2's terminal will want when it needs to know
+/// about a directory it is not rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListingProfile {
+    /// Fill in size and modification dates. The Size and Date columns need
+    /// this; a listing that draws neither does not, and on macOS it is one
+    /// `stat` per entry.
+    pub metadata: bool,
+    /// Keep the listing live against the filesystem. Every watch is a
+    /// subscription in the registry, and on macOS registering one briefly
+    /// interrupts delivery to every other watched directory
+    /// (`ferret_vfs::watch`), so a listing nobody is editing should not hold
+    /// one.
+    pub watch: bool,
+    /// Ask the platform for real Finder/Explorer icons. Deduplicated by type,
+    /// but still a pass over the listing.
+    pub icons: bool,
+}
+
+impl ListingProfile {
+    /// Everything: the directory the user is actually browsing.
+    pub const BROWSING: Self = Self {
+        metadata: true,
+        watch: true,
+        icons: true,
+    };
+
+    /// Names and icons, no metadata and no watch — an ancestor column in
+    /// column view, which exists to be read as a path rather than worked in.
+    /// Icons stay because the column draws them.
+    pub const NAVIGATING: Self = Self {
+        metadata: false,
+        watch: false,
+        icons: true,
+    };
+
+    /// What to ask the backend for, given what this listing will draw.
+    ///
+    /// `metadata: false` says nothing on screen shows a size or a date, which
+    /// is most of what makes the `stat` worth skipping — but not all of it.
+    /// Two other things ride on the same call, and either one silently changes
+    /// what the user sees:
+    ///
+    /// * **Ordering.** A sort by Size or Date over entries with no metadata is
+    ///   a sort over zeroes, and an ancestor column inherits the browsed
+    ///   folder's sort.
+    /// * **Hidden files.** On Unix the platform's flag lives in `st_flags`,
+    ///   so it comes from the same `stat`. `/` marks twelve of its entries
+    ///   `UF_HIDDEN` and nothing else hides them — an ancestor column that
+    ///   skipped the call would show `bin`, `etc`, `usr` and the rest beside a
+    ///   pane that hid them. Windows hands the attributes over with the name,
+    ///   so there it costs nothing either way.
+    ///
+    /// So the work is skipped only where its result cannot be observed. On
+    /// macOS with hidden files hidden — the default — that means an ancestor
+    /// column still pays for one `stat` per entry, in parallel on Ferret's
+    /// pool. Removing that last case needs `getattrlistbulk`, which returns
+    /// names and flags together; see `docs/audit.html`.
+    pub fn detail(self, rules: SortRules, show_hidden: bool, caps: Capabilities) -> ListingDetail {
+        let observable = self.metadata
+            || rules.key.needs_metadata()
+            || (!show_hidden && !caps.hidden_in_listing);
+        if observable {
+            ListingDetail::Full
+        } else {
+            ListingDetail::NamesOnly
+        }
+    }
+}
+
+/// The stable identity of one loaded entry within one [`Folder`] (D-36).
+///
+/// Not a display row, and not an index into any listing: it is a slot in the
+/// folder's slab, and sorting, filtering and expanding never touch it. That is
+/// exactly the property the module's selection rule was protecting, which is
+/// why selection, cursor, anchor and expansion all key on this.
+///
+/// Ids are scoped to one `Folder` and to one listing of it. A reload allocates
+/// a fresh set, so nothing may hold one across a `start_loading`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EntryId(u32);
+
 /// One visible row, after the tree has been flattened.
 ///
 /// The flat model is a deliberate choice (§6 leaves it open): the table is
 /// already virtualised over this vector, and a separate tree widget would
 /// mean a second row model and a second proof of Gate 1.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Row {
-    /// Where the entry lives.
-    source: RowSource,
+    /// Which entry the row draws.
+    id: EntryId,
     /// How many folders deep, for the row's indent.
     depth: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RowSource {
-    /// An index into the browsed directory's own listing.
-    Top(usize),
-    /// An index into an expanded folder's listing.
-    Child { parent: VfsPath, ix: usize },
+/// Whether an entry belongs to the browsed directory or to an expanded one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// A direct child of `self.dir`, and therefore indexed by name.
+    Top,
+    /// A child of an expanded folder. Names are only unique within their own
+    /// parent, so these stay out of the name index.
+    Nested,
+}
+
+/// The user's identity state, held by path across a reload.
+///
+/// Selection, cursor and expansion belong to the person, and a refresh must
+/// not discard them — but every [`EntryId`] they were expressed in belongs to
+/// the listing being thrown away. `start_loading` converts them to paths and
+/// `apply_batch` resolves each one back as its entry lands, so a row is
+/// already painted selected the moment it reappears.
+#[derive(Default)]
+struct CarriedState {
+    selection: HashSet<VfsPath>,
+    anchor: Option<VfsPath>,
+    cursor: Option<VfsPath>,
+    expanded: HashSet<VfsPath>,
+}
+
+impl CarriedState {
+    fn is_empty(&self) -> bool {
+        self.selection.is_empty()
+            && self.anchor.is_none()
+            && self.cursor.is_none()
+            && self.expanded.is_empty()
+    }
 }
 
 pub struct Folder {
     pub dir: VfsPath,
 
-    /// The browsed directory's own listing, sorted.
-    entries: Vec<Entry>,
+    /// Every loaded entry, addressed by [`EntryId`]. Never reordered.
+    ///
+    /// A vacant slot is a removed entry whose id has gone back to `free`, so
+    /// a directory that churns for hours does not grow this without bound.
+    slab: Vec<Option<Entry>>,
+    /// Slots ready to be reused.
+    free: Vec<u32>,
+
+    /// The browsed directory's own listing, sorted. Sorting permutes `u32`s.
+    entries: Vec<EntryId>,
     /// Loaded listings of expanded folders, keyed by the folder.
     ///
     /// Kept beside `entries` rather than spliced into it so that sorting,
     /// the watcher and the metadata backfill all keep working on the flat
     /// listing they were written for.
-    children: HashMap<VfsPath, Vec<Entry>>,
+    children: FastMap<EntryId, Vec<EntryId>>,
     /// Folders the user has expanded in place (§8).
-    expanded: HashSet<VfsPath>,
+    expanded: FastSet<EntryId>,
     /// Visible rows only, in display order, flattened depth-first.
     order: Vec<Row>,
-    /// Path → display row, for the visible rows only.
-    row_of_path: HashMap<VfsPath, usize>,
-    /// Path → index into `entries`, for the browsed directory's own listing.
+    /// Id → display row, for the visible rows only. Rebuilt per reindex,
+    /// which is now a pass over `u32`s into a map that keeps its capacity.
+    row_of_id: FastMap<EntryId, usize>,
+
+    /// Path → id, for every loaded entry, visible or filtered out.
     ///
-    /// Distinct from `row_of_path`: a display row is not an entry index once
-    /// rows can be filtered out or nested under an expanded folder, and the
-    /// watcher edits `entries` rather than the display order.
-    top_index: HashMap<VfsPath, usize>,
-    /// Every path currently loaded, visible or filtered out.
+    /// Maintained as entries arrive and leave rather than rebuilt per watcher
+    /// burst (A-05) — that rebuild was ~n allocations and n hashes of a full
+    /// path string for every file saved. It exists because everything above
+    /// this module speaks in paths: drags, drops, the path bar and the rename
+    /// overlay all name an entry that way.
+    by_path: FastMap<VfsPath, EntryId>,
+    /// Name → id, for the browsed directory's own listing only.
     ///
-    /// Separate from `row_of_path` because a selection must survive being
-    /// hidden by a filter — pruning against visible rows alone would drop it.
-    known_paths: HashSet<VfsPath>,
+    /// Every entry in `entries` shares one parent, so the name is already a
+    /// complete key inside this map, and it is an order of magnitude shorter
+    /// to hash than a full path. The watcher resolves probes through this, and
+    /// so does the "is this name taken?" behind new-file naming (A-23).
+    by_name: FastMap<SmolStr, EntryId>,
 
     loading: bool,
     error: Option<VfsError>,
 
-    sort_key: SortKey,
-    sort_order: SortOrder,
+    /// The sort key and direction, plus the two `settings.browser` rules that
+    /// shape every comparison. One field so a comparator cannot be handed a
+    /// key from one place and a rule from another.
+    rules: SortRules,
     show_hidden: bool,
-    filter: Option<String>,
+    filter: Option<sort::NameFilter>,
+    /// Which parts of the listing lifecycle this folder runs (A-14).
+    profile: ListingProfile,
 
-    selection: HashSet<VfsPath>,
-    anchor: Option<VfsPath>,
-    cursor: Option<VfsPath>,
+    selection: FastSet<EntryId>,
+    /// How many selected entries are on screen, and how many bytes they come
+    /// to. Kept separately from `selection` because selection survives
+    /// filtering, while commands and the status bar operate only on rows the
+    /// person can currently see.
+    ///
+    /// Maintained by the mutators rather than derived by scanning (A-29). The
+    /// status bar reads both once per frame, and a marquee drag changes the
+    /// selection on every mouse-move — so a scan here was 1.37 ms of every
+    /// frame with a large directory selected.
+    selected_visible_count: usize,
+    selected_visible_bytes: u64,
+    /// The same selection as a list of paths, materialised on demand.
+    ///
+    /// `None` when the selection has moved since it was last built. Only
+    /// commands and drag payloads want this; the status bar does not, and it
+    /// is the expensive half — an `Arc<[VfsPath]>` of everything selected is
+    /// 4.8 MB on a fully-selected `flat/`. `RefCell` because the readers are
+    /// `&self` and one of them is on the render path.
+    selected_visible_paths: std::cell::RefCell<Option<Arc<[VfsPath]>>>,
+    anchor: Option<EntryId>,
+    cursor: Option<EntryId>,
+
+    /// Identity to restore as the current listing arrives; see
+    /// [`CarriedState`]. Empty except during a reload.
+    carried: CarriedState,
+    /// Child listings still in flight.
+    ///
+    /// [`CarriedState`] cannot be discarded while this is non-zero. A selected
+    /// row, the cursor, or a deeper open folder can all live *inside* an
+    /// expanded folder, and none of them is resolvable from the top-level walk
+    /// — the listing that holds them is re-read afterwards, by
+    /// `reload_expanded_children`. Dropping the carried state when the parent
+    /// walk finished would lose every one of them.
+    pending_child_loads: usize,
 
     /// Bumps on every navigation/reload; background tasks check it before
     /// touching state, which is how stale walks cancel themselves.
@@ -147,30 +333,103 @@ pub struct Folder {
 }
 
 impl Folder {
-    pub fn new(dir: VfsPath, sort_key: SortKey, sort_order: SortOrder, show_hidden: bool) -> Self {
+    pub fn new(dir: VfsPath, rules: SortRules, show_hidden: bool, profile: ListingProfile) -> Self {
         Self {
             dir,
+            profile,
+            slab: Vec::new(),
+            free: Vec::new(),
             entries: Vec::new(),
-            children: HashMap::new(),
-            expanded: HashSet::new(),
+            children: FastMap::default(),
+            expanded: FastSet::default(),
             order: Vec::new(),
-            row_of_path: HashMap::new(),
-            top_index: HashMap::new(),
-            known_paths: HashSet::new(),
+            row_of_id: FastMap::default(),
+            by_path: FastMap::default(),
+            by_name: FastMap::default(),
             loading: true,
             error: None,
-            sort_key,
-            sort_order,
+            rules,
             show_hidden,
             filter: None,
-            selection: HashSet::new(),
+            selection: FastSet::default(),
+            selected_visible_count: 0,
+            selected_visible_bytes: 0,
+            selected_visible_paths: std::cell::RefCell::new(None),
             anchor: None,
             cursor: None,
+            carried: CarriedState::default(),
+            pending_child_loads: 0,
             generation: 0,
             watch: None,
             last_meta_notify: None,
             loading_since: None,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The slab
+
+    /// Put `entry` in the slab and index it, returning its stable id.
+    fn insert(&mut self, entry: Entry, placement: Placement) -> EntryId {
+        let path = entry.path.clone();
+        let name = entry.name_handle().clone();
+        let id = match self.free.pop() {
+            Some(slot) => {
+                self.slab[slot as usize] = Some(entry);
+                EntryId(slot)
+            }
+            None => {
+                self.slab.push(Some(entry));
+                EntryId((self.slab.len() - 1) as u32)
+            }
+        };
+        self.by_path.insert(path, id);
+        if placement == Placement::Top {
+            self.by_name.insert(name, id);
+        }
+        id
+    }
+
+    /// Drop one entry and every reference to it.
+    ///
+    /// The identity state goes with it here rather than in a sweep afterwards:
+    /// a selection that outlived its row is what "the wrong file got deleted"
+    /// is made of, and the removal is the only place that knows for certain.
+    fn remove(&mut self, id: EntryId) -> Option<Entry> {
+        let entry = self.slab.get_mut(id.0 as usize)?.take()?;
+        self.free.push(id.0);
+        self.by_path.remove(&entry.path);
+        // Guarded: a nested entry may share a name with a top-level one, and
+        // removing it must not unindex the row that still exists.
+        if self.by_name.get(entry.name_handle()) == Some(&id) {
+            self.by_name.remove(entry.name_handle());
+        }
+        self.selection.remove(&id);
+        self.expanded.remove(&id);
+        self.children.remove(&id);
+        if self.anchor == Some(id) {
+            self.anchor = None;
+        }
+        if self.cursor == Some(id) {
+            self.cursor = None;
+        }
+        Some(entry)
+    }
+
+    fn entry(&self, id: EntryId) -> Option<&Entry> {
+        self.slab.get(id.0 as usize)?.as_ref()
+    }
+
+    fn entry_by_id_mut(&mut self, id: EntryId) -> Option<&mut Entry> {
+        self.slab.get_mut(id.0 as usize)?.as_mut()
+    }
+
+    fn id_of(&self, path: &VfsPath) -> Option<EntryId> {
+        self.by_path.get(path).copied()
+    }
+
+    fn id_at(&self, row: usize) -> Option<EntryId> {
+        self.order.get(row).map(|r| r.id)
     }
 
     // ------------------------------------------------------------------
@@ -201,10 +460,7 @@ impl Folder {
     }
 
     pub fn entry_at(&self, row: usize) -> Option<&Entry> {
-        match &self.order.get(row)?.source {
-            RowSource::Top(ix) => self.entries.get(*ix),
-            RowSource::Child { parent, ix } => self.children.get(parent)?.get(*ix),
-        }
+        self.entry(self.id_at(row)?)
     }
 
     /// Indent level of a row: 0 for the browsed directory's own entries.
@@ -215,10 +471,10 @@ impl Folder {
     /// Whether this row is a folder that can be expanded in place, and
     /// whether it currently is.
     pub fn expansion_at(&self, row: usize) -> Option<bool> {
-        let entry = self.entry_at(row)?;
-        entry
+        let id = self.id_at(row)?;
+        self.entry(id)?
             .is_dir_like()
-            .then(|| self.expanded.contains(&entry.path))
+            .then(|| self.expanded.contains(&id))
     }
 
     #[allow(dead_code)] // wired to the filter UI and status bar polish
@@ -226,12 +482,17 @@ impl Folder {
         self.entries.len()
     }
 
+    /// The full ordering rules, for a column that wants to match this one.
+    pub fn rules(&self) -> SortRules {
+        self.rules
+    }
+
     pub fn sort_key(&self) -> SortKey {
-        self.sort_key
+        self.rules.key
     }
 
     pub fn sort_order(&self) -> SortOrder {
-        self.sort_order
+        self.rules.order
     }
 
     #[allow(dead_code)]
@@ -239,28 +500,45 @@ impl Folder {
         self.show_hidden
     }
 
-    #[allow(dead_code)]
     pub fn filter(&self) -> Option<&str> {
-        self.filter.as_deref()
+        self.filter.as_ref().map(sort::NameFilter::needle)
     }
 
     /// Whether the row at `row` is in the selection.
     pub fn is_row_selected(&self, row: usize) -> bool {
-        self.entry_at(row)
-            .is_some_and(|e| self.selection.contains(&e.path))
+        self.id_at(row)
+            .is_some_and(|id| self.selection.contains(&id))
     }
 
     /// Paths of all selected entries, in display order.
     pub fn selected_paths(&self) -> Vec<VfsPath> {
-        self.visible_entries()
-            .filter(|e| self.selection.contains(&e.path))
-            .map(|e| e.path.clone())
-            .collect()
+        self.selected_paths_shared().to_vec()
+    }
+
+    /// Shared drag payload source for the current visible selection.
+    ///
+    /// The list can build one drag source per visible row, so cloning this
+    /// handle must not clone every selected path per row. It does not: the
+    /// list is built at most once per selection change, and only if something
+    /// actually asks — a selection nobody drags is never materialised at all.
+    pub fn selected_paths_shared(&self) -> Arc<[VfsPath]> {
+        if let Some(cached) = self.selected_visible_paths.borrow().as_ref() {
+            return cached.clone();
+        }
+        let paths: Arc<[VfsPath]> = self
+            .visible_entries()
+            .filter(|(id, _)| self.selection.contains(id))
+            .map(|(_, entry)| entry.path.clone())
+            .collect();
+        *self.selected_visible_paths.borrow_mut() = Some(paths.clone());
+        paths
     }
 
     /// Every entry currently on screen, in display order.
-    fn visible_entries(&self) -> impl Iterator<Item = &Entry> {
-        (0..self.order.len()).filter_map(|row| self.entry_at(row))
+    fn visible_entries(&self) -> impl Iterator<Item = (EntryId, &Entry)> {
+        self.order
+            .iter()
+            .filter_map(|row| Some((row.id, self.entry(row.id)?)))
     }
 
     #[allow(dead_code)]
@@ -275,87 +553,116 @@ impl Folder {
     /// user can neither see nor act on — every mutation runs over
     /// [`Self::selected_paths`], which is visible-only too.
     pub fn selection_count(&self) -> usize {
-        self.visible_entries()
-            .filter(|e| self.selection.contains(&e.path))
-            .count()
+        self.selected_visible_count
     }
 
     /// Sum of selected sizes. Directories contribute nothing rather than a
     /// lie (`docs/ui-base.html` §9).
     pub fn selection_size(&self) -> u64 {
-        self.visible_entries()
-            .filter(|e| self.selection.contains(&e.path))
-            .filter_map(|e| e.display_len())
-            .sum()
+        self.selected_visible_bytes
     }
 
     pub fn cursor_row(&self) -> Option<usize> {
-        self.cursor
-            .as_ref()
-            .and_then(|p| self.row_of_path.get(p))
-            .copied()
+        self.row_of_id.get(&self.cursor?).copied()
     }
 
     /// The cursor row's path, for Open/Rename actions.
     pub fn cursor_path(&self) -> Option<VfsPath> {
-        self.cursor.clone()
+        Some(self.entry(self.cursor?)?.path.clone())
     }
 
     pub fn has_entry(&self, path: &VfsPath) -> bool {
-        self.known_paths.contains(path)
+        self.by_path.contains_key(path)
+    }
+
+    /// Whether the browsed directory already holds something called `name`.
+    ///
+    /// One hash of a short key, answered from an index the listing already
+    /// maintains. It replaces a `HashSet<String>` built out of every name in
+    /// the directory — 200,000 allocations to answer one yes-or-no question,
+    /// on the UI thread, four times over (A-23).
+    pub fn contains_name(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
     }
 
     /// Display row of `path`, or `None` when it is filtered out or absent.
     pub fn row_of(&self, path: &VfsPath) -> Option<usize> {
-        self.row_of_path.get(path).copied()
+        self.row_of_id.get(&self.id_of(path)?).copied()
     }
 
-    /// Every name in the browsed directory, for conflict-free "new file"
-    /// naming. Children of expanded folders live elsewhere and cannot clash.
-    pub fn entry_names(&self) -> std::collections::HashSet<String> {
-        self.entries.iter().map(|e| e.name.clone()).collect()
+    /// The one selected entry when exactly one visible row is selected.
+    ///
+    /// The count guard comes first and is what makes this cheap: the column
+    /// view's metadata panel calls this once per frame, and a scan for "the
+    /// selected row" in a 200,000-entry listing is A-16 all over again. With
+    /// the guard, the path list it goes through holds exactly one element and
+    /// is cached until the selection next moves.
+    pub fn selected_entry(&self) -> Option<&Entry> {
+        if self.selected_visible_count != 1 {
+            return None;
+        }
+        let paths = self.selected_paths_shared();
+        let [only] = paths.as_ref() else {
+            return None;
+        };
+        self.entry(self.id_of(only)?)
     }
 
     /// Whether the entry at `path` navigates like a directory.
     pub fn is_dir_like(&self, path: &VfsPath) -> Option<bool> {
-        let row = *self.row_of_path.get(path)?;
-        self.entry_at(row).map(|e| e.is_dir_like())
+        Some(self.entry(self.id_of(path)?)?.is_dir_like())
     }
 
     // ------------------------------------------------------------------
     // Selection
 
+    /// What one row contributes to the status bar, if it is on screen.
+    ///
+    /// Every id in `order` is visible by definition, so a row index is always
+    /// a countable entry — which is what lets the mutators below adjust the
+    /// totals instead of rescanning.
+    pub(super) fn row_weight(&self, id: EntryId) -> u64 {
+        self.entry(id)
+            .and_then(|entry| entry.display_len())
+            .unwrap_or(0)
+    }
+
     /// Select exactly one row (plain click, arrow-key move).
     pub fn select_only(&mut self, row: usize) {
-        let Some(path) = self.path_at(row) else {
+        let Some(id) = self.id_at(row) else {
             return;
         };
         self.selection.clear();
-        self.selection.insert(path.clone());
-        self.anchor = Some(path.clone());
-        self.cursor = Some(path);
+        self.selection.insert(id);
+        self.anchor = Some(id);
+        self.cursor = Some(id);
+        self.selected_visible_count = 1;
+        self.selected_visible_bytes = self.row_weight(id);
+        self.invalidate_selected_paths();
     }
 
     /// Toggle one row in the selection (Cmd/Ctrl-click).
     pub fn toggle_select(&mut self, row: usize) {
-        let Some(path) = self.path_at(row) else {
+        let Some(id) = self.id_at(row) else {
             return;
         };
-        if !self.selection.remove(&path) {
-            self.selection.insert(path.clone());
+        let weight = self.row_weight(id);
+        if self.selection.remove(&id) {
+            self.selected_visible_count = self.selected_visible_count.saturating_sub(1);
+            self.selected_visible_bytes = self.selected_visible_bytes.saturating_sub(weight);
+        } else {
+            self.selection.insert(id);
+            self.selected_visible_count += 1;
+            self.selected_visible_bytes += weight;
         }
-        self.anchor = Some(path.clone());
-        self.cursor = Some(path);
+        self.anchor = Some(id);
+        self.cursor = Some(id);
+        self.invalidate_selected_paths();
     }
 
     /// Extend the selection from the anchor through `row` (Shift-click).
     pub fn extend_select(&mut self, row: usize) {
-        let Some(anchor_row) = self
-            .anchor
-            .as_ref()
-            .and_then(|p| self.row_of_path.get(p))
-            .copied()
-        else {
+        let Some(anchor_row) = self.anchor.and_then(|id| self.row_of_id.get(&id)).copied() else {
             self.select_only(row);
             return;
         };
@@ -364,13 +671,28 @@ impl Folder {
         } else {
             (row, anchor_row)
         };
+        self.select_range(lo..=hi);
+        self.cursor = self.id_at(row);
+    }
+
+    /// Replace the selection with a contiguous run of display rows.
+    ///
+    /// O(the band), not O(the directory): the rows in it are exactly the rows
+    /// being counted, and everything outside it is dropped without being
+    /// looked at.
+    fn select_range(&mut self, rows: std::ops::RangeInclusive<usize>) {
         self.selection.clear();
-        for r in lo..=hi {
-            if let Some(e) = self.entry_at(r) {
-                self.selection.insert(e.path.clone());
+        self.selected_visible_count = 0;
+        self.selected_visible_bytes = 0;
+        for r in rows {
+            if let Some(id) = self.id_at(r)
+                && self.selection.insert(id)
+            {
+                self.selected_visible_count += 1;
+                self.selected_visible_bytes += self.row_weight(id);
             }
         }
-        self.cursor = self.path_at(row);
+        self.invalidate_selected_paths();
     }
 
     /// Right-click on an unselected row selects it first (Finder behaviour).
@@ -382,13 +704,11 @@ impl Folder {
 
     pub fn select_all(&mut self) {
         self.selection.clear();
-        for path in self
-            .visible_entries()
-            .map(|e| e.path.clone())
-            .collect::<Vec<_>>()
-        {
-            self.selection.insert(path);
-        }
+        self.selection.extend(self.order.iter().map(|row| row.id));
+        // Genuinely O(n), and honestly so: this selects every row, and the
+        // status bar has to total every row's size to say what that weighs.
+        // It is one keystroke, not a drag.
+        self.recount_selection();
     }
 
     pub fn clear_selection(&mut self) {
@@ -396,23 +716,45 @@ impl Folder {
             return;
         }
         self.selection.clear();
+        self.selected_visible_count = 0;
+        self.selected_visible_bytes = 0;
+        self.invalidate_selected_paths();
     }
 
-    fn path_at(&self, row: usize) -> Option<VfsPath> {
-        self.entry_at(row).map(|e| e.path.clone())
+    /// Drop the materialised path list; the totals are already right.
+    ///
+    /// Every selection mutator ends here. Rebuilding the list costs an
+    /// allocation proportional to the selection, and most selection changes
+    /// are never dragged anywhere — so it is deferred to whoever actually
+    /// asks (A-29).
+    pub(super) fn invalidate_selected_paths(&mut self) {
+        *self.selected_visible_paths.get_mut() = None;
+    }
+
+    /// Recount from scratch, for when *visibility* changed rather than the
+    /// selection: a filter, a reload, a watcher burst, a sort.
+    ///
+    /// O(the visible rows), and unavoidable — the same rows that have to be
+    /// re-laid-out have to be re-totalled. What matters is that this is no
+    /// longer on the path of an ordinary click or drag.
+    pub(super) fn recount_selection(&mut self) {
+        if self.selection.is_empty() {
+            self.selected_visible_count = 0;
+            self.selected_visible_bytes = 0;
+            self.invalidate_selected_paths();
+            return;
+        }
+        let (mut count, mut bytes) = (0usize, 0u64);
+        for (id, entry) in self.visible_entries() {
+            if self.selection.contains(&id) {
+                count += 1;
+                bytes += entry.display_len().unwrap_or(0);
+            }
+        }
+        self.selected_visible_count = count;
+        self.selected_visible_bytes = bytes;
+        self.invalidate_selected_paths();
     }
 }
 
 impl EventEmitter<FolderEvent> for Folder {}
-
-trait OptionExt<T> {
-    fn retain(&mut self, f: impl Fn(&T) -> bool);
-}
-
-impl<T> OptionExt<T> for Option<T> {
-    fn retain(&mut self, f: impl Fn(&T) -> bool) {
-        if self.as_ref().is_some_and(|v| !f(v)) {
-            *self = None;
-        }
-    }
-}

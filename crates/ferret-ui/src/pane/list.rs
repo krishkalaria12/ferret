@@ -4,6 +4,9 @@
 //! Hiding a column changes the indices the table works in, so everything
 //! here switches on a [`FileColumn`] rather than on a column index.
 
+use arc_swap::ArcSwap;
+use smallvec::SmallVec;
+
 use super::menu::entry_menu_items;
 use super::*;
 
@@ -76,8 +79,9 @@ impl FileColumn {
 /// Name leads and the config slot trails, always: they are the two the user
 /// cannot move or remove, so the hideable ones sit between them in a fixed
 /// order rather than in whatever order they were toggled back on.
-fn visible_columns(hidden: &[FileColumn]) -> Vec<FileColumn> {
-    let mut columns = vec![FileColumn::Name];
+fn visible_columns(hidden: &[FileColumn]) -> SmallVec<[FileColumn; 4]> {
+    let mut columns = SmallVec::new();
+    columns.push(FileColumn::Name);
     columns.extend(
         FileColumn::HIDEABLE
             .into_iter()
@@ -87,11 +91,74 @@ fn visible_columns(hidden: &[FileColumn]) -> Vec<FileColumn> {
     columns
 }
 
+/// Which columns are hidden, and what that leaves on screen.
+///
+/// Resolved once per change rather than per delegate call (A-21). The delegate
+/// asks between `columns_count`, `column`, `render_th`, `render_tr` and
+/// `render_td` — roughly five times per row per frame — and each ask used to
+/// allocate a `Vec` and take a mutex to answer a question with at most four
+/// possible answers. Both vectors are `SmallVec`s that never reach the heap.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ColumnLayout {
+    hidden: SmallVec<[FileColumn; 2]>,
+    visible: SmallVec<[FileColumn; 4]>,
+}
+
+impl ColumnLayout {
+    /// Build a layout, keeping `HIDEABLE` order and ignoring anything the user
+    /// is not allowed to hide — a settings file naming `name` is ignored
+    /// rather than obeyed.
+    pub(super) fn new(wanted_hidden: impl IntoIterator<Item = FileColumn>) -> Self {
+        let wanted: SmallVec<[FileColumn; 2]> = wanted_hidden.into_iter().collect();
+        let hidden: SmallVec<[FileColumn; 2]> = FileColumn::HIDEABLE
+            .into_iter()
+            .filter(|c| wanted.contains(c))
+            .collect();
+        Self {
+            visible: visible_columns(&hidden),
+            hidden,
+        }
+    }
+
+    pub(super) fn hidden(&self) -> &[FileColumn] {
+        &self.hidden
+    }
+
+    fn visible(&self) -> &[FileColumn] {
+        &self.visible
+    }
+
+    /// The column at a display index, or the config slot for anything out of
+    /// range — hiding a column changes these indices, so a stale one from the
+    /// table must land somewhere harmless rather than on a data column.
+    fn at(&self, ix: usize) -> FileColumn {
+        self.visible.get(ix).copied().unwrap_or(FileColumn::Config)
+    }
+
+    pub(super) fn with_toggled(&self, column: FileColumn) -> Self {
+        let mut hidden = self.hidden.clone();
+        match hidden.iter().position(|c| *c == column) {
+            Some(at) => {
+                hidden.remove(at);
+            }
+            None => hidden.push(column),
+        }
+        Self::new(hidden)
+    }
+}
+
+/// The live column layout, shared between the pane and its delegate.
+///
+/// `ArcSwap` rather than a mutex: this is read once per row per frame and
+/// written when someone picks an item out of the header's menu. A read is an
+/// atomic load, and the writer builds the next layout and swaps it in.
+pub(super) type Columns = Arc<ArcSwap<ColumnLayout>>;
+
 /// Per-column width overrides from a size-to-content double-click (§8).
 ///
 /// Shared with the pane, which measures; the delegate only reports what it is
 /// told, because `column()` runs inside the table and has no text system.
-pub(super) type ColumnWidths = Arc<std::sync::Mutex<HashMap<FileColumn, f32>>>;
+pub(super) type ColumnWidths = Arc<Mutex<HashMap<FileColumn, f32>>>;
 
 /// Every field is a handle the pane holds the other end of, so the pane builds
 /// the delegate itself rather than through a constructor that would just list
@@ -101,7 +168,7 @@ pub(super) struct ListDelegate {
     pub(super) pane_focused: Arc<AtomicBool>,
     pub(super) pane_width: Arc<AtomicUsize>,
     /// Shared with the pane, which owns the menu that mutates it.
-    pub(super) hidden_columns: Arc<std::sync::Mutex<Vec<FileColumn>>>,
+    pub(super) columns: Columns,
     pub(super) drops: DropQueue,
     /// Disclosure clicks, drained by the pane on the next frame.
     pub(super) toggles: ToggleQueue,
@@ -111,39 +178,32 @@ pub(super) struct ListDelegate {
 }
 
 /// Columns whose edge was double-clicked, awaiting measurement.
-pub(super) type SizeToContentQueue = Arc<std::sync::Mutex<Vec<FileColumn>>>;
+pub(super) type SizeToContentQueue = Arc<Mutex<Vec<FileColumn>>>;
 
 impl ListDelegate {
     fn palette(&self, cx: &App) -> BrowserPalette {
         BrowserPalette::resolve(cx)
     }
 
-    /// The columns actually on screen, left to right.
-    fn visible(&self) -> Vec<FileColumn> {
-        visible_columns(&self.hidden_columns.lock().unwrap())
+    /// The resolved layout: one atomic load, no allocation, no lock.
+    fn layout(&self) -> arc_swap::Guard<Arc<ColumnLayout>> {
+        self.columns.load()
     }
 
     /// A column's width: the measured one if it has been sized to content,
     /// otherwise the fixed default from §4.
     fn width_for(&self, column: FileColumn, default: f32) -> f32 {
-        self.widths
-            .lock()
-            .ok()
-            .and_then(|w| w.get(&column).copied())
-            .unwrap_or(default)
+        self.widths.lock().get(&column).copied().unwrap_or(default)
     }
 
     fn column_at(&self, col_ix: usize) -> FileColumn {
-        self.visible()
-            .get(col_ix)
-            .copied()
-            .unwrap_or(FileColumn::Config)
+        self.layout().at(col_ix)
     }
 }
 
 impl TableDelegate for ListDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
-        self.visible().len()
+        self.layout().visible().len()
     }
 
     fn rows_count(&self, cx: &App) -> usize {
@@ -169,8 +229,9 @@ impl TableDelegate for ListDelegate {
                 // The Name column absorbs all spare width (§4): measured pane
                 // width minus whatever fixed columns are actually showing.
                 const SLACK: f32 = 24.;
-                let visible = self.visible();
-                let fixed: f32 = visible
+                let fixed: f32 = self
+                    .layout()
+                    .visible()
                     .iter()
                     .map(|c| match c {
                         FileColumn::Modified => DATE_WIDTH,
@@ -221,7 +282,7 @@ impl TableDelegate for ListDelegate {
             // positioned by an inset: how much of the cell the library gives
             // its content is its business, and an inset guessed against that
             // lands in the wrong place.
-            let bounds = Arc::new(std::sync::Mutex::new(gpui::Bounds::default()));
+            let bounds = Arc::new(Mutex::new(gpui::Bounds::default()));
             let probe = bounds.clone();
 
             return div()
@@ -231,7 +292,7 @@ impl TableDelegate for ListDelegate {
                 // §4: the header is chrome, one size down from the rows.
                 .text_size(px(HEADER_FONT_SIZE))
                 .on_prepaint(move |b, _, _| {
-                    *probe.lock().unwrap() = b;
+                    *probe.lock() = b;
                 })
                 .child(div().size_full().child(column.label()))
                 .when(resizable, |el| {
@@ -239,17 +300,17 @@ impl TableDelegate for ListDelegate {
                         if event.click_count() < 2 {
                             return;
                         }
-                        let cell = *bounds.lock().unwrap();
+                        let cell = *bounds.lock();
                         let edge = cell.origin.x + cell.size.width - px(EDGE_GRAB_WIDTH);
                         if event.position().x >= edge {
-                            requests.lock().unwrap().push(column);
+                            requests.lock().push(column);
                         }
                     })
                 })
                 .into_any_element();
         }
 
-        let hidden = self.hidden_columns.lock().unwrap().clone();
+        let hidden: SmallVec<[FileColumn; 2]> = self.layout().hidden().into();
         h_flex()
             .size_full()
             .justify_center()
@@ -318,10 +379,10 @@ impl TableDelegate for ListDelegate {
         // Dragging an unselected row carries that row; dragging a selected
         // one carries the whole selection (§8).
         let entry = folder.entry_at(row_ix).cloned();
-        let dragged: Vec<VfsPath> = match &entry {
-            Some(entry) if selected => folder.selected_paths(),
-            Some(entry) => vec![entry.path.clone()],
-            None => Vec::new(),
+        let dragged: Arc<[VfsPath]> = match &entry {
+            Some(_) if selected => folder.selected_paths_shared(),
+            Some(entry) => Arc::from([entry.path.clone()]),
+            None => Arc::from([]),
         };
         let drop_dir = entry
             .as_ref()
@@ -348,13 +409,14 @@ impl TableDelegate for ListDelegate {
         // hover fill do the work of separating rows instead.
 
         if !dragged.is_empty() {
-            let (payload, label) = drag_payload(dragged);
             let folder = self.folder.clone();
             row = row
-                .on_drag(payload, move |_, _, _, cx| {
-                    cx.new(|_| DragPreview {
-                        label: label.clone(),
-                    })
+                // The label is built in here, not out there: this closure runs
+                // when a drag actually begins, and `render_tr` runs per row per
+                // frame (A-02a).
+                .on_drag(DraggedPaths { paths: dragged }, move |dragged, _, _, cx| {
+                    let label = drag_label(&dragged.paths);
+                    cx.new(|_| DragPreview { label })
                 })
                 // Leaving the window turns the in-app drag into a real file
                 // drag, so Ferret can drop into any application.
@@ -387,13 +449,20 @@ impl TableDelegate for ListDelegate {
         _window: &mut Window,
         cx: &mut gpui::Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(entry) = self.folder.read(cx).entry_at(row_ix).cloned() else {
+        // One read of the model for everything this cell needs (A-38).
+        // `render_td` runs once per (row, column), and asking four separate
+        // times was 640 entity reads a frame to answer questions that are
+        // constant for the row.
+        let folder = self.folder.read(cx);
+        let Some(entry) = folder.entry_at(row_ix).cloned() else {
             return div().into_any_element();
         };
+        let selected = folder.is_row_selected(row_ix);
+        let depth = folder.depth_at(row_ix);
+        let expansion = folder.expansion_at(row_ix);
 
         let theme = cx.theme();
         let palette = self.palette(cx);
-        let selected = self.folder.read(cx).is_row_selected(row_ix);
         let focused = self.pane_focused.load(Ordering::Relaxed);
 
         // The focused fill is an accent whose lightness differs per theme, so
@@ -407,8 +476,6 @@ impl TableDelegate for ListDelegate {
         match self.column_at(col_ix) {
             FileColumn::Name => {
                 let broken = entry.kind.is_broken_symlink();
-                let depth = self.folder.read(cx).depth_at(row_ix);
-                let expansion = self.folder.read(cx).expansion_at(row_ix);
                 let toggles = self.toggles.clone();
                 let icon_color = if broken {
                     theme.warning
@@ -439,7 +506,7 @@ impl TableDelegate for ListDelegate {
                                 let toggles = toggles.clone();
                                 el.on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     cx.stop_propagation();
-                                    *toggles.lock().unwrap() = Some(row_ix);
+                                    *toggles.lock() = Some(row_ix);
                                 })
                             })
                             .children(expansion.map(|open| {
@@ -467,7 +534,7 @@ impl TableDelegate for ListDelegate {
                     } else {
                         theme.foreground
                     })
-                    .child(entry.name.clone());
+                    .child(gpui::SharedString::new(entry.name()));
 
                 cell = if broken {
                     cell.child(label.line_through())
@@ -663,7 +730,7 @@ impl FilePane {
         // Cell padding, plus room for the sort caret the header draws.
         const CHROME: f32 = 28.;
         let measured = (f32::from(widest) + CHROME).ceil();
-        self.widths.lock().unwrap().insert(column, measured);
+        self.widths.lock().insert(column, measured);
         self.table.update(cx, |table, cx| {
             table.refresh(cx);
             cx.notify();
@@ -701,10 +768,14 @@ impl FilePane {
 mod tests {
     use super::*;
 
+    fn layout(hidden: impl IntoIterator<Item = FileColumn>) -> ColumnLayout {
+        ColumnLayout::new(hidden)
+    }
+
     #[test]
     fn hiding_a_column_leaves_name_and_the_config_slot_in_place() {
         assert_eq!(
-            visible_columns(&[]),
+            layout([]).visible(),
             [
                 FileColumn::Name,
                 FileColumn::Modified,
@@ -715,14 +786,14 @@ mod tests {
 
         // Hiding one drops only that one.
         assert_eq!(
-            visible_columns(&[FileColumn::Modified]),
+            layout([FileColumn::Modified]).visible(),
             [FileColumn::Name, FileColumn::Size, FileColumn::Config]
         );
 
         // Hiding both still leaves a file list you can read and a menu to
         // undo it with.
         assert_eq!(
-            visible_columns(&[FileColumn::Size, FileColumn::Modified]),
+            layout([FileColumn::Size, FileColumn::Modified]).visible(),
             [FileColumn::Name, FileColumn::Config]
         );
     }
@@ -731,8 +802,39 @@ mod tests {
     fn columns_come_back_in_their_canonical_order() {
         // Toggled off Size then Modified, then Size back on: Size must return
         // to its own slot, not to wherever the toggle order would put it.
-        let columns = visible_columns(&[FileColumn::Modified]);
-        assert_eq!(columns[1], FileColumn::Size);
+        let columns =
+            layout([FileColumn::Size, FileColumn::Modified]).with_toggled(FileColumn::Size);
+        assert_eq!(columns.visible()[1], FileColumn::Size);
+        // And the hidden set stays in HIDEABLE order, which is the order the
+        // settings file records.
+        assert_eq!(columns.hidden(), [FileColumn::Modified]);
+    }
+
+    #[test]
+    fn toggling_a_column_round_trips() {
+        let shown = layout([]);
+        let hidden = shown.with_toggled(FileColumn::Size);
+        assert_eq!(hidden.hidden(), [FileColumn::Size]);
+        assert_eq!(hidden.with_toggled(FileColumn::Size), shown);
+    }
+
+    #[test]
+    fn a_column_index_never_lands_on_the_wrong_column() {
+        // The table can ask about an index that a hide has just removed, and
+        // the config slot is the one answer that draws and does nothing.
+        let columns = layout([FileColumn::Modified, FileColumn::Size]);
+        assert_eq!(columns.at(0), FileColumn::Name);
+        assert_eq!(columns.at(1), FileColumn::Config);
+        assert_eq!(columns.at(99), FileColumn::Config);
+    }
+
+    #[test]
+    fn only_hideable_columns_can_be_hidden() {
+        // A hand-edited settings file naming `name` is ignored rather than
+        // obeyed — a list of dates with no names is not a file list.
+        let columns = layout([FileColumn::Name, FileColumn::Config]);
+        assert!(columns.hidden().is_empty());
+        assert_eq!(columns.visible().len(), 4);
     }
 
     #[test]

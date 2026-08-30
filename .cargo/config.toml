@@ -1,2 +1,12 @@
 [alias]
 xtask = "run --package xtask --release --"
+
+# Debug info the linker does not have to copy into the binary.
+#
+# Ferret links GPUI, so linking dominates an incremental debug build. `unpacked`
+# leaves the DWARF in the `.o` files and writes only references — the debugger
+# and a backtrace still resolve, the linker just stops moving megabytes around.
+# Platform-specific, hence here rather than in `[profile.dev]`: it is the
+# default on macOS for a reason, and Windows-MSVC rejects the value outright.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-Csplit-debuginfo=unpacked"]

@@ -105,13 +105,14 @@ pub trait Platform: Send + Sync + 'static {
 
     /// Move a path to the platform Trash / Recycle Bin.
     ///
-    /// Gate 5: no delete path may exist that does not come through here
-    /// (or through [`Platform::remove_permanently`] behind its confirmation).
+    /// Gate 5: no delete path may exist that does not come through here, or
+    /// through `Vfs::remove(RemoveMode::Permanent)` behind its confirmation.
+    ///
+    /// Deleting irreversibly is deliberately *not* on this trait. It was, and
+    /// both backends implemented it identically with `std::fs` — nothing about
+    /// it is OS-specific, and `RemoveMode::Permanent` in `ferret-vfs` already
+    /// existed for the same job. The Trash is the part that needs a platform.
     async fn move_to_trash(&self, path: &Path) -> Result<()>;
-
-    /// Delete irreversibly. Only ever reachable behind an explicit
-    /// confirmation — see `settings.browser.confirm_permanent_delete`.
-    async fn remove_permanently(&self, path: &Path) -> Result<()>;
 
     /// The standard Places section: home and the well-known folders that
     /// exist on this machine. Missing folders are omitted, not shown greyed.

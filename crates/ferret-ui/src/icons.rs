@@ -7,9 +7,17 @@
 //! layer over the same trait later and win when they resolve.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+use arc_swap::ArcSwap;
 
 use ferret_vfs::Entry;
+
+/// One unique OS-icon type and a local path that represents it.
+///
+/// The sample path is all the platform provider needs to resolve an icon, so
+/// folder loading moves this bounded payload instead of cloning every entry.
+pub(crate) type OsIconRequest = (ferret_platform::IconKey, std::path::PathBuf);
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct Mapping {
@@ -48,16 +56,95 @@ fn default_other() -> String {
 }
 
 /// Resolves entries to bundled SVG asset paths.
+///
+/// Values are complete asset paths, formatted once when the table is parsed.
+/// The mapping file stores bare icon names, but the file list asks this
+/// question once per row per frame, and `format!("icons/file/{name}.svg")` on
+/// that path is a heap allocation per row per frame for a string that is the
+/// same every time.
 #[derive(Debug, Default)]
 pub struct FileIcons {
-    by_name: HashMap<String, String>,
-    by_ext: HashMap<String, String>,
-    defaults: Defaults,
-    /// `icons/file/<name>.svg` prefix, materialised per lookup.
-    base: &'static str,
+    by_name: HashMap<String, gpui::SharedString>,
+    by_ext: HashMap<String, gpui::SharedString>,
+    defaults: ResolvedDefaults,
+}
+
+/// The kind fallbacks, as asset paths.
+#[derive(Debug)]
+struct ResolvedDefaults {
+    file: gpui::SharedString,
+    directory: gpui::SharedString,
+    symlink: gpui::SharedString,
+    other: gpui::SharedString,
+}
+
+impl Default for ResolvedDefaults {
+    fn default() -> Self {
+        Self::from(Defaults::default())
+    }
+}
+
+impl From<Defaults> for ResolvedDefaults {
+    fn from(d: Defaults) -> Self {
+        Self {
+            file: asset_path_for(&d.file),
+            directory: asset_path_for(&d.directory),
+            symlink: asset_path_for(&d.symlink),
+            other: asset_path_for(&d.other),
+        }
+    }
+}
+
+/// `icons/file/<name>.svg` — the one place the layout of an icon asset path
+/// is written down.
+fn asset_path_for(name: &str) -> gpui::SharedString {
+    gpui::SharedString::new(format!("icons/file/{name}.svg"))
 }
 
 static ICONS: OnceLock<FileIcons> = OnceLock::new();
+
+/// Stable, decoded image handles for platform icons.
+///
+/// The platform cache owns raw BGRA bytes because it cannot depend on GPUI.
+/// This cache is the UI-side boundary: lock-free reads return the exact same
+/// `RenderImage` identity every frame, while a new type uses copy-on-write
+/// insertion once.
+pub struct RenderedIconCache {
+    images: ArcSwap<HashMap<ferret_platform::IconKey, Arc<gpui::RenderImage>>>,
+}
+
+impl Default for RenderedIconCache {
+    fn default() -> Self {
+        Self {
+            images: ArcSwap::from_pointee(HashMap::new()),
+        }
+    }
+}
+
+impl RenderedIconCache {
+    fn get(&self, key: &ferret_platform::IconKey) -> Option<Arc<gpui::RenderImage>> {
+        self.images.load().get(key).cloned()
+    }
+
+    fn insert_if_absent(
+        &self,
+        key: ferret_platform::IconKey,
+        image: Arc<gpui::RenderImage>,
+    ) -> Arc<gpui::RenderImage> {
+        loop {
+            let current = self.images.load_full();
+            if let Some(existing) = current.get(&key) {
+                return existing.clone();
+            }
+            let mut next = (*current).clone();
+            next.insert(key.clone(), image.clone());
+            let previous = self.images.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return image;
+            }
+        }
+    }
+}
 
 impl FileIcons {
     /// Parse the embedded table. A damaged table costs icons, not data:
@@ -66,11 +153,16 @@ impl FileIcons {
         ICONS.get_or_init(|| {
             let parsed: Mapping =
                 serde_json::from_str(&crate::assets::file_icons_json()).unwrap_or_default();
+            let resolve = |table: HashMap<String, String>| {
+                table
+                    .into_iter()
+                    .map(|(key, icon)| (key, asset_path_for(&icon)))
+                    .collect()
+            };
             FileIcons {
-                by_name: parsed.by_name,
-                by_ext: parsed.by_ext,
-                defaults: parsed.defaults,
-                base: "icons/file",
+                by_name: resolve(parsed.by_name),
+                by_ext: resolve(parsed.by_ext),
+                defaults: parsed.defaults.into(),
             }
         })
     }
@@ -78,34 +170,32 @@ impl FileIcons {
     /// The asset path for an entry's icon.
     ///
     /// The returned string is already a GPUI asset path —
-    /// `Icon::default().path(result)`.
-    pub fn asset_path(&self, entry: &Entry) -> String {
-        let name = match entry.kind {
-            ferret_vfs::EntryKind::Dir => self.defaults.directory.clone(),
-            ferret_vfs::EntryKind::Symlink { .. } => self.defaults.symlink.clone(),
-            ferret_vfs::EntryKind::Other => self.defaults.other.clone(),
+    /// `Icon::default().path(result)` — and cloning it is a refcount bump, so
+    /// this is safe to call once per row per frame, which is what the file
+    /// list does.
+    pub fn asset_path(&self, entry: &Entry) -> gpui::SharedString {
+        let icon = match entry.kind {
+            ferret_vfs::EntryKind::Dir => &self.defaults.directory,
+            ferret_vfs::EntryKind::Symlink { .. } => &self.defaults.symlink,
+            ferret_vfs::EntryKind::Other => &self.defaults.other,
             ferret_vfs::EntryKind::File => {
-                if let Some(icon) = entry.name.strip_prefix('.').and_then(|n| {
-                    self.by_name
-                        .get(n)
-                        .or_else(|| self.by_name.get(entry.name.as_str()))
-                }) {
-                    icon.clone()
-                } else if let Some(icon) = self.by_name.get(entry.name.as_str()) {
-                    icon.clone()
-                } else if let Some(ext) = entry.path.extension() {
-                    self.by_ext.get(&ext).cloned().unwrap_or_else(|| {
-                        self.by_name
-                            .get(entry.name.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| self.defaults.file.clone())
-                    })
-                } else {
-                    self.defaults.file.clone()
+                // By name first, so `Cargo.toml` beats the `toml` extension.
+                // A dotfile tries its stripped name ahead of its literal one,
+                // which is how `.gitignore` reaches the `gitignore` mapping.
+                // Only then the extension the entry resolved at listing time,
+                // rather than one re-derived from the path per row (A-12).
+                let by_name = entry
+                    .name()
+                    .strip_prefix('.')
+                    .and_then(|stem| self.by_name.get(stem))
+                    .or_else(|| self.by_name.get(entry.name()));
+                match by_name.or_else(|| entry.extension().and_then(|ext| self.by_ext.get(ext))) {
+                    Some(icon) => icon,
+                    None => &self.defaults.file,
                 }
             }
         };
-        format!("{}/{}.svg", self.base, name)
+        icon.clone()
     }
 }
 
@@ -116,7 +206,12 @@ impl FileIcons {
 pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
     let state = cx.global::<crate::state::FerretState>();
     let local = entry.path.as_local()?;
-    let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+    // From the entry's cached extension, not by re-parsing its path: this
+    // runs once per visible row per frame (A-33).
+    let key = ferret_platform::IconKey::of_entry(local, entry.is_dir_like(), entry.extension());
+    if let Some(image) = state.rendered_os_icons.get(&key) {
+        return Some(gpui::ImageSource::Render(image));
+    }
     let bitmap = state.os_icons.lookup(&key)?;
 
     // Guarded rather than trusted: the bytes crossed an `unsafe` boundary,
@@ -129,37 +224,48 @@ pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
         bitmap.height,
         bitmap.bgra,
     )?);
-    Some(gpui::ImageSource::Render(std::sync::Arc::new(
-        gpui::RenderImage::new(vec![frame]),
-    )))
+    let image = Arc::new(gpui::RenderImage::new(vec![frame]));
+    Some(gpui::ImageSource::Render(
+        state.rendered_os_icons.insert_if_absent(key, image),
+    ))
 }
 
-/// Ask the platform to resolve the icons for the types on screen.
+/// Derive one platform-icon request for each uncached file type.
 ///
-/// Off the render path, and deduplicated by key: a 200,000-entry directory
-/// of `.rs` files costs one OS call, not 200,000.
-pub fn resolve_os_icons(entries: &[Entry], cx: &mut gpui::App) {
-    let state = cx.global::<crate::state::FerretState>();
-    if !state.os_icons.is_available() {
-        return;
+/// This deliberately consumes borrowed entries while the folder model is
+/// available. The returned vector is bounded by distinct icon keys rather
+/// than the number of directory entries.
+pub(crate) fn collect_os_icon_requests<'a>(
+    entries: impl Iterator<Item = &'a Entry>,
+    provider: &dyn ferret_platform::IconProvider,
+) -> Vec<OsIconRequest> {
+    if !provider.is_available() {
+        return Vec::new();
     }
-    let provider = state.os_icons.clone();
 
-    let mut wanted: Vec<(ferret_platform::IconKey, std::path::PathBuf)> = Vec::new();
+    let mut wanted = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in entries {
         let Some(local) = entry.path.as_local() else {
             continue;
         };
-        let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+        let key = ferret_platform::IconKey::of_entry(local, entry.is_dir_like(), entry.extension());
         if provider.lookup(&key).is_some() || !seen.insert(key.clone()) {
             continue;
         }
         wanted.push((key, local.to_path_buf()));
     }
+    wanted
+}
+
+/// Resolve a pre-deduplicated set of platform icon requests off the render
+/// path. See [`collect_os_icon_requests`] for why this takes requests instead
+/// of a whole folder listing.
+pub(crate) fn resolve_os_icons(wanted: Vec<OsIconRequest>, cx: &mut gpui::App) {
     if wanted.is_empty() {
         return;
     }
+    let provider = cx.global::<crate::state::FerretState>().os_icons.clone();
 
     cx.background_executor()
         .spawn(async move {
@@ -176,13 +282,7 @@ mod tests {
     use ferret_vfs::{EntryKind, VfsPath};
 
     fn file_entry(name: &str) -> Entry {
-        Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind: EntryKind::File,
-            metadata: None,
-            link_target: None,
-        }
+        Entry::new(VfsPath::local(format!("/x/{name}")), name, EntryKind::File)
     }
 
     #[test]
@@ -246,41 +346,32 @@ mod tests {
                 .ends_with("document.svg")
         );
 
-        let dir = Entry {
-            path: VfsPath::local("/x/dir"),
-            name: "dir".into(),
-            kind: EntryKind::Dir,
-            metadata: None,
-            link_target: None,
-        };
+        let dir = Entry::new(VfsPath::local("/x/dir"), "dir", EntryKind::Dir);
         assert!(icons.asset_path(&dir).ends_with("folder-base.svg"));
 
-        let broken = Entry {
-            path: VfsPath::local("/x/loop"),
-            name: "loop".into(),
-            kind: EntryKind::Symlink { target_kind: None },
-            metadata: None,
-            link_target: None,
-        };
+        let broken = Entry::new(
+            VfsPath::local("/x/loop"),
+            "loop",
+            EntryKind::Symlink { target_kind: None },
+        );
         assert!(icons.asset_path(&broken).ends_with("url.svg"));
     }
 
     #[test]
     fn every_mapped_icon_exists_as_an_asset() {
         let icons = FileIcons::embedded();
-        let mut names: Vec<&String> = icons.by_name.values().collect();
-        names.extend(icons.by_ext.values());
-        names.extend([
+        let mut paths: Vec<&gpui::SharedString> = icons.by_name.values().collect();
+        paths.extend(icons.by_ext.values());
+        paths.extend([
             &icons.defaults.file,
             &icons.defaults.directory,
             &icons.defaults.symlink,
             &icons.defaults.other,
         ]);
 
-        for name in names {
-            let path = format!("{}/{}.svg", icons.base, name);
+        for path in paths {
             assert!(
-                crate::assets::FerretAssets::get(&path).is_some(),
+                crate::assets::FerretAssets::get(path).is_some(),
                 "mapped icon {path} is missing from assets"
             );
         }

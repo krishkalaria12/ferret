@@ -11,5 +11,5 @@ publish = false
 ferret-vfs.workspace = true
 
 anyhow.workspace = true
-futures = "0.3"
-smol = "2"
+futures.workspace = true
+smol.workspace = true

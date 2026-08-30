@@ -8,6 +8,11 @@ use gpui_component::Root;
 actions!(ferret, [Quit]);
 
 fn main() {
+    // Names the main thread in the profiler timeline. Compiles to nothing
+    // without `--features profile`; see that feature's comment in Cargo.toml.
+    #[cfg(feature = "profile")]
+    profiling::register_thread!("main");
+
     // `Assets` supplies the SVGs behind `IconName` and Ferret's own icons;
     // without it every icon renders blank.
     gpui_platform::application()
@@ -36,6 +41,15 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     // Window lifecycle belongs to the binary, not to a view.
     cx.on_action(|_: &browser_actions::NewWindow, cx| open_main_window(cx));
+
+    // Config writes are debounced (A-09), so quitting inside the debounce
+    // window would lose the last sort click. This is the flush, and the only
+    // place a config write is allowed to block.
+    cx.on_app_quit(|cx: &mut App| {
+        ferret_ui::flush_pending_saves(cx);
+        async {}
+    })
+    .detach();
 }
 
 fn bind_keys(cx: &mut App) {
@@ -231,13 +245,44 @@ fn apply_startup_theme(cx: &mut App) {
     // Ferret's palette first: `sync_system_appearance` and `change` both
     // re-apply whichever theme config is registered, so registering after
     // them would leave the library's colours on screen until the next toggle.
-    ferret_ui::register_theme(vibrancy(cx), cx);
+    let font_size = cx.global::<FerretState>().settings.appearance.ui_font_size;
+    ferret_ui::register_theme(vibrancy(cx), font_size, cx);
 
     match cx.global::<FerretState>().settings.appearance.theme {
         ThemeChoice::System => Theme::sync_system_appearance(None, cx),
         ThemeChoice::Light => Theme::change(ThemeMode::Light, None, cx),
         ThemeChoice::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
+}
+
+/// Keep the window's theme in step with the OS while Ferret runs (A-31).
+///
+/// `apply_startup_theme` reads the appearance once, which is not what
+/// `theme: "system"` promises — and "system" is the default, so before this
+/// every user on macOS's own Auto appearance had a window that was the wrong
+/// colour for half of each day.
+///
+/// Guarded on the setting rather than always following: someone who has
+/// explicitly chosen Light or Dark has said they do not want the OS deciding,
+/// and that has to survive sunset. The check is inside the callback, not
+/// outside it, so changing the setting at runtime takes effect without
+/// re-registering anything.
+fn follow_system_appearance(window: &mut gpui::Window, _cx: &mut App) -> gpui::Subscription {
+    use ferret_settings::ThemeChoice;
+    use gpui_component::Theme;
+
+    window.observe_window_appearance(|window, cx| {
+        let follows = matches!(
+            cx.global::<FerretState>().settings.appearance.theme,
+            ThemeChoice::System
+        );
+        if follows {
+            // `Some(window)` rather than `None`: the library reads the
+            // window's own appearance when it has one, which is the value
+            // that just changed.
+            Theme::sync_system_appearance(Some(window), cx);
+        }
+    })
 }
 
 /// Whether to draw the window translucent over a blurred desktop.
@@ -309,6 +354,14 @@ fn open_main_window(cx: &mut App) {
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open the Ferret window");
+
+        // Detached rather than held: the observer lives in the window's own
+        // subscriber set, so it is dropped when the window is. Holding the
+        // handle here would only add a second thing to keep alive for exactly
+        // as long.
+        let _ = window.update(cx, |_, window, cx| {
+            follow_system_appearance(window, cx).detach();
+        });
 
         // Asked for a second time, after the renderer exists. This does not
         // currently change anything — see `vibrancy` — but it is the call the

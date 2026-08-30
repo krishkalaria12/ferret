@@ -81,21 +81,6 @@ impl Platform for MacOs {
             })
     }
 
-    async fn remove_permanently(&self, path: &Path) -> Result<()> {
-        let owned = path.to_path_buf();
-        smol::unblock(move || {
-            let md = std::fs::symlink_metadata(&owned)
-                .map_err(|source| PlatformError::from_io("read", &owned, source))?;
-            let outcome = if md.is_dir() {
-                std::fs::remove_dir_all(&owned)
-            } else {
-                std::fs::remove_file(&owned)
-            };
-            outcome.map_err(|source| PlatformError::from_io("delete", &owned, source))
-        })
-        .await
-    }
-
     fn places(&self) -> Vec<Place> {
         let mut out = Vec::new();
         if let Some(home) = dirs::home_dir() {
@@ -191,8 +176,8 @@ impl Platform for MacOs {
 // Icons (D-18)
 
 use crate::icon::{IconBitmap, IconKey, IconProvider};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Icon size to ask the OS for, in points.
 ///
@@ -206,6 +191,11 @@ const ICON_POINTS: f64 = 64.0;
 pub struct MacIcons {
     /// Resolved icons, keyed by type. Bounded by the number of *types* the
     /// user has looked at, not by the number of files.
+    ///
+    /// `parking_lot`, so there is no poisoning to swallow. `lookup` used to
+    /// end in `.lock().ok()?`, which turned a lock poisoned by a panic
+    /// anywhere in the process into "this type has no icon" — permanently,
+    /// and indistinguishably from a genuine miss.
     cache: Mutex<HashMap<IconKey, Option<IconBitmap>>>,
 }
 
@@ -213,22 +203,45 @@ impl IconProvider for MacIcons {
     fn lookup(&self, key: &IconKey) -> Option<IconBitmap> {
         // Cache only — never the OS. This runs once per visible row while a
         // frame is being built.
-        self.cache.lock().ok()?.get(key)?.clone()
+        self.cache.lock().get(key)?.clone()
     }
 
     fn resolve(&self, key: &IconKey, sample: &std::path::Path) -> bool {
-        if self.cache.lock().is_ok_and(|c| c.contains_key(key)) {
+        if self.cache.lock().contains_key(key) {
             return false; // Already answered, including a cached failure.
         }
         let bitmap = icon_for_path(sample).filter(IconBitmap::is_well_formed);
         let cached_something = bitmap.is_some();
         // A failure is cached too: a type whose icon cannot be read must not
         // be retried once per frame forever.
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(key.clone(), bitmap);
-        }
+        self.cache.lock().insert(key.clone(), bitmap);
         cached_something
     }
+}
+
+/// Swap the red and blue channels of an RGBA buffer, in place of a copy.
+///
+/// A `u32` shuffle per pixel rather than a four-byte `extend_from_slice`
+/// (A-39) — 4,096 pixels per icon at `ICON_POINTS = 64`. Split out from the
+/// `unsafe` AppKit block above so the byte order can be tested without a
+/// window server.
+fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
+    let mut bgra = vec![0u8; rgba.len()];
+    for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+        // Native-endian throughout: the bytes go straight back out as bytes,
+        // so the only thing that matters is that the shuffle below is the
+        // inverse of the load, which it is on either endianness.
+        let px = u32::from_ne_bytes([src[0], src[1], src[2], src[3]]);
+        let swizzled = if cfg!(target_endian = "little") {
+            // Little-endian load puts src[0] (R) in the low byte and src[2]
+            // (B) in bits 16..24; swapping those two is the whole job.
+            (px & 0xff00_ff00) | ((px >> 16) & 0x0000_00ff) | ((px & 0x0000_00ff) << 16)
+        } else {
+            (px & 0x00ff_00ff) | ((px >> 16) & 0x0000_ff00) | ((px & 0x0000_ff00) << 16)
+        };
+        dst.copy_from_slice(&swizzled.to_ne_bytes());
+    }
+    bgra
 }
 
 /// Ask `NSWorkspace` for a path's icon and draw it into a BGRA buffer.
@@ -281,16 +294,59 @@ fn icon_for_path(path: &std::path::Path) -> Option<IconBitmap> {
         let len = side * side * 4;
         let rgba = std::slice::from_raw_parts(data, len);
 
-        // AppKit hands back RGBA; GPUI's RenderImage wants BGRA.
-        let mut bgra = Vec::with_capacity(len);
-        for px in rgba.chunks_exact(4) {
-            bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
+        // AppKit hands back RGBA; GPUI's `RenderImage` wants BGRA. Swizzled
+        // a `u32` at a time rather than a byte at a time (A-39): one shuffle
+        // and one store per pixel instead of a four-byte `extend_from_slice`,
+        // which is 4,096 of them per icon at `ICON_POINTS = 64`.
+        //
+        // Asking `NSBitmapImageRep` for BGRA directly via `bitmapFormat`
+        // would be better still and is what rev 1 suggested — but the
+        // initialiser used here has no format argument, and the one that does
+        // wants a set of flags whose behaviour differs across macOS releases.
+        // This is the version whose correctness is obvious from the test
+        // below.
+        let bgra = rgba_to_bgra(rgba);
 
         Some(IconBitmap {
             width: side as u32,
             height: side as u32,
             bgra,
         })
+    }
+}
+
+#[cfg(test)]
+mod swizzle_tests {
+    use super::rgba_to_bgra;
+
+    /// The loop this replaced, kept as the definition of correct.
+    fn reference(rgba: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(rgba.len());
+        for px in rgba.chunks_exact(4) {
+            out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+        out
+    }
+
+    #[test]
+    fn the_fast_swizzle_matches_the_obvious_one() {
+        // Every channel distinct, so a wrong lane is visible rather than
+        // hidden by two channels happening to agree.
+        let rgba: Vec<u8> = (0u8..=255).collect();
+        assert_eq!(rgba_to_bgra(&rgba), reference(&rgba));
+
+        // And the shapes that catch an off-by-one: one pixel, and none.
+        assert_eq!(rgba_to_bgra(&[1, 2, 3, 4]), vec![3, 2, 1, 4]);
+        assert!(rgba_to_bgra(&[]).is_empty());
+    }
+
+    #[test]
+    fn alpha_and_green_are_left_alone() {
+        // The two channels that must not move — a swizzle that disturbed
+        // alpha would show up as icons with the wrong transparency.
+        let out = rgba_to_bgra(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(out[1], 0xad, "green stays put");
+        assert_eq!(out[3], 0xef, "alpha stays put");
+        assert_eq!((out[0], out[2]), (0xbe, 0xde), "red and blue swap");
     }
 }

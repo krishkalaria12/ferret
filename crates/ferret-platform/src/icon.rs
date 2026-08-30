@@ -13,6 +13,7 @@
 //!    file in a 200,000-entry directory, so the cache stays small and the
 //!    number of OS calls is bounded by the number of *types* on screen.
 
+use smol_str::SmolStr;
 use std::path::Path;
 
 /// A decoded icon, in the layout GPUI's `RenderImage` wants: BGRA8, premul-
@@ -45,35 +46,77 @@ impl IconBitmap {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum IconKey {
     /// Lowercased extension, without the dot.
-    Extension(String),
+    ///
+    /// `SmolStr` rather than `String` (A-33): this is built once per visible
+    /// row per frame to look something up in a cache, and an extension is
+    /// nearly always short enough to live inline — so the common case costs
+    /// no allocation at all.
+    Extension(SmolStr),
     /// Any directory that is not an application bundle.
     Directory,
     /// A bundle or executable, whose icon is its own rather than its type's.
     ///
-    /// Keyed by full path because two applications do not share an icon.
-    Application(String),
+    /// Keyed by full path because two applications do not share an icon. This
+    /// one does allocate, and has to: a path is long, and there is no cached
+    /// copy of it in the shape a key wants. Bundles are rare enough on any one
+    /// screen that it does not matter.
+    Application(SmolStr),
     /// A file with no extension.
     Plain,
 }
 
 impl IconKey {
     /// The key a path resolves to.
+    ///
+    /// Prefer [`IconKey::of_entry`] wherever a listing entry is in hand: this
+    /// re-derives the lowercased extension that the entry already carries.
     pub fn of(path: &Path, is_dir: bool) -> Self {
+        let extension = path.extension().and_then(|e| e.to_str());
+        Self::build(path, is_dir, extension, Case::Unknown)
+    }
+
+    /// The key for a listed entry, using the extension it resolved during the
+    /// walk (D-35) rather than parsing its path again (A-33).
+    ///
+    /// `extension` is already lowercased, so the common case is a `SmolStr`
+    /// clone of an inline string: no parse, no allocation, no syscall.
+    pub fn of_entry(path: &Path, is_dir: bool, extension: Option<&str>) -> Self {
+        Self::build(path, is_dir, extension, Case::AlreadyLower)
+    }
+
+    fn build(path: &Path, is_dir: bool, extension: Option<&str>, case: Case) -> Self {
         if is_dir {
             // A `.app` is a directory but has its own icon, so it cannot
             // share the folder key.
-            let is_bundle = path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("app"));
+            let is_bundle = extension.is_some_and(|e| e.eq_ignore_ascii_case("app"));
             return if is_bundle {
-                IconKey::Application(path.to_string_lossy().into_owned())
+                IconKey::Application(SmolStr::new(path.to_string_lossy()))
             } else {
                 IconKey::Directory
             };
         }
-        match path.extension().and_then(|e| e.to_str()) {
-            Some(ext) if !ext.is_empty() => IconKey::Extension(ext.to_ascii_lowercase()),
+        match extension {
+            Some(ext) if !ext.is_empty() => IconKey::Extension(case.fold(ext)),
             _ => IconKey::Plain,
+        }
+    }
+}
+
+/// Whether an extension still needs lowercasing.
+///
+/// `Entry` resolves its extension lowercased during the walk (D-35), so the
+/// hot path can skip the fold entirely; a bare path has made no such promise.
+#[derive(Clone, Copy)]
+enum Case {
+    AlreadyLower,
+    Unknown,
+}
+
+impl Case {
+    fn fold(self, ext: &str) -> SmolStr {
+        match self {
+            Case::AlreadyLower => SmolStr::new(ext),
+            Case::Unknown => SmolStr::from(ext.to_ascii_lowercase()),
         }
     }
 }

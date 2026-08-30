@@ -54,6 +54,29 @@ pub const FIRST_ROW_BUDGET: Duration = Duration::from_millis(50);
 /// How long the full 200,000-entry listing may take. Measured at ~143 ms.
 pub const FLAT_TOTAL_BUDGET: Duration = Duration::from_secs(3);
 
+/// How long until every row in `flat/` can draw its size and its date.
+///
+/// The number the other two budgets do not watch. Time-to-first-row says
+/// whether the app feels alive; this says whether the list you are looking at
+/// is a file list or a file list that fills itself in for the next two minutes
+/// (`docs/audit.html` §11). It is what A-03 destroyed and what D-33 fixes, and
+/// on a backend that resolves metadata during the walk it collapses into
+/// [`FLAT_TOTAL_BUDGET`], which is what `LocalFs` does since D-33.
+///
+/// Measured at ~290 ms warm. Set to match [`FLAT_TOTAL_BUDGET`] rather than
+/// tighter: it has to survive a cold cache on a slow disk, where the stats
+/// this now does inline are the whole cost. It stays a separate number because
+/// a remote backend will make the two diverge again.
+pub const FLAT_POPULATED_BUDGET: Duration = Duration::from_secs(3);
+
+/// Runs per fixture; the reported figure is the median.
+///
+/// A single sample on a machine that is also compiling something is noise, and
+/// noise is what forces a budget to be set loose enough to miss a real 2x
+/// regression. Three is enough to throw out one outlier and cheap enough to
+/// stay a command people actually run.
+pub const BENCH_RUNS: usize = 3;
+
 /// Fixture directories included in the benchmark sweep.
 ///
 /// `links` earns its place: a cyclic symlink must not hang the walk, and if

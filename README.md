@@ -27,7 +27,7 @@ crates/
   ferret/           # native binary: bootstrap, window, menus, actions
   ferret-ui/        # views, theme tokens, bundled file icons
   ferret-vfs/       # the Vfs trait, local backend, path handling
-  ferret-settings/  # settings schema, keymap, per-folder view preferences
+  ferret-settings/  # settings schema, per-folder view preferences
 xtask/              # fixture generator and listing benchmark
 docs/
   ui-base.html # base explorer shell — the UI reference to build against
