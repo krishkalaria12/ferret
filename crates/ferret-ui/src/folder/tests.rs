@@ -1064,3 +1064,78 @@ fn selected_entry_cost() {
     }
     println!("selected_entry: {:?} per frame", start.elapsed() / 1_000);
 }
+
+// ----------------------------------------------------------------------
+// What a listing asks the backend for (A-14)
+
+/// `Capabilities` as the local backend reports them on this platform.
+fn local_caps() -> ferret_vfs::Capabilities {
+    ferret_vfs::LocalFs::new().capabilities()
+}
+
+fn caps_with_hidden_in_listing(hidden_in_listing: bool) -> ferret_vfs::Capabilities {
+    ferret_vfs::Capabilities {
+        hidden_in_listing,
+        ..local_caps()
+    }
+}
+
+#[test]
+fn a_browsed_listing_always_asks_for_everything() {
+    // Every column the file pane draws needs it, so there is nothing to skip.
+    for key in [
+        SortKey::Name,
+        SortKey::Modified,
+        SortKey::Size,
+        SortKey::Kind,
+    ] {
+        let rules = SortRules {
+            key,
+            ..SortRules::by_name()
+        };
+        for show_hidden in [false, true] {
+            assert_eq!(
+                ListingProfile::BROWSING.detail(rules, show_hidden, local_caps()),
+                ferret_vfs::ListingDetail::Full,
+                "{key:?}/{show_hidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_navigating_listing_skips_the_stat_only_when_nothing_can_observe_it() {
+    let by_name = SortRules::by_name();
+    let by_size = SortRules {
+        key: SortKey::Size,
+        ..by_name
+    };
+    let unix = caps_with_hidden_in_listing(false);
+    let windows = caps_with_hidden_in_listing(true);
+
+    // The case the profile exists for: nothing drawn needs metadata, and the
+    // hidden flag cannot change the answer because hidden rows are shown.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_name, true, unix),
+        ferret_vfs::ListingDetail::NamesOnly
+    );
+    // Windows reports the hidden attribute with the name, so the filter costs
+    // nothing and the skip is safe either way.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_name, false, windows),
+        ferret_vfs::ListingDetail::NamesOnly
+    );
+
+    // On Unix with hidden rows filtered, `UF_HIDDEN` rides the same call —
+    // skipping it would show `bin`, `etc` and `usr` in an ancestor column of
+    // `/` while the pane beside it hid them.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_name, false, unix),
+        ferret_vfs::ListingDetail::Full
+    );
+    // And ordering by a key the entries would not carry is a sort over zeroes.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_size, true, unix),
+        ferret_vfs::ListingDetail::Full
+    );
+}

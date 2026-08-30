@@ -86,9 +86,20 @@ impl Folder {
         let fs = cx.global::<crate::state::FerretState>().fs;
         let generation = self.generation;
         let rules = self.rules;
+        // The same listing, so the same answer: these rows sit in the very
+        // columns the parent's rows do.
+        let detail = self
+            .profile
+            .detail(rules, self.show_hidden, fs.capabilities());
+
+        // Counted before the spawn, so a reload that finishes its top-level
+        // walk before this listing lands still knows the carried state has
+        // somewhere left to go. Every path out of the update below either
+        // decrements this or belongs to a generation that reset it.
+        self.pending_child_loads += 1;
 
         cx.spawn(async move |this, cx| {
-            let mut stream = fs.read_dir(&dir);
+            let mut stream = fs.read_dir(&dir, detail);
             let mut entries = Vec::new();
             while let Some(item) = stream.next().await {
                 match item {
@@ -101,15 +112,41 @@ impl Folder {
             entries.sort_unstable_by(|a, b| cmp_entries(a, b, rules));
 
             let _ = this.update(cx, |folder, cx| {
-                if folder.generation != generation || !folder.expanded.contains(&parent) {
-                    return; // Navigated away, or collapsed while loading.
+                if folder.generation != generation {
+                    return; // Navigated away; `start_loading` reset the count.
                 }
-                let ids = entries
+                folder.pending_child_loads -= 1;
+                if !folder.expanded.contains(&parent) {
+                    // Collapsed while loading. Nothing to splice in, but the
+                    // carried state may now have nothing else to wait for.
+                    folder.settle_carried();
+                    return;
+                }
+
+                let restoring = !folder.carried.is_empty();
+                let ids: Vec<EntryId> = entries
                     .into_iter()
-                    .map(|entry| folder.insert(entry, Placement::Nested))
+                    .map(|entry| {
+                        let path = entry.path.clone();
+                        let id = folder.insert(entry, Placement::Nested);
+                        // A selection, the cursor or a deeper open folder can
+                        // live in here rather than in the parent listing; this
+                        // is the only place those ever get resolved.
+                        if restoring {
+                            folder.restore_carried(id, &path);
+                        }
+                        id
+                    })
                     .collect();
                 folder.children.insert(parent, ids);
                 folder.rebuild_index_and_order();
+                if restoring {
+                    // A folder nested inside this one may have just been
+                    // marked open, and owes its own listing a read.
+                    folder.reload_expanded_children(cx);
+                    folder.recount_selection();
+                }
+                folder.settle_carried();
                 folder.start_metadata_backfill(cx);
                 folder.request_os_icons(cx);
                 cx.emit(FolderEvent::RowsChanged);

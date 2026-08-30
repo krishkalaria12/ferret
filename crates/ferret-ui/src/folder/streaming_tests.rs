@@ -121,3 +121,98 @@ async fn a_navigating_listing_attaches_no_watcher(cx: &mut gpui::TestAppContext)
 
     fs::remove_dir_all(&root).ok();
 }
+
+/// A refresh must not lose a selection that lives inside an expanded folder.
+///
+/// The top-level walk cannot resolve it — the row is in a child listing that
+/// is re-read afterwards — so the carried state has to outlive
+/// `finish_loading` and be settled only once those listings land.
+#[gpui::test]
+async fn a_reload_restores_state_carried_inside_expanded_children(cx: &mut gpui::TestAppContext) {
+    let root = std::env::temp_dir().join(format!(
+        "ferret-ui-carry-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // Two levels, so the reload has to re-open a folder it only learned was
+    // open while restoring the level above it.
+    fs::create_dir_all(root.join("sub/deep")).unwrap();
+    fs::write(root.join("top.txt"), b"x").unwrap();
+    fs::write(root.join("sub/nested.txt"), b"x").unwrap();
+    fs::write(root.join("sub/deep/buried.txt"), b"x").unwrap();
+
+    cx.update(|cx| cx.set_global(crate::state::load_state()));
+    let folder = cx.new(|_| {
+        Folder::new(
+            VfsPath::local(root.clone()),
+            SortRules::by_name(),
+            true,
+            ListingProfile::BROWSING,
+        )
+    });
+    folder.update(cx, |f, cx| f.start_loading(cx));
+    cx.executor().allow_parking();
+
+    let settle = |cx: &mut gpui::TestAppContext, want: usize| {
+        for _ in 0..600 {
+            cx.run_until_parked();
+            let ready = folder.read_with(cx, |f, _| !f.is_loading() && f.row_count() == want);
+            if ready {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let rows = folder.read_with(cx, |f, _| f.row_count());
+        panic!("expected {want} rows, settled at {rows}");
+    };
+
+    settle(cx, 2); // sub, top.txt
+
+    // Open both levels: sub, then deep.
+    folder.update(cx, |f, cx| assert!(f.toggle_expanded(0, cx)));
+    settle(cx, 4); // sub, deep, nested.txt, top.txt
+    folder.update(cx, |f, cx| assert!(f.toggle_expanded(1, cx)));
+    settle(cx, 5); // sub, deep, buried.txt, nested.txt, top.txt
+
+    // Select the row two levels down — the one nothing in the top-level
+    // walk can ever resolve.
+    let buried = VfsPath::local(root.join("sub/deep/buried.txt"));
+    let row = folder.read_with(cx, |f, _| f.row_of(&buried)).unwrap();
+    folder.update(cx, |f, _| f.select_only(row));
+    assert_eq!(folder.read_with(cx, |f, _| f.selection_count()), 1);
+
+    folder.update(cx, |f, cx| f.reload_preserving_state(cx));
+    settle(cx, 5);
+
+    // Both folders are open again...
+    assert_eq!(
+        folder.read_with(cx, |f, _| f.row_count()),
+        5,
+        "both expanded folders must be re-read"
+    );
+    // ...and the selection and cursor came back with them, on a row that
+    // only exists because the child listings were re-read.
+    assert_eq!(
+        folder.read_with(cx, |f, _| f.selection_count()),
+        1,
+        "a selection inside an expanded folder must survive a refresh"
+    );
+    assert_eq!(
+        folder.read_with(cx, |f, _| f.cursor_path()),
+        Some(buried.clone()),
+        "and so must the cursor"
+    );
+    assert!(
+        folder.read_with(cx, |f, _| f.row_of(&buried).is_some()),
+        "the carried row must be back on screen"
+    );
+    // Nothing is still waiting, so the carried state is released rather than
+    // pinned for the life of the listing.
+    assert!(folder.read_with(cx, |f, _| f.carried.is_empty()));
+    assert_eq!(folder.read_with(cx, |f, _| f.pending_child_loads), 0);
+
+    fs::remove_dir_all(&root).ok();
+}

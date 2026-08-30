@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ferret_settings::{SortKey, SortOrder};
 use ferret_vfs::config::METADATA_BATCH_SIZE;
-use ferret_vfs::{Entry, Vfs, VfsError, VfsPath, WatchEvent};
+use ferret_vfs::{Capabilities, Entry, ListingDetail, Vfs, VfsError, VfsPath, WatchEvent};
 use futures::StreamExt;
 use gpui::{Context, EventEmitter};
 use smol_str::SmolStr;
@@ -138,6 +138,39 @@ impl ListingProfile {
         watch: false,
         icons: true,
     };
+
+    /// What to ask the backend for, given what this listing will draw.
+    ///
+    /// `metadata: false` says nothing on screen shows a size or a date, which
+    /// is most of what makes the `stat` worth skipping — but not all of it.
+    /// Two other things ride on the same call, and either one silently changes
+    /// what the user sees:
+    ///
+    /// * **Ordering.** A sort by Size or Date over entries with no metadata is
+    ///   a sort over zeroes, and an ancestor column inherits the browsed
+    ///   folder's sort.
+    /// * **Hidden files.** On Unix the platform's flag lives in `st_flags`,
+    ///   so it comes from the same `stat`. `/` marks twelve of its entries
+    ///   `UF_HIDDEN` and nothing else hides them — an ancestor column that
+    ///   skipped the call would show `bin`, `etc`, `usr` and the rest beside a
+    ///   pane that hid them. Windows hands the attributes over with the name,
+    ///   so there it costs nothing either way.
+    ///
+    /// So the work is skipped only where its result cannot be observed. On
+    /// macOS with hidden files hidden — the default — that means an ancestor
+    /// column still pays for one `stat` per entry, in parallel on Ferret's
+    /// pool. Removing that last case needs `getattrlistbulk`, which returns
+    /// names and flags together; see `docs/audit.html`.
+    pub fn detail(self, rules: SortRules, show_hidden: bool, caps: Capabilities) -> ListingDetail {
+        let observable = self.metadata
+            || rules.key.needs_metadata()
+            || (!show_hidden && !caps.hidden_in_listing);
+        if observable {
+            ListingDetail::Full
+        } else {
+            ListingDetail::NamesOnly
+        }
+    }
 }
 
 /// The stable identity of one loaded entry within one [`Folder`] (D-36).
@@ -280,6 +313,15 @@ pub struct Folder {
     /// Identity to restore as the current listing arrives; see
     /// [`CarriedState`]. Empty except during a reload.
     carried: CarriedState,
+    /// Child listings still in flight.
+    ///
+    /// [`CarriedState`] cannot be discarded while this is non-zero. A selected
+    /// row, the cursor, or a deeper open folder can all live *inside* an
+    /// expanded folder, and none of them is resolvable from the top-level walk
+    /// — the listing that holds them is re-read afterwards, by
+    /// `reload_expanded_children`. Dropping the carried state when the parent
+    /// walk finished would lose every one of them.
+    pending_child_loads: usize,
 
     /// Bumps on every navigation/reload; background tasks check it before
     /// touching state, which is how stale walks cancel themselves.
@@ -316,6 +358,7 @@ impl Folder {
             anchor: None,
             cursor: None,
             carried: CarriedState::default(),
+            pending_child_loads: 0,
             generation: 0,
             watch: None,
             last_meta_notify: None,

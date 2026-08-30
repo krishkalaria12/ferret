@@ -55,6 +55,10 @@ impl Folder {
         self.by_name.clear();
         self.children.clear();
         self.expanded.clear();
+        // Child listings from the previous generation will see the bumped
+        // generation and drop their results without decrementing, so the
+        // count starts again rather than being adjusted.
+        self.pending_child_loads = 0;
         self.selection.clear();
         self.anchor = None;
         self.cursor = None;
@@ -69,6 +73,12 @@ impl Folder {
 
         let fs = cx.global::<crate::state::FerretState>().fs;
         let dir = self.dir.clone();
+        // An ancestor column draws an icon, a name and a chevron; asking for
+        // size and dates it will never show is a `stat` per entry for nothing
+        // (A-14). `detail` decides whether that is actually safe here.
+        let detail = self
+            .profile
+            .detail(self.rules, self.show_hidden, fs.capabilities());
 
         // Nothing else will wake the view once the delay passes — the whole
         // point of the hint is that no rows have arrived — so the deadline
@@ -84,7 +94,7 @@ impl Folder {
         .detach();
 
         cx.spawn(async move |this, cx| {
-            let mut stream = fs.read_dir(&dir);
+            let mut stream = fs.read_dir(&dir, detail);
             let mut first_error: Option<VfsError> = None;
 
             while let Some(item) = stream.next().await {
@@ -176,14 +186,28 @@ impl Folder {
         }
     }
 
+    /// Drop whatever the reload carried, once nothing can still resolve it.
+    ///
+    /// Anything left over names a path the new listing does not have — it was
+    /// deleted or renamed while we were away — so it is forgotten rather than
+    /// held for a row that will never arrive. The wait for
+    /// `pending_child_loads` is the whole point: a selected row inside an
+    /// expanded folder is only resolvable once that folder's listing lands,
+    /// which is several async hops after the top-level walk finished.
+    pub(super) fn settle_carried(&mut self) {
+        if self.pending_child_loads > 0 || self.carried.is_empty() {
+            return;
+        }
+        self.carried = CarriedState::default();
+    }
+
     fn finish_loading(&mut self, error: Option<VfsError>, cx: &mut Context<Self>) {
         self.loading = false;
         self.loading_since = None;
-        // Anything still carried names a path the new listing does not have:
-        // it was deleted or renamed while we were away, so it is forgotten
-        // rather than held for a row that will never arrive.
-        self.carried = CarriedState::default();
         if error.as_ref().is_some_and(VfsError::is_gone) {
+            // Nothing is coming back, so nothing can still resolve what the
+            // reload carried.
+            self.carried = CarriedState::default();
             self.error = Some(VfsError::NotFound {
                 path: self.dir.clone(),
             });
@@ -194,7 +218,11 @@ impl Folder {
         self.error = error;
         self.resort();
         self.attach_watch(cx);
+        // Before `settle_carried`, and that order is load-bearing: this is
+        // what raises `pending_child_loads` for the folders whose listings
+        // still owe the carried state a home.
         self.reload_expanded_children(cx);
+        self.settle_carried();
         self.start_metadata_backfill(cx);
         self.request_os_icons(cx);
         cx.emit(FolderEvent::LoadFinished);
