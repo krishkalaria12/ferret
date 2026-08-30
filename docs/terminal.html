@@ -1642,7 +1642,7 @@ loop {
       contains <span class="mono">hello</span> and that <span class="mono">red</span> carries
       SGR 31. No PTY, no UI. Then build it on Windows.</p>
       <ul>
-        <li>Pin <code>=0.2.1</code>. Record the Zig version and the Ghostty commit in <code>AGENTS.md</code>.</li>
+        <li>Pin the current <code>libghostty-rs</code> revision through <code>Cargo.lock</code>. Record the Zig version and Ghostty binding commit in the build documentation.</li>
         <li>Decide the vendoring question here: does CI install Zig, or do we check in a prebuilt static archive per target with checksums, as Paneflow does?</li>
         <li>Gate the crate behind a cargo feature so <code>cargo check -p ferret-vfs</code> stays toolchain-free for contributors who are not touching the terminal.</li>
       </ul>

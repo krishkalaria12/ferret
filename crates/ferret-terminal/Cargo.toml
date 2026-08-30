@@ -1,0 +1,18 @@
+[package]
+name = "ferret-terminal"
+description = "Ferret's GPUI-free terminal session and terminal-state engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+libghostty-vt = { workspace = true, optional = true }
+portable-pty.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["ghostty"]
+ghostty = ["dep:libghostty-vt"]

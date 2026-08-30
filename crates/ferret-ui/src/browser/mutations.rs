@@ -8,6 +8,27 @@
 use super::*;
 
 impl Browser {
+    pub(super) fn open_current_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.active().folder.read(cx).dir.clone();
+        let Some(local) = dir.as_local().map(Path::to_path_buf) else {
+            window.push_notification(
+                Notification::error("A system terminal can only open local folders."),
+                cx,
+            );
+            return;
+        };
+        let platform = cx.global::<FerretState>().platform.clone();
+        let window_handle = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            if let Err(err) = platform.open_in_terminal(&local).await {
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    window.push_notification(Notification::error(err.to_string()), cx);
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn open_with_default(
         &mut self,
         path: VfsPath,

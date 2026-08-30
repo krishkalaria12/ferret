@@ -135,6 +135,15 @@ impl Browser {
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
             .child(
+                Button::new("terminal-toggle")
+                    .with_size(px(TOOLBAR_BUTTON_SIZE))
+                    .icon(Icon::new(gpui_component::IconName::SquareTerminal))
+                    .tooltip("Toggle Terminal")
+                    .when(self.terminal_visible, |button| button.primary())
+                    .when(!self.terminal_visible, |button| button.ghost())
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))),
+            )
+            .child(
                 tool_button(
                     "theme",
                     if dark {
@@ -165,6 +174,8 @@ impl Browser {
                     .dropdown_menu(|menu, _, _| {
                         menu.menu("Select All", Box::new(actions::SelectAll))
                             .menu("Paste", Box::new(actions::Paste))
+                            .separator()
+                            .menu("Open in System Terminal", Box::new(actions::OpenInTerminal))
                             .separator()
                             .menu("Show Hidden Files", Box::new(actions::ToggleHidden))
                             .separator()

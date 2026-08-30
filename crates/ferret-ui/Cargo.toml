@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ferret-platform.workspace = true
 ferret-settings.workspace = true
+ferret-terminal.workspace = true
 ferret-vfs.workspace = true
 aho-corasick.workspace = true
 arc-swap.workspace = true

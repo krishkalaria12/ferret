@@ -23,12 +23,13 @@ mod schema;
 pub use errors::{Result, SettingsError, Warning};
 pub use folder_prefs::{FolderPrefs, FolderView};
 pub use schema::{
-    Appearance, Browser, Settings, Sidebar, SortKey, SortOrder, ThemeChoice, ViewMode,
+    Appearance, Browser, Settings, Sidebar, SortKey, SortOrder, Terminal, TerminalBackend,
+    ThemeChoice, ViewMode,
 };
 
 use config::{
-    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_SIDEBAR_WIDTH, MIN_FONT_SIZE, MIN_SIDEBAR_WIDTH,
-    SETTINGS_FILE,
+    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_SIDEBAR_WIDTH, MAX_TERMINAL_HEIGHT,
+    MIN_FONT_SIZE, MIN_SIDEBAR_WIDTH, MIN_TERMINAL_HEIGHT, SETTINGS_FILE,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -74,6 +75,7 @@ impl Settings {
             appearance: take_section(&mut root, "appearance", &mut warnings),
             browser: take_section(&mut root, "browser", &mut warnings),
             sidebar: take_section(&mut root, "sidebar", &mut warnings),
+            terminal: take_section(&mut root, "terminal", &mut warnings),
             // Whatever is left is from a version that knows more than this
             // one — or a `window`/`keymap` section from a version that had
             // them declared before D-41 removed them. Either way it is kept
@@ -126,6 +128,50 @@ impl Settings {
             ));
             self.sidebar.width = clamped;
         }
+        let height = self.terminal.height;
+        if !height.is_finite() || !(MIN_TERMINAL_HEIGHT..=MAX_TERMINAL_HEIGHT).contains(&height) {
+            let clamped = if height.is_finite() {
+                height.clamp(MIN_TERMINAL_HEIGHT, MAX_TERMINAL_HEIGHT)
+            } else {
+                Terminal::default().height
+            };
+            warnings.push(Warning::new(
+                "terminal.height",
+                format!(
+                    "{height} is outside the usable range \
+                     {MIN_TERMINAL_HEIGHT}–{MAX_TERMINAL_HEIGHT}."
+                ),
+                format!("Using {clamped}."),
+            ));
+            self.terminal.height = clamped;
+        }
+
+        let font_size = self.terminal.font_size;
+        if !font_size.is_finite() || !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&font_size) {
+            let clamped = if font_size.is_finite() {
+                font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+            } else {
+                Terminal::default().font_size
+            };
+            warnings.push(Warning::new(
+                "terminal.font_size",
+                format!("{font_size} is outside the usable range {MIN_FONT_SIZE}–{MAX_FONT_SIZE}."),
+                format!("Using {clamped}."),
+            ));
+            self.terminal.font_size = clamped;
+        }
+
+        if !self.terminal.line_height.is_finite()
+            || !(1.0..=2.0).contains(&self.terminal.line_height)
+        {
+            let value = self.terminal.line_height;
+            self.terminal.line_height = Terminal::default().line_height;
+            warnings.push(Warning::new(
+                "terminal.line_height",
+                format!("{value} is outside the usable range 1–2."),
+                format!("Using {}.", self.terminal.line_height),
+            ));
+        }
     }
 }
 
@@ -173,16 +219,20 @@ mod tests {
 
     #[test]
     fn unrecognised_keys_survive_a_round_trip() {
-        // A newer Ferret wrote `terminal`, and a nested key this version has
-        // never heard of. Opening in an older build must not delete either.
+        // A newer Ferret wrote a whole section this version has never heard
+        // of, and a nested key inside one it does know. Opening in this build
+        // must not delete either.
         let original = r#"{
-            "terminal": { "font_size": 12 },
+            "constellations": { "orion": true },
+            "terminal": { "font_size": 12, "future_option": true },
             "appearance": { "theme": "dark", "future_option": true }
         }"#;
         let (settings, _) = Settings::from_json(original);
+        assert_eq!(settings.terminal.font_size, 12.0, "the known key is read");
         let round_tripped = settings.to_json();
 
-        assert!(round_tripped.contains("terminal"), "{round_tripped}");
+        assert!(round_tripped.contains("constellations"), "{round_tripped}");
+        assert!(round_tripped.contains("orion"), "{round_tripped}");
         assert!(round_tripped.contains("future_option"), "{round_tripped}");
     }
 
@@ -235,6 +285,14 @@ mod tests {
         assert_eq!(settings.appearance.ui_font_size, MAX_FONT_SIZE);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].key, "appearance.ui_font_size");
+    }
+
+    #[test]
+    fn an_unusable_terminal_height_is_clamped_with_a_warning() {
+        let (settings, warnings) = Settings::from_json(r#"{ "terminal": { "height": 9000 } }"#);
+        assert_eq!(settings.terminal.height, MAX_TERMINAL_HEIGHT);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].key, "terminal.height");
     }
 
     #[test]

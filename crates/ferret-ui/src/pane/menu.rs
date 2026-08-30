@@ -65,6 +65,11 @@ impl FilePane {
             menu.item(PopupMenuItem::new("New Folder").action(Box::new(actions::NewFolder)))
                 .item(PopupMenuItem::new("New File").action(Box::new(actions::NewFile)))
                 .separator()
+                .item(
+                    PopupMenuItem::new("Open in Terminal")
+                        .action(Box::new(actions::OpenInTerminal)),
+                )
+                .separator()
                 .item(PopupMenuItem::new("Paste").action(Box::new(actions::Paste)))
                 .separator()
                 .submenu("Sort By", window, cx, move |sort_menu, _, _| {

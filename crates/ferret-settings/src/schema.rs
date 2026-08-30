@@ -43,6 +43,17 @@ pub enum ViewMode {
     Icons,
 }
 
+/// VT implementation used for newly created terminal sessions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBackend {
+    /// Prefer Ghostty and fall back once to Alacritty before the shell starts.
+    #[default]
+    Auto,
+    Ghostty,
+    Alacritty,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortKey {
@@ -175,6 +186,57 @@ impl Default for Sidebar {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Terminal {
+    /// Terminal engine selection. Existing sessions never switch engines.
+    pub backend: TerminalBackend,
+    /// Whether the docked panel is visible in a new window.
+    pub visible: bool,
+    /// Height in logical pixels. Clamped on load; see `config`.
+    pub height: f32,
+    /// Font family used for the grid. `None` selects the platform monospace.
+    pub font_family: Option<String>,
+    /// Grid font size in logical pixels, independent of the application UI.
+    pub font_size: f32,
+    /// Row height as a multiplier of `font_size`.
+    pub line_height: f32,
+    /// Terminal palette name.
+    pub palette: String,
+    /// Maximum number of retained off-screen rows.
+    pub scrollback_lines: usize,
+    /// Optional shell executable override.
+    pub shell: Option<PathBuf>,
+    /// Value exported as `TERM`.
+    pub term: String,
+    // `shell_integration` belongs here and is deliberately absent: nothing
+    // installs OSC 133 marks yet, and D-41 does not allow shipping a key in
+    // `default-settings.json` that no code reads. It returns with the feature.
+    /// Initial state of the directory-following toggle.
+    pub sync_default: bool,
+    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
+    pub unknown: Map<String, Value>,
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self {
+            backend: TerminalBackend::Auto,
+            visible: false,
+            height: 176.0,
+            font_family: None,
+            font_size: 13.0,
+            line_height: 1.2,
+            palette: "Groknight".into(),
+            scrollback_lines: 10_000,
+            shell: None,
+            term: "xterm-256color".into(),
+            sync_default: true,
+            unknown: Map::new(),
+        }
+    }
+}
+
 /// The whole settings file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -182,6 +244,7 @@ pub struct Settings {
     pub appearance: Appearance,
     pub browser: Browser,
     pub sidebar: Sidebar,
+    pub terminal: Terminal,
     /// Top-level sections this version does not know about, kept verbatim —
     /// which is what a `window` or `keymap` section in an existing file
     /// becomes. Those were removed rather than left declared and unread
