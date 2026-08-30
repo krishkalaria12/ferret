@@ -9,7 +9,9 @@ use crate::TerminalError;
 use crate::{ActiveTerminalBackend, Result, TerminalBackend, TerminalSnapshot};
 
 pub(super) trait TerminalEngine {
-    fn advance(&mut self, bytes: &[u8]);
+    /// Feed PTY output and return any bytes the terminal protocol requires us
+    /// to write back to the PTY.
+    fn advance(&mut self, bytes: &[u8]) -> Vec<Vec<u8>>;
     fn resize(&mut self, columns: u16, rows: u16, cell_width: u32, cell_height: u32) -> Result<()>;
     fn snapshot(&mut self) -> Result<TerminalSnapshot>;
 }
@@ -80,5 +82,51 @@ mod tests {
             ActiveTerminalBackend::Alacritty
         );
         assert!(select_backend(TerminalBackend::Ghostty).is_err());
+    }
+
+    #[cfg(feature = "ghostty")]
+    #[test]
+    fn backends_agree_on_core_vt_corpus() {
+        let corpus: &[&[u8]] = &[
+            b"plain text\r\nsecond line",
+            "wide: 界 emoji: 🙂\r\n".as_bytes(),
+            b"\x1b[31;1mred bold\x1b[0m \x1b[38;2;12;34;56mtruecolor\x1b[0m",
+            b"abc\x1b[2DZ\x1b[?1h",
+            b"\x1b[?1049halternate\x1b[?1049lprimary",
+        ];
+        for bytes in corpus {
+            let mut alacritty = alacritty::AlacrittyEngine::new(40, 4, 100);
+            let mut ghostty = ghostty::GhosttyEngine::new(40, 4, 100).unwrap();
+            alacritty.advance(bytes);
+            ghostty.advance(bytes);
+            let alacritty = alacritty.snapshot().unwrap();
+            let ghostty = ghostty.snapshot().unwrap();
+            assert_eq!(
+                visible_text(&alacritty),
+                visible_text(&ghostty),
+                "input: {bytes:?}"
+            );
+            assert_eq!(alacritty.cursor, ghostty.cursor, "input: {bytes:?}");
+            assert_eq!(
+                alacritty.application_cursor_keys, ghostty.application_cursor_keys,
+                "input: {bytes:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "ghostty")]
+    fn visible_text(snapshot: &TerminalSnapshot) -> Vec<String> {
+        snapshot
+            .rows
+            .iter()
+            .map(|row| {
+                row.runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
     }
 }

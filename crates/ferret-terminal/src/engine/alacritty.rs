@@ -1,8 +1,11 @@
-use alacritty_terminal::event::VoidListener;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape as AlacrittyCursorShape, NamedColor};
 
 use super::TerminalEngine;
@@ -29,10 +32,13 @@ impl Dimensions for Size {
 
 pub(super) struct AlacrittyEngine {
     parser: alacritty_terminal::vte::ansi::Processor,
-    term: Term<VoidListener>,
+    term: Term<AlacrittyListener>,
+    events: Rc<RefCell<Vec<Event>>>,
     generation: u64,
     columns: usize,
     rows: usize,
+    cell_width: u16,
+    cell_height: u16,
 }
 
 impl AlacrittyEngine {
@@ -45,25 +51,54 @@ impl AlacrittyEngine {
             scrolling_history: scrollback_lines,
             ..Config::default()
         };
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let listener = AlacrittyListener {
+            events: events.clone(),
+        };
         Self {
             parser: alacritty_terminal::vte::ansi::Processor::new(),
-            term: Term::new(config, &size, VoidListener),
+            term: Term::new(config, &size, listener),
+            events,
             generation: 0,
             columns: columns.into(),
             rows: rows.into(),
+            cell_width: 0,
+            cell_height: 0,
         }
     }
 }
 
 impl TerminalEngine for AlacrittyEngine {
-    fn advance(&mut self, bytes: &[u8]) {
+    fn advance(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         self.parser.advance(&mut self.term, bytes);
         self.generation = self.generation.wrapping_add(1);
+        let events: Vec<_> = self.events.borrow_mut().drain(..).collect();
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::PtyWrite(text) => Some(text.into_bytes()),
+                Event::ColorRequest(index, format) => {
+                    self.term.colors()[index].map(|color| format(color).into_bytes())
+                }
+                Event::TextAreaSizeRequest(format) => Some(
+                    format(WindowSize {
+                        num_lines: self.rows.min(u16::MAX as usize) as u16,
+                        num_cols: self.columns.min(u16::MAX as usize) as u16,
+                        cell_width: self.cell_width,
+                        cell_height: self.cell_height,
+                    })
+                    .into_bytes(),
+                ),
+                _ => None,
+            })
+            .collect()
     }
 
-    fn resize(&mut self, columns: u16, rows: u16, _: u32, _: u32) -> Result<()> {
+    fn resize(&mut self, columns: u16, rows: u16, cell_width: u32, cell_height: u32) -> Result<()> {
         self.columns = columns.into();
         self.rows = rows.into();
+        self.cell_width = cell_width.min(u32::from(u16::MAX)) as u16;
+        self.cell_height = cell_height.min(u32::from(u16::MAX)) as u16;
         self.term.resize(Size {
             columns: self.columns,
             rows: self.rows,
@@ -73,6 +108,7 @@ impl TerminalEngine for AlacrittyEngine {
     }
 
     fn snapshot(&mut self) -> Result<TerminalSnapshot> {
+        let application_cursor_keys = self.term.mode().contains(TermMode::APP_CURSOR);
         let content = self.term.renderable_content();
         let default_style = TerminalStyle {
             foreground: TerminalColor::Foreground,
@@ -127,8 +163,20 @@ impl TerminalEngine for AlacrittyEngine {
                 },
                 visible: content.cursor.shape != AlacrittyCursorShape::Hidden,
             },
+            application_cursor_keys,
             generation: self.generation,
         })
+    }
+}
+
+#[derive(Clone)]
+struct AlacrittyListener {
+    events: Rc<RefCell<Vec<Event>>>,
+}
+
+impl EventListener for AlacrittyListener {
+    fn send_event(&self, event: Event) {
+        self.events.borrow_mut().push(event);
     }
 }
 
@@ -207,5 +255,29 @@ mod tests {
             TerminalColor::Named(1)
         );
         assert!(snapshot.cursor.visible);
+    }
+
+    #[test]
+    fn terminal_queries_are_returned_to_the_pty() {
+        let mut engine = AlacrittyEngine::new(20, 3, 100);
+        let replies = engine.advance(b"\x1b[6n");
+        assert_eq!(replies, [b"\x1b[1;1R".to_vec()]);
+    }
+
+    #[test]
+    fn snapshot_tracks_application_cursor_mode() {
+        let mut engine = AlacrittyEngine::new(20, 3, 100);
+        engine.advance(b"\x1b[?1h");
+        assert!(engine.snapshot().unwrap().application_cursor_keys);
+        engine.advance(b"\x1b[?1l");
+        assert!(!engine.snapshot().unwrap().application_cursor_keys);
+    }
+
+    #[test]
+    fn text_area_queries_use_the_latest_grid_and_cell_size() {
+        let mut engine = AlacrittyEngine::new(20, 3, 100);
+        engine.resize(80, 24, 8, 16).unwrap();
+        let replies = engine.advance(b"\x1b[14t");
+        assert_eq!(replies, [b"\x1b[4;384;640t".to_vec()]);
     }
 }

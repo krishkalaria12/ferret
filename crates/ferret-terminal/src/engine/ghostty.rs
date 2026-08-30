@@ -1,6 +1,10 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
 use libghostty_vt::screen::CellWide;
-use libghostty_vt::style::{RgbColor, Underline};
+use libghostty_vt::style::{RgbColor, StyleColor, Underline};
+use libghostty_vt::terminal::Mode;
 use libghostty_vt::{RenderState, Terminal};
 
 use super::TerminalEngine;
@@ -15,6 +19,7 @@ pub(super) struct GhosttyEngine {
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
     generation: u64,
+    pty_writes: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 
 impl GhosttyEngine {
@@ -24,20 +29,29 @@ impl GhosttyEngine {
         terminal
             .set_scrollback_max_lines(Some(scrollback_lines))
             .map_err(|error| engine_error(error.to_string()))?;
+        let pty_writes = Rc::new(RefCell::new(Vec::new()));
+        let callback_writes = pty_writes.clone();
+        terminal
+            .on_pty_write(move |_terminal, bytes| {
+                callback_writes.borrow_mut().push(bytes.to_vec());
+            })
+            .map_err(|error| engine_error(error.to_string()))?;
         Ok(Self {
             terminal,
             render_state: RenderState::new().map_err(|error| engine_error(error.to_string()))?,
             rows: RowIterator::new().map_err(|error| engine_error(error.to_string()))?,
             cells: CellIterator::new().map_err(|error| engine_error(error.to_string()))?,
             generation: 0,
+            pty_writes,
         })
     }
 }
 
 impl TerminalEngine for GhosttyEngine {
-    fn advance(&mut self, bytes: &[u8]) {
+    fn advance(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         self.terminal.vt_write(bytes);
         self.generation = self.generation.wrapping_add(1);
+        self.pty_writes.borrow_mut().drain(..).collect()
     }
 
     fn resize(&mut self, columns: u16, rows: u16, cell_width: u32, cell_height: u32) -> Result<()> {
@@ -49,6 +63,10 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn snapshot(&mut self) -> Result<TerminalSnapshot> {
+        let application_cursor_keys = self
+            .terminal
+            .mode(Mode::DECCKM)
+            .map_err(|error| engine_error(error.to_string()))?;
         let snapshot = self
             .render_state
             .update(&self.terminal)
@@ -88,16 +106,11 @@ impl TerminalEngine for GhosttyEngine {
                     .style()
                     .map_err(|error| engine_error(error.to_string()))?;
                 let style = TerminalStyle {
-                    foreground: cell
-                        .fg_color()
-                        .map_err(|error| engine_error(error.to_string()))?
-                        .map(rgb)
-                        .unwrap_or(TerminalColor::Foreground),
-                    background: cell
-                        .bg_color()
-                        .map_err(|error| engine_error(error.to_string()))?
-                        .map(rgb)
-                        .unwrap_or(TerminalColor::Background),
+                    // Keep palette references symbolic so Ferret's active
+                    // palette, rather than Ghostty's built-in colors, owns the
+                    // final pixels. Direct RGB sequences remain literal.
+                    foreground: style_color(ghostty_style.fg_color, TerminalColor::Foreground),
+                    background: style_color(ghostty_style.bg_color, TerminalColor::Background),
                     bold: ghostty_style.bold,
                     dim: ghostty_style.faint,
                     italic: ghostty_style.italic,
@@ -135,6 +148,7 @@ impl TerminalEngine for GhosttyEngine {
                     _ => CursorShape::Block,
                 },
             },
+            application_cursor_keys,
             generation: self.generation,
         })
     }
@@ -145,6 +159,14 @@ fn rgb(color: RgbColor) -> TerminalColor {
         red: color.r,
         green: color.g,
         blue: color.b,
+    }
+}
+
+fn style_color(color: StyleColor, default: TerminalColor) -> TerminalColor {
+    match color {
+        StyleColor::None => default,
+        StyleColor::Palette(index) => TerminalColor::Indexed(index.0),
+        StyleColor::Rgb(color) => rgb(color),
     }
 }
 
@@ -197,5 +219,21 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert!(text.starts_with("界x"), "{text:?}");
+    }
+
+    #[test]
+    fn terminal_queries_are_returned_to_the_pty() {
+        let mut engine = GhosttyEngine::new(20, 3, 100).unwrap();
+        let replies = engine.advance(b"\x1b[6n");
+        assert_eq!(replies, [b"\x1b[1;1R".to_vec()]);
+    }
+
+    #[test]
+    fn snapshot_tracks_application_cursor_mode() {
+        let mut engine = GhosttyEngine::new(20, 3, 100).unwrap();
+        engine.advance(b"\x1b[?1h");
+        assert!(engine.snapshot().unwrap().application_cursor_keys);
+        engine.advance(b"\x1b[?1l");
+        assert!(!engine.snapshot().unwrap().application_cursor_keys);
     }
 }

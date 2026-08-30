@@ -63,6 +63,9 @@ impl TerminalSession {
         let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|error| {
             TerminalError::Io(std::io::Error::other(error.to_string()))
         })?));
+        engine
+            .send(EngineCommand::AttachWriter(writer.clone()))
+            .map_err(|_| engine_stopped())?;
         let reader_engine = engine.clone();
         thread::Builder::new()
             .name("ferret-terminal-reader".into())
@@ -156,6 +159,7 @@ impl TerminalSession {
 }
 
 enum EngineCommand {
+    AttachWriter(Arc<Mutex<Box<dyn Write + Send>>>),
     Advance(Vec<u8>),
     Resize {
         columns: u16,
@@ -212,10 +216,15 @@ fn spawn_engine(
             if initialized.send(Ok(backend)).is_err() {
                 return;
             }
+            let mut pty_writer: Option<Arc<Mutex<Box<dyn Write + Send>>>> = None;
             while let Ok(command) = receiver.recv() {
                 match command {
+                    EngineCommand::AttachWriter(writer) => pty_writer = Some(writer),
                     EngineCommand::Advance(bytes) => {
-                        engine.advance(&bytes);
+                        let replies = engine.advance(&bytes);
+                        if let Some(writer) = &pty_writer {
+                            write_engine_replies(writer, replies);
+                        }
                         if let Ok(next) = engine.snapshot() {
                             *worker_snapshot
                                 .write()
@@ -250,6 +259,26 @@ fn spawn_engine(
         ))
     })??;
     Ok((commands, snapshot, backend))
+}
+
+fn write_engine_replies(writer: &Arc<Mutex<Box<dyn Write + Send>>>, replies: Vec<Vec<u8>>) {
+    if replies.is_empty() {
+        return;
+    }
+    let mut writer = writer.lock().unwrap_or_else(|error| error.into_inner());
+    for reply in replies {
+        if writer.write_all(&reply).is_err() {
+            return;
+        }
+    }
+    let _ = writer.flush();
+}
+
+fn engine_stopped() -> TerminalError {
+    TerminalError::Io(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "terminal engine stopped",
+    ))
 }
 
 impl Drop for TerminalSession {

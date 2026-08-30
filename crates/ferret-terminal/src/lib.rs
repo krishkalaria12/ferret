@@ -53,6 +53,7 @@ pub enum ActiveTerminalBackend {
 pub struct TerminalSnapshot {
     pub rows: Vec<TerminalRow>,
     pub cursor: TerminalCursor,
+    pub application_cursor_keys: bool,
     pub generation: u64,
 }
 

@@ -387,10 +387,11 @@ impl Browser {
     }
 
     fn handle_terminal_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(bytes) = terminal_key_bytes(event) else {
+        let Some(session) = &self.terminal_session else {
             return;
         };
-        let Some(session) = &self.terminal_session else {
+        let Some(bytes) = terminal_key_bytes(event, session.snapshot().application_cursor_keys)
+        else {
             return;
         };
         if let Err(error) = session.write(&bytes) {
@@ -542,7 +543,10 @@ fn terminal_rgb(red: u8, green: u8, blue: u8) -> gpui::Hsla {
     .into()
 }
 
-fn terminal_key_bytes(event: &gpui::KeyDownEvent) -> Option<Vec<u8>> {
+fn terminal_key_bytes(
+    event: &gpui::KeyDownEvent,
+    application_cursor_keys: bool,
+) -> Option<Vec<u8>> {
     let key = event.keystroke.key.as_str();
     let modifiers = event.keystroke.modifiers;
 
@@ -569,6 +573,10 @@ fn terminal_key_bytes(event: &gpui::KeyDownEvent) -> Option<Vec<u8>> {
         "backspace" => "\x7f",
         "tab" => "\t",
         "escape" => "\x1b",
+        "up" if application_cursor_keys => "\x1bOA",
+        "down" if application_cursor_keys => "\x1bOB",
+        "right" if application_cursor_keys => "\x1bOC",
+        "left" if application_cursor_keys => "\x1bOD",
         "up" => "\x1b[A",
         "down" => "\x1b[B",
         "right" => "\x1b[C",
@@ -638,41 +646,55 @@ mod tests {
     #[test]
     fn printable_and_navigation_keys_are_encoded_for_the_pty() {
         assert_eq!(
-            terminal_key_bytes(&key("a", Some("a"), gpui::Modifiers::default())),
+            terminal_key_bytes(&key("a", Some("a"), gpui::Modifiers::default()), false),
             Some(b"a".to_vec())
         );
         assert_eq!(
-            terminal_key_bytes(&key("enter", None, gpui::Modifiers::default())),
+            terminal_key_bytes(&key("enter", None, gpui::Modifiers::default()), false),
             Some(b"\r".to_vec())
         );
         assert_eq!(
-            terminal_key_bytes(&key("left", None, gpui::Modifiers::default())),
+            terminal_key_bytes(&key("left", None, gpui::Modifiers::default()), false),
             Some(b"\x1b[D".to_vec())
+        );
+    }
+
+    #[test]
+    fn application_cursor_mode_uses_ss3_navigation_sequences() {
+        assert_eq!(
+            terminal_key_bytes(&key("left", None, gpui::Modifiers::default()), true),
+            Some(b"\x1bOD".to_vec())
         );
     }
 
     #[test]
     fn control_c_reaches_the_shell_but_command_shortcuts_do_not() {
         assert_eq!(
-            terminal_key_bytes(&key(
-                "c",
-                None,
-                gpui::Modifiers {
-                    control: true,
-                    ..Default::default()
-                },
-            )),
+            terminal_key_bytes(
+                &key(
+                    "c",
+                    None,
+                    gpui::Modifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                false
+            ),
             Some(vec![3])
         );
         assert_eq!(
-            terminal_key_bytes(&key(
-                "c",
-                None,
-                gpui::Modifiers {
-                    platform: true,
-                    ..Default::default()
-                },
-            )),
+            terminal_key_bytes(
+                &key(
+                    "c",
+                    None,
+                    gpui::Modifiers {
+                        platform: true,
+                        ..Default::default()
+                    },
+                ),
+                false
+            ),
             None
         );
     }
