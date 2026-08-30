@@ -105,6 +105,14 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-`", browser_actions::FocusTerminalOrPane, None),
         KeyBinding::new("cmd-shift-.", browser_actions::ToggleHidden, None),
         KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, OUTSIDE_TERMINAL),
+        // Commit (F-52). Not Cmd-K: that is "clear" in every terminal, and
+        // this window has one docked in it.
+        KeyBinding::new("cmd-shift-c", browser_actions::CommitChanges, None),
+        KeyBinding::new(
+            "ctrl-shift-c",
+            browser_actions::CommitChanges,
+            OUTSIDE_TERMINAL,
+        ),
         // Sync toggle, mirroring the panel's header control.
         KeyBinding::new("cmd-shift-s", browser_actions::ToggleTerminalSync, None),
         KeyBinding::new("ctrl-shift-s", browser_actions::ToggleTerminalSync, None),

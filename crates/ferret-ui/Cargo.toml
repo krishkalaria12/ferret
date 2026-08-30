@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ferret-git.workspace = true
 ferret-platform.workspace = true
 ferret-settings.workspace = true
 ferret-terminal.workspace = true

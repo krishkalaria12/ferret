@@ -442,6 +442,10 @@ impl Browser {
         self.active()
             .folder
             .update(cx, |f, cx| f.reload_preserving_state(cx));
+        // ⌘R means "show me what is actually there", which includes the git
+        // state — the listing's own reload would otherwise refresh the rows and
+        // leave last minute's badges on them.
+        self.request_git_refresh(cx);
     }
 
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {

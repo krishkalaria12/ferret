@@ -175,6 +175,8 @@ pub(super) struct ListDelegate {
     /// Size-to-content results, and the requests that produce them.
     pub(super) widths: ColumnWidths,
     pub(super) sizing_requests: SizeToContentQueue,
+    /// The browser's git snapshot (F-51). One atomic load per Name cell.
+    pub(super) git: GitHandle,
 }
 
 /// Columns whose edge was double-clicked, awaiting measurement.
@@ -198,6 +200,16 @@ impl ListDelegate {
 
     fn column_at(&self, col_ix: usize) -> FileColumn {
         self.layout().at(col_ix)
+    }
+
+    /// The row's git status, if the snapshot has one for it.
+    ///
+    /// One atomic load and one hash of a path already held by the entry: no
+    /// join, no format, no allocation. That is the whole of what Gate 7 asks
+    /// of this feature, and it is checked by `just budget`.
+    fn git_status(&self, entry: &ferret_vfs::Entry) -> Option<ferret_git::FileStatus> {
+        let path = entry.path.as_local()?;
+        self.git.load().status_for(path, entry.is_dir_like())
     }
 }
 
@@ -541,6 +553,14 @@ impl TableDelegate for ListDelegate {
                 } else {
                     cell.child(label)
                 };
+
+                // F-51: the dot sits after the name rather than before it, so
+                // a column of names stays left-aligned whether or not the
+                // folder is a repository — a badge in the leading position
+                // would indent every row the moment git had something to say.
+                if let Some(status) = self.git_status(&entry) {
+                    cell = cell.child(super::git_badge(status, entry.is_dir_like(), &palette));
+                }
 
                 // §9: a broken link names its dead target, because "broken
                 // link" without one is not something a person can act on.

@@ -37,6 +37,7 @@
 //! Run with `just budget`.
 
 use super::*;
+use crate::browser::{GitHandle, GitSnapshot};
 use crate::icons::FileIcons;
 use ferret_vfs::{EntryKind, Metadata};
 use gpui::AppContext as _;
@@ -52,6 +53,12 @@ const DIRECTORY_ROWS: usize = 20_000;
 /// Frames to average over.
 const FRAMES: usize = 20;
 
+/// One row in this many carries a git badge in the budget's repository.
+///
+/// Busier than most real trees, and deliberately: a lookup that missed on
+/// every row would exercise only the map's empty path.
+const CHANGED_EVERY: usize = 3;
+
 /// Heap allocations one visible row may cost per frame.
 ///
 /// Two are the Date and Size strings (see the module header). The third is
@@ -59,6 +66,28 @@ const FRAMES: usize = 20;
 /// per-row allocation. Anything O(the directory) lands orders of magnitude
 /// above this, which is the point — this is a tripwire, not a stopwatch.
 const ALLOCATIONS_PER_ROW: u64 = 3;
+
+/// A populated status snapshot over the same names `folder_of` generates.
+///
+/// Built by parsing real porcelain v2 rather than by hand, so the budget
+/// measures the index the application actually builds — including the
+/// absolute-path keys, which are what a row is looked up by.
+fn git_of(n: usize) -> GitHandle {
+    let mut output = b"# branch.head main\0".to_vec();
+    for i in (0..n).step_by(CHANGED_EVERY) {
+        output.extend_from_slice(
+            format!("1 .M N... 100644 100644 100644 aaaa bbbb file-{i:06}.txt\0").as_bytes(),
+        );
+    }
+    let status = ferret_git::RepoStatus::parse(&output, std::path::Path::new("/x"));
+    assert!(
+        status.index.tracked_len() > 0,
+        "the budget must run against a populated index, not an empty one"
+    );
+    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(GitSnapshot::from_status(
+        status, false,
+    )))
+}
 
 fn folder_of(n: usize) -> Folder {
     let mut f = Folder::new(
@@ -94,6 +123,7 @@ fn folder_of(n: usize) -> Folder {
 fn draw_rows(
     folder: &Folder,
     icons: &FileIcons,
+    git: &GitHandle,
     cx: &gpui::App,
     first: usize,
     count: usize,
@@ -121,6 +151,12 @@ fn draw_rows(
         // returns `None` and the row draws the bundled SVG — but the *key* is
         // built either way, which is the part that was allocating.
         sink += crate::icons::os_icon(&entry, cx).is_some() as usize;
+        // The git badge (F-51). One atomic load and one hash of a path the
+        // entry already owns — this must add nothing to the count, and Gate 7
+        // is the reason the check exists at all.
+        if let Some(path) = entry.path.as_local() {
+            sink += git.load().status_for(path, entry.is_dir_like()).is_some() as usize;
+        }
 
         // Date and Size — the two that legitimately allocate.
         if let Some(modified) = entry.metadata.and_then(|m| m.modified) {
@@ -139,6 +175,7 @@ async fn frame_allocation_budget(cx: &mut gpui::TestAppContext) {
 
     let mut folder = folder_of(DIRECTORY_ROWS);
     let icons = FileIcons::embedded();
+    let git = git_of(DIRECTORY_ROWS);
     assert_eq!(
         folder.selection_count(),
         DIRECTORY_ROWS,
@@ -149,13 +186,15 @@ async fn frame_allocation_budget(cx: &mut gpui::TestAppContext) {
 
     // Warm up: the first pass resolves lazily-initialised things that a real
     // app resolves before its first frame.
-    cx.update(|cx| std::hint::black_box(draw_rows(&folder, icons, cx, 0, VISIBLE_ROWS)));
+    cx.update(|cx| std::hint::black_box(draw_rows(&folder, icons, &git, cx, 0, VISIBLE_ROWS)));
 
     let before = dhat::HeapStats::get();
     for frame in 0..FRAMES {
         // Scroll, so no frame draws the same rows as the last.
         let first = (frame * VISIBLE_ROWS) % (DIRECTORY_ROWS - VISIBLE_ROWS);
-        cx.update(|cx| std::hint::black_box(draw_rows(&folder, icons, cx, first, VISIBLE_ROWS)));
+        cx.update(|cx| {
+            std::hint::black_box(draw_rows(&folder, icons, &git, cx, first, VISIBLE_ROWS))
+        });
 
         // And drag a marquee band across those rows while doing it: a
         // selection change per frame is what a drag actually does, and it is

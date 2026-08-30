@@ -115,7 +115,24 @@ impl FilePane {
             gpui::transparent_black()
         };
 
-        let tile_icon = entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx);
+        // The badge rides on the glyph rather than beside the label: a tile's
+        // label is centred and wraps to two lines, so anything appended to it
+        // moves with the text instead of staying where the eye expects it.
+        let tile_icon = match self.git_status(&entry) {
+            Some(status) => div()
+                .relative()
+                .flex_shrink_0()
+                .child(entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx))
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .right_0()
+                        .child(super::git_badge(status, entry.is_dir_like(), &palette)),
+                )
+                .into_any_element(),
+            None => entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx),
+        };
         let dragged: Arc<[VfsPath]> = if selected {
             self.folder.read(cx).selected_paths_shared()
         } else {

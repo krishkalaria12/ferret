@@ -36,6 +36,7 @@ use gpui_component::{
 };
 
 use crate::actions;
+use crate::browser::GitHandle;
 use crate::folder::{Folder, FolderEvent, ListingProfile};
 use crate::format::{format_date, format_size};
 use crate::state::FerretState;
@@ -110,6 +111,9 @@ pub struct FilePane {
     /// Latest known pane width, shared with the delegate so the Name column
     /// can absorb the spare width the way §4 demands.
     pane_width: Arc<AtomicUsize>,
+    /// The browser's git status snapshot, for the badge each view draws
+    /// (F-51). One atomic load per read; the browser swaps it per refresh.
+    git: GitHandle,
     typeahead: String,
     typeahead_at: std::time::Instant,
     /// The active inline rename, rendered as a small overlay editor.
@@ -160,6 +164,7 @@ impl FilePane {
         folder: gpui::Entity<Folder>,
         view_mode: ViewMode,
         hidden_columns: &[String],
+        git: GitHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -184,6 +189,7 @@ impl FilePane {
                 toggles: toggles.clone(),
                 widths: widths.clone(),
                 sizing_requests: sizing_requests.clone(),
+                git: git.clone(),
             };
             TableState::new(delegate, window, cx)
                 .col_selectable(false)
@@ -252,6 +258,7 @@ impl FilePane {
             anchor_chain_right: false,
             marquee: None,
             pane_width,
+            git,
             pane_origin: Arc::new(Mutex::new(gpui::point(px(0.), px(0.)))),
             space_menu: None,
             typeahead: String::new(),
@@ -286,6 +293,26 @@ impl FilePane {
 
     pub fn view_mode(&self) -> ViewMode {
         self.view_mode
+    }
+
+    /// Repaint the rows without changing anything about them.
+    ///
+    /// The git snapshot lives outside the pane's own state, so nothing here
+    /// notices when it is swapped — the browser calls this after a refresh.
+    /// The table needs its own notify: it is a separate entity, and notifying
+    /// only the pane leaves the listing drawing the previous badges.
+    pub fn repaint_rows(&self, cx: &mut Context<Self>) {
+        self.table.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    /// The git badge for one entry, or nothing.
+    ///
+    /// One atomic load and one hash of a borrowed path — no allocation, so
+    /// this is safe to call once per row per frame (Gate 7).
+    fn git_status(&self, entry: &ferret_vfs::Entry) -> Option<ferret_git::FileStatus> {
+        let path = entry.path.as_local()?;
+        self.git.load().status_for(path, entry.is_dir_like())
     }
 
     /// Hidden column keys for the settings file, in a stable order.
@@ -485,6 +512,45 @@ impl FilePane {
             self.table.update(cx, |t, cx| t.set_selected_row(row, cx));
         }
     }
+}
+
+/// Diameter of the git status dot on a file row (`docs/git.html` §7).
+pub(super) const GIT_BADGE_SIZE: f32 = 7.;
+/// …and on a directory, whose dot is a roll-up of what is beneath it rather
+/// than a fact about the directory itself.
+pub(super) const GIT_BADGE_DIR_SIZE: f32 = 6.;
+
+/// The git status dot (F-51).
+///
+/// A dot rather than a letter or a coloured filename. Colour on the name would
+/// fight the folder tint, which is the one place colour already carries meaning
+/// in the listing (`ui-base.html` §7); a letter at 11 px inside a 30 px row is
+/// a smudge. A directory's roll-up draws smaller and dimmer so it can be
+/// followed down a tree without competing with its children.
+pub(super) fn git_badge(
+    status: ferret_git::FileStatus,
+    is_dir: bool,
+    palette: &BrowserPalette,
+) -> gpui::AnyElement {
+    let size = if is_dir {
+        GIT_BADGE_DIR_SIZE
+    } else {
+        GIT_BADGE_SIZE
+    };
+    let fill = palette.git(status);
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(if is_dir { fill.opacity(0.7) } else { fill })
+        // Staged *and* edited again is the one state where both facts matter,
+        // so it draws as staged wearing the modified colour as a ring rather
+        // than taking a sixth token nobody could tell apart from the other five.
+        .when(status == ferret_git::FileStatus::StagedAndModified, |dot| {
+            dot.border_1().border_color(palette.git_modified)
+        })
+        .into_any_element()
 }
 
 /// One row's icon: the real Finder/Explorer one when it has been resolved,

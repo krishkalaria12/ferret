@@ -65,7 +65,31 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().size_full().child(self.browser.clone())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_component::Root;
+
+        // The fifth part of the bootstrap contract, and the one that had been
+        // missed. `Root::render` draws the mounted view, the tooltip overlay
+        // and the native-menu overlay — and nothing else. The dialog, sheet and
+        // notification layers are static builders the *application's* root has
+        // to mount, so without these three lines `window.open_dialog` stores a
+        // builder that is never called and `push_notification` queues a toast
+        // nobody ever sees. Both are silent at compile time and silent at
+        // runtime, which is exactly the failure mode `AGENTS.md` warns about.
+        //
+        // Siblings of the browser rather than children of it: each layer
+        // positions itself against the nearest positioned ancestor, which is
+        // why this container is `relative`.
+        let sheets = Root::render_sheet_layer(window, cx);
+        let dialogs = Root::render_dialog_layer(window, cx);
+        let notifications = Root::render_notification_layer(window, cx);
+
+        v_flex()
+            .relative()
+            .size_full()
+            .child(self.browser.clone())
+            .children(sheets)
+            .children(dialogs)
+            .children(notifications)
     }
 }

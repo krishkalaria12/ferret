@@ -163,6 +163,36 @@ pub struct BrowserPalette {
     pub selected_idle: Hsla,
     /// Folder glyph tint; the one place colour carries meaning in the listing.
     pub folder: Hsla,
+
+    // Git state (`docs/git.html` §9). `gpui-component` has no concept of any
+    // of these, which is what makes them this module's business rather than
+    // `cx.theme()`'s.
+    //
+    /// Changed in the work tree and not staged.
+    pub git_modified: Hsla,
+    /// Staged and ready to commit.
+    pub git_staged: Hsla,
+    /// Not in the index. Grey on purpose — new is not an alarm.
+    pub git_untracked: Hsla,
+    /// Unmerged. The only red in the listing.
+    pub git_conflicted: Hsla,
+    /// The branch chip's glyph and label.
+    pub git_branch: Hsla,
+}
+
+impl BrowserPalette {
+    /// The dot colour for one file status.
+    pub fn git(&self, status: ferret_git::FileStatus) -> Hsla {
+        use ferret_git::FileStatus::*;
+        match status {
+            Untracked => self.git_untracked,
+            // A staged file that has been edited again draws as staged and
+            // wears the modified colour as a ring, so it needs no sixth token.
+            Staged | StagedAndModified => self.git_staged,
+            Modified => self.git_modified,
+            Conflicted => self.git_conflicted,
+        }
+    }
 }
 
 impl BrowserPalette {
@@ -175,12 +205,28 @@ impl BrowserPalette {
                 selected: hex(0x2f6bd4),
                 selected_idle: hex(0x33333c),
                 folder: hex(0x5aa6ff),
+                // The Groknight yellow and green, deliberately: the terminal
+                // panel six pixels below is printing `git status` in exactly
+                // these, and two greens for one meaning in one window reads as
+                // sloppiness without ever being consciously noticed.
+                git_modified: hex(0xe0af68),
+                git_staged: hex(0x9ece6a),
+                git_untracked: hex(0x8b93a3),
+                git_conflicted: hex(0xf7768e),
+                git_branch: hex(0xa0aec0),
             }
         } else {
             Self {
                 selected: hex(0x0a6cff),
                 selected_idle: hex(0xe2e2e9),
                 folder: hex(0x4a9eff),
+                // Darkened against a white ground: the dark theme's values are
+                // tuned for a #141414 backdrop and wash out completely here.
+                git_modified: hex(0xb8860b),
+                git_staged: hex(0x2e7d32),
+                git_untracked: hex(0x6b7280),
+                git_conflicted: hex(0xc62828),
+                git_branch: hex(0x4a5568),
             }
         }
     }

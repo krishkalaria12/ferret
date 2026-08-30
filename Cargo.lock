@@ -1958,6 +1958,7 @@ dependencies = [
  "arc-swap",
  "dhat",
  "dirs",
+ "ferret-git",
  "ferret-platform",
  "ferret-settings",
  "ferret-terminal",

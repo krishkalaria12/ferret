@@ -37,8 +37,39 @@ impl Output {
         } else {
             text.to_string()
         };
-        cap(&text)
+        cap(&conclusion_first(&text))
     }
+}
+
+/// Move git's `fatal:` / `error:` line to the front, keeping every other line
+/// in order.
+///
+/// D-51 says git's message is shown unedited, and this does not edit it —
+/// nothing is dropped, reworded or summarised. It reorders, because git writes
+/// for a person reading a terminal top to bottom: a refused `pull --ff-only`
+/// prints eight `hint:` lines of advice *before* the one line that says what
+/// happened. In a toast that buries the answer, and the toast is the only place
+/// this text is ever seen.
+fn conclusion_first(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(at) = lines
+        .iter()
+        .position(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+    else {
+        return text.to_string();
+    };
+    if at == 0 {
+        return text.to_string();
+    }
+    let mut ordered = Vec::with_capacity(lines.len());
+    ordered.push(lines[at]);
+    ordered.extend(
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| (i != at).then_some(*line)),
+    );
+    ordered.join("\n")
 }
 
 /// Trim git's output to something a notification can hold without becoming a
@@ -270,5 +301,33 @@ mod tests {
             stderr: Vec::new(),
         };
         assert_eq!(quiet.message(), "nothing to commit, working tree clean");
+    }
+
+    #[test]
+    fn the_conclusion_leads_and_nothing_is_dropped() {
+        // A real refused `git pull --ff-only`: eight lines of advice, and the
+        // line that says what happened is last.
+        let refused = "hint: Diverging branches can't be fast-forwarded, you need to either:\n\
+                       hint:\n\
+                       hint: git merge --no-ff\n\
+                       fatal: Not possible to fast-forward, aborting.";
+        let message = conclusion_first(refused);
+        assert!(
+            message.starts_with("fatal: Not possible to fast-forward, aborting."),
+            "{message}"
+        );
+        // Every hint survives, in its original order, below the conclusion.
+        assert!(message.contains("hint: git merge --no-ff"));
+        assert_eq!(message.lines().count(), refused.lines().count());
+        assert_eq!(
+            message.lines().nth(1),
+            Some(refused.lines().next().unwrap())
+        );
+
+        // Already leading with it, or not naming one at all, is left alone.
+        let leading = "fatal: could not read Username\nhint: try again";
+        assert_eq!(conclusion_first(leading), leading);
+        let plain = "Everything up-to-date";
+        assert_eq!(conclusion_first(plain), plain);
     }
 }

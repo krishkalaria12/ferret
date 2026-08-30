@@ -57,7 +57,16 @@ impl Browser {
             cx.new(|_| Folder::new(dir.clone(), rules, show_hidden, ListingProfile::BROWSING));
         folder.update(cx, |f, cx| f.start_loading(cx));
 
-        let pane = cx.new(|cx| FilePane::new(folder.clone(), mode, &hidden_columns, window, cx));
+        let pane = cx.new(|cx| {
+            FilePane::new(
+                folder.clone(),
+                mode,
+                &hidden_columns,
+                self.git.handle(),
+                window,
+                cx,
+            )
+        });
 
         let mut subscriptions = vec![cx.subscribe_in(
             &pane,
@@ -74,10 +83,21 @@ impl Browser {
                 PaneEvent::ViewChanged => this.record_current_view(cx),
             },
         )];
-        // Listing progress repaints the status bar and title.
-        subscriptions.push(cx.subscribe_in(&folder, window, |_, _, _, _, cx| {
-            cx.notify();
-        }));
+        // Listing progress repaints the status bar and title — and is also the
+        // "something in this folder changed" signal git status needs
+        // (`docs/git.html` §5, trigger 2). Requests coalesce behind a debounce,
+        // so a streaming listing that emits one of these per batch still costs
+        // exactly one status read once it settles.
+        subscriptions.push(cx.subscribe_in(
+            &folder,
+            window,
+            |this, _, event: &FolderEvent, _, cx| {
+                if matches!(event, FolderEvent::RowsChanged | FolderEvent::LoadFinished) {
+                    this.request_git_refresh(cx);
+                }
+                cx.notify();
+            },
+        ));
 
         (folder, pane, mode, subscriptions)
     }
@@ -99,6 +119,7 @@ impl Browser {
         self.active = index;
         let directory = self.active().folder.read(cx).dir.clone();
         self.sync_terminal_to(&directory, cx);
+        self.git_follow(&directory, cx);
         cx.notify();
     }
 
@@ -141,6 +162,7 @@ impl Browser {
             state.set_value("", window, cx);
         });
         self.sync_terminal_to(&terminal_dir, cx);
+        self.git_follow(&terminal_dir, cx);
         cx.notify();
     }
 

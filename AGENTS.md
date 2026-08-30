@@ -19,6 +19,10 @@ product feature is implemented.
   the specification for the current phase of work.**
 - [`docs/plan.html`](docs/plan.html) — the whole product: 51 feature IDs, target
   architecture, platform hazards, decisions, phases.
+- [`docs/terminal.html`](docs/terminal.html) — Phase 2: the docked terminal and
+  directory sync.
+- [`docs/git.html`](docs/git.html) — Phase 5: the branch segment in the status
+  bar, per-file status in the listing, the commit dialog, pull and push.
 
 Phase 1 is the base and must be finished first; phases 2–9 are addons that plug into
 the completed shell. Read both documents before proposing structural work, and cite
@@ -120,6 +124,11 @@ base shippable.
 │   │   ├── src/theme.rs  # Terminal ANSI palette (interface colours come from gpui-component)
 │   │   ├── assets/icons/ # Bundled file icons (Material Icon Theme, MIT) + mapping
 │   │   └── themes/groknight.json
+│   ├── ferret-git/       # Repository discovery, status and operations
+│   │   ├── src/command.rs  # The only module that spawns git (D-44)
+│   │   ├── src/discover.rs # rev-parse --show-cdup --absolute-git-dir
+│   │   ├── src/status.rs   # porcelain v2 parser + the per-path status index
+│   │   └── src/ops.rs      # status, stage_all, commit, pull, push
 │   ├── ferret-settings/  # Settings schema and per-folder view preferences
 │   │   ├── src/schema.rs # The settings file's shape (D-21)
 │   │   ├── src/folder_prefs.rs  # Per-folder views, bounded LRU (D-16)
@@ -145,6 +154,7 @@ base shippable.
 | --- | --- | --- |
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
+| `crates/ferret-git` | `ferret-git` | Repository discovery, `git status` parsing and the four operations the status bar offers. Reaches git through the **git binary** (D-04), so the user's credential helper, SSH agent, hooks and config all keep working. Knows nothing about GPUI. See `docs/git.html`. |
 | `crates/ferret-settings` | `ferret-settings` | The settings schema and per-folder view preferences. Knows nothing about GPUI or the filesystem layer. Every key it ships is read by something, and a test enforces that (D-41). |
 | `crates/ferret-vfs` | `ferret-vfs` | The `Vfs` trait, the local backend, path handling. Knows nothing about GPUI. |
 | `xtask` | `xtask` | Development tasks: the performance fixture and the listing benchmark. |
@@ -154,7 +164,7 @@ application lifecycle code belongs in `ferret`; reusable visual behavior belongs
 in `ferret-ui`. Expose cross-crate APIs through the owning crate's `src/lib.rs`
 instead of reaching into private modules.
 
-More service crates arrive as features land (`ferret-terminal`, `ferret-git`, …).
+More service crates arrive as features land (`ferret-ops`, `ferret-search`, …).
 Do not create them speculatively — add one when the code that belongs in it
 exists. `ferret-core` is the same: the shared domain types currently live in
 `ferret-vfs` and move out when a second service crate needs them.
@@ -335,13 +345,22 @@ against the same constants the code uses, rather than restating them.
 
 ### The bootstrap contract
 
-`crates/ferret/src/main.rs` follows `gpui-component`'s required setup. All four
+`crates/ferret/src/main.rs` follows `gpui-component`'s required setup. All five
 parts are load-bearing; removing any one fails at runtime, not at compile time:
 
 1. `.with_assets(Assets)` on the application — supplies the SVGs behind `IconName`. Without it every icon renders blank.
 2. `gpui_component::init(cx)` inside `run` — must precede construction of any component type.
 3. The window opens from a spawned task, so the theme and assets are loaded before the first frame.
 4. The window's first entity is `Root::new(view, window, cx)` — it hosts the layers dialogs, popovers, notifications and tooltips render into. A dialog mounted under a non-`Root` window silently does not appear.
+5. `RootView::render` mounts `Root::render_dialog_layer`, `render_sheet_layer`
+   and `render_notification_layer` as siblings of the browser. Part 4 is
+   necessary and **not sufficient**: `Root::render` draws the mounted view, the
+   tooltip overlay and the native-menu overlay, and nothing else — the other
+   three layers are static builders the application's own root has to mount.
+   Without them `window.open_dialog` stores a builder that is never called and
+   `push_notification` queues a toast nobody ever sees. This was missing for the
+   whole of Phase 1, so every error toast the file operations pushed was
+   invisible; it was found while building the commit dialog.
 
 `cx.activate(true)` must run *after* `open_window`, inside the same task. Calling
 it earlier activates a windowless app and leaves Ferret behind whatever had focus.
