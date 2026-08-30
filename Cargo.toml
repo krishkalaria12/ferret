@@ -50,6 +50,7 @@ ferret-vfs = { path = "crates/ferret-vfs" }
 
 anyhow = "1"
 alacritty_terminal = { version = "=0.26.0", default-features = false }
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs" }
 async-trait = "0.1"
 async-channel = "2"
 dirs = "6"

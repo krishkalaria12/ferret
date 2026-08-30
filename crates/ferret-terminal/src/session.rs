@@ -1,12 +1,13 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 
-use crate::engine::Engine;
-use crate::{Result, TerminalError, TerminalOptions, TerminalSnapshot};
+use crate::engine;
+use crate::{ActiveTerminalBackend, Result, TerminalError, TerminalOptions, TerminalSnapshot};
 
 const DEFAULT_COLUMNS: u16 = 120;
 const DEFAULT_ROWS: u16 = 24;
@@ -14,7 +15,8 @@ const DEFAULT_ROWS: u16 = 24;
 /// One long-lived shell and its terminal state (D-28).
 pub struct TerminalSession {
     snapshot: Arc<RwLock<TerminalSnapshot>>,
-    engine: Arc<Mutex<Engine>>,
+    engine: Sender<EngineCommand>,
+    backend: ActiveTerminalBackend,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -22,6 +24,7 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     pub fn spawn(directory: &Path, options: &TerminalOptions) -> Result<Self> {
+        let (engine, snapshot, backend) = spawn_engine(options)?;
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -60,14 +63,7 @@ impl TerminalSession {
         let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|error| {
             TerminalError::Io(std::io::Error::other(error.to_string()))
         })?));
-        let engine = Arc::new(Mutex::new(Engine::new(
-            DEFAULT_COLUMNS as usize,
-            DEFAULT_ROWS as usize,
-            options.scrollback_lines,
-        )));
-        let snapshot = Arc::new(RwLock::new(TerminalSnapshot::default()));
         let reader_engine = engine.clone();
-        let reader_snapshot = snapshot.clone();
         thread::Builder::new()
             .name("ferret-terminal-reader".into())
             .spawn(move || {
@@ -76,9 +72,12 @@ impl TerminalSession {
                     if count == 0 {
                         break;
                     }
-                    let mut engine = reader_engine.lock().unwrap_or_else(|e| e.into_inner());
-                    engine.advance(&bytes[..count]);
-                    *reader_snapshot.write().unwrap_or_else(|e| e.into_inner()) = engine.snapshot();
+                    if reader_engine
+                        .send(EngineCommand::Advance(bytes[..count].to_vec()))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 let _ = child.wait();
             })
@@ -87,10 +86,15 @@ impl TerminalSession {
         Ok(Self {
             snapshot,
             engine,
+            backend,
             writer,
             master: pair.master,
             killer,
         })
+    }
+
+    pub fn backend(&self) -> ActiveTerminalBackend {
+        self.backend
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
@@ -127,11 +131,125 @@ impl TerminalSession {
                 pixel_height,
             })
             .map_err(|error| TerminalError::Io(std::io::Error::other(error.to_string())))?;
-        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        engine.resize(columns as usize, rows as usize);
-        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = engine.snapshot();
-        Ok(())
+        let (reply, response) = mpsc::channel();
+        self.engine
+            .send(EngineCommand::Resize {
+                columns,
+                rows,
+                cell_width: u32::from(pixel_width) / u32::from(columns.max(1)),
+                cell_height: u32::from(pixel_height) / u32::from(rows.max(1)),
+                reply,
+            })
+            .map_err(|_| {
+                TerminalError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "terminal engine stopped",
+                ))
+            })?;
+        response.recv().map_err(|_| {
+            TerminalError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "terminal engine stopped",
+            ))
+        })?
     }
+}
+
+enum EngineCommand {
+    Advance(Vec<u8>),
+    Resize {
+        columns: u16,
+        rows: u16,
+        cell_width: u32,
+        cell_height: u32,
+        reply: Sender<Result<()>>,
+    },
+}
+
+fn spawn_engine(
+    options: &TerminalOptions,
+) -> Result<(
+    Sender<EngineCommand>,
+    Arc<RwLock<TerminalSnapshot>>,
+    ActiveTerminalBackend,
+)> {
+    let (commands, receiver) = mpsc::channel();
+    let (initialized, initialization) = mpsc::channel();
+    let snapshot = Arc::new(RwLock::new(TerminalSnapshot::default()));
+    let worker_snapshot = snapshot.clone();
+    let requested = options.backend;
+    let scrollback_lines = options.scrollback_lines;
+    thread::Builder::new()
+        .name("ferret-terminal-engine".into())
+        .spawn(move || {
+            let selected = engine::select_backend(requested);
+            let created = selected.and_then(|backend| {
+                engine::create(backend, DEFAULT_COLUMNS, DEFAULT_ROWS, scrollback_lines)
+                    .map(|engine| (backend, engine))
+                    .or_else(|error| {
+                        if requested == crate::TerminalBackend::Auto
+                            && backend == ActiveTerminalBackend::Ghostty
+                        {
+                            engine::create(
+                                ActiveTerminalBackend::Alacritty,
+                                DEFAULT_COLUMNS,
+                                DEFAULT_ROWS,
+                                scrollback_lines,
+                            )
+                            .map(|engine| (ActiveTerminalBackend::Alacritty, engine))
+                        } else {
+                            Err(error)
+                        }
+                    })
+            });
+            let (backend, mut engine) = match created {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = initialized.send(Err(error));
+                    return;
+                }
+            };
+            if initialized.send(Ok(backend)).is_err() {
+                return;
+            }
+            while let Ok(command) = receiver.recv() {
+                match command {
+                    EngineCommand::Advance(bytes) => {
+                        engine.advance(&bytes);
+                        if let Ok(next) = engine.snapshot() {
+                            *worker_snapshot
+                                .write()
+                                .unwrap_or_else(|error| error.into_inner()) = next;
+                        }
+                    }
+                    EngineCommand::Resize {
+                        columns,
+                        rows,
+                        cell_width,
+                        cell_height,
+                        reply,
+                    } => {
+                        let result = engine
+                            .resize(columns, rows, cell_width, cell_height)
+                            .and_then(|()| engine.snapshot());
+                        let result = result.map(|next| {
+                            *worker_snapshot
+                                .write()
+                                .unwrap_or_else(|error| error.into_inner()) = next;
+                        });
+                        let _ = reply.send(result);
+                    }
+                }
+            }
+        })
+        .map_err(TerminalError::Io)?;
+    let backend = initialization.recv().map_err(|_| {
+        TerminalError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "terminal engine failed during startup",
+        ))
+    })??;
+    Ok((commands, snapshot, backend))
 }
 
 impl Drop for TerminalSession {

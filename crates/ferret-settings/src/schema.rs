@@ -38,6 +38,17 @@ pub enum ViewMode {
     Icons,
 }
 
+/// VT implementation used for newly created terminal sessions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBackend {
+    /// Prefer Ghostty and fall back once to Alacritty before the shell starts.
+    #[default]
+    Auto,
+    Ghostty,
+    Alacritty,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortKey {
@@ -178,6 +189,8 @@ impl Default for Sidebar {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Terminal {
+    /// Terminal engine selection. Existing sessions never switch engines.
+    pub backend: TerminalBackend,
     /// Whether the docked panel is visible in a new window.
     pub visible: bool,
     /// Height in logical pixels. Clamped on load; see `config`.
@@ -207,6 +220,7 @@ pub struct Terminal {
 impl Default for Terminal {
     fn default() -> Self {
         Self {
+            backend: TerminalBackend::Auto,
             visible: false,
             height: 176.0,
             font_family: None,

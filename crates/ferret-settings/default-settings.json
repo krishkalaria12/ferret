@@ -30,6 +30,7 @@
     "show_volumes": true
   },
   "terminal": {
+    "backend": "auto",
     "visible": false,
     "height": 176.0,
     "font_family": null,

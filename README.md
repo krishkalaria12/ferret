@@ -47,8 +47,11 @@ a partial file works and deleting it is always safe. See
 
 ## Build
 
-Requires a stable Rust toolchain (1.90+) and the native build tools GPUI needs on
-your platform. [`just`](https://github.com/casey/just) is optional.
+Requires a stable Rust toolchain (1.90+), Zig 0.16.x for the default Ghostty
+terminal engine, and the native build tools GPUI needs on your platform.
+[`just`](https://github.com/casey/just) is optional. A parser-only recovery build
+can use `cargo check -p ferret-terminal --no-default-features` to select the
+Alacritty fallback without Zig.
 
 ```sh
 just dev          # cargo run -p ferret

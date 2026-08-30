@@ -24,7 +24,7 @@ pub use errors::{Result, SettingsError, Warning};
 pub use folder_prefs::{FolderPrefs, FolderView};
 pub use schema::{
     Appearance, Browser, Keymap, RowDensity, Settings, Sidebar, SortKey, SortOrder, Terminal,
-    ThemeChoice, ViewMode, WindowSettings,
+    TerminalBackend, ThemeChoice, ViewMode, WindowSettings,
 };
 
 use config::{

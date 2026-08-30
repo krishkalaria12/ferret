@@ -9,5 +9,10 @@ repository.workspace = true
 
 [dependencies]
 alacritty_terminal.workspace = true
+libghostty-vt = { workspace = true, optional = true }
 portable-pty.workspace = true
 thiserror.workspace = true
+
+[features]
+default = ["ghostty"]
+ghostty = ["dep:libghostty-vt"]

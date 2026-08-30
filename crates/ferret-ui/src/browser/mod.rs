@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use ferret_platform::Place;
 use ferret_settings::{FolderView, SortKey, SortOrder, ThemeChoice, ViewMode};
 use ferret_terminal::{
-    CursorShape, TerminalColor, TerminalOptions, TerminalRun, TerminalSession, TerminalStyle,
+    CursorShape, TerminalBackend, TerminalColor, TerminalOptions, TerminalRun, TerminalSession,
+    TerminalStyle,
 };
 use ferret_vfs::{Vfs as _, VfsPath};
 use gpui::{

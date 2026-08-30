@@ -73,6 +73,11 @@ impl Browser {
             shell: settings.shell.clone(),
             term: settings.term.clone(),
             scrollback_lines: settings.scrollback_lines,
+            backend: match settings.backend {
+                ferret_settings::TerminalBackend::Auto => TerminalBackend::Auto,
+                ferret_settings::TerminalBackend::Ghostty => TerminalBackend::Ghostty,
+                ferret_settings::TerminalBackend::Alacritty => TerminalBackend::Alacritty,
+            },
         };
         match TerminalSession::spawn(local, &options) {
             Ok(session) => {

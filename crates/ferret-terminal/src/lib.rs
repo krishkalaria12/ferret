@@ -20,6 +20,7 @@ pub struct TerminalOptions {
     pub shell: Option<PathBuf>,
     pub term: String,
     pub scrollback_lines: usize,
+    pub backend: TerminalBackend,
 }
 
 impl Default for TerminalOptions {
@@ -28,8 +29,23 @@ impl Default for TerminalOptions {
             shell: None,
             term: "xterm-256color".into(),
             scrollback_lines: 10_000,
+            backend: TerminalBackend::Auto,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalBackend {
+    #[default]
+    Auto,
+    Ghostty,
+    Alacritty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveTerminalBackend {
+    Ghostty,
+    Alacritty,
 }
 
 /// An owned view of the visible terminal grid.
