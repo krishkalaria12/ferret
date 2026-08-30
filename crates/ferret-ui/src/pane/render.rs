@@ -8,18 +8,25 @@ impl Render for FilePane {
         // The slow-click timer has no window to focus an editor with, so it
         // leaves the request here and the next frame starts the rename.
         if let Some(path) = self.pending_rename.take() {
-            self.begin_rename(path, window, cx);
+            if self.folder.read(cx).has_entry(&path) {
+                self.begin_rename(path, window, cx);
+            } else {
+                // The filesystem action completed before its watcher event.
+                // Keep the request; `RowsChanged` will re-render this pane
+                // when the new row becomes available.
+                self.pending_rename = Some(path);
+            }
         }
         // Drops arrive from row listeners that cannot reach the browser; this
         // is where they become an event it can act on.
-        if let Some(row) = self.toggles.lock().unwrap().take() {
+        if let Some(row) = self.toggles.lock().take() {
             self.folder.update(cx, |f, cx| f.toggle_expanded(row, cx));
         }
-        let sizing: Vec<FileColumn> = std::mem::take(&mut self.sizing_requests.lock().unwrap());
+        let sizing: Vec<FileColumn> = std::mem::take(&mut self.sizing_requests.lock());
         for column in sizing {
             self.size_column_to_content(column, window, cx);
         }
-        if let Some(drop) = self.drops.lock().unwrap().take() {
+        if let Some(drop) = self.drops.lock().take() {
             cx.emit(PaneEvent::DropPaths {
                 sources: drop.sources,
                 dest: drop.dest,
@@ -87,11 +94,20 @@ impl Render for FilePane {
                 queue_drop(&pane_drops, dragged, pane_dir.clone(), window);
             })
             .on_prepaint(move |bounds, _, _| {
-                *origin.lock().unwrap() = bounds.origin;
+                *origin.lock() = bounds.origin;
             })
             .on_key_down(cx.listener(Self::handle_typeahead))
-            .on_action(cx.listener(|this, _: &actions::Open, _, cx| {
-                this.open_selection(cx);
+            // `settings.browser.enter_opens`. Ferret opens on Enter by
+            // default on both platforms and renames on F2; Finder renames on
+            // Enter, and people with that muscle memory can have it back.
+            // F2 keeps working either way — this changes what *Enter* does,
+            // not what rename is bound to.
+            .on_action(cx.listener(|this, _: &actions::Open, window, cx| {
+                if cx.global::<FerretState>().settings.browser.enter_opens {
+                    this.open_selection(cx);
+                } else if let Some(path) = this.folder.read(cx).cursor_path() {
+                    this.begin_rename(path, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &actions::Rename, window, cx| {
                 let target = this.folder.read(cx).cursor_path();

@@ -43,12 +43,17 @@ impl FilePane {
         self.ancestors.clear();
         self.anchor_chain_right = true;
 
-        let (dir, sort_key, sort_order, show_hidden) = self.folder.read_with(cx, |f, _| {
-            (f.dir.clone(), f.sort_key(), f.sort_order(), f.show_hidden())
-        });
+        let (dir, rules, show_hidden) = self
+            .folder
+            .read_with(cx, |f, _| (f.dir.clone(), f.rules(), f.show_hidden()));
 
         for (parent, on_path) in ancestor_chain(&dir, MAX_ANCESTOR_COLUMNS) {
-            let folder = cx.new(|_| Folder::new(parent, sort_key, sort_order, show_hidden));
+            // Navigating, not browsing: an ancestor column draws an icon, a
+            // name and a chevron, and is thrown away when column view is left.
+            // It has no Size or Date column to fill, and nothing is edited in
+            // it, so it pays for neither (A-14).
+            let folder =
+                cx.new(|_| Folder::new(parent, rules, show_hidden, ListingProfile::NAVIGATING));
             folder.update(cx, |f, cx| f.start_loading(cx));
             let scroll = gpui::UniformListScrollHandle::new();
             // Repaint as each ancestor's rows land, and bring the on-path
@@ -305,7 +310,7 @@ impl FilePane {
                     .text_size(px(ROW_FONT_SIZE))
                     .text_color(text)
                     .when(broken, |label| label.line_through())
-                    .child(entry.name.clone()),
+                    .child(gpui::SharedString::new(entry.name())),
             )
             .when(entry.is_dir_like(), |row| {
                 row.child(
@@ -325,14 +330,7 @@ impl FilePane {
         let theme = cx.theme();
         let (count, size, selected_entry) = self.folder.read_with(cx, |folder, _| {
             let count = folder.selection_count();
-            let entry = (count == 1)
-                .then(|| folder.selected_paths().first().cloned())
-                .flatten()
-                .and_then(|path| {
-                    (0..folder.row_count())
-                        .find_map(|row| folder.entry_at(row).filter(|e| e.path == path))
-                        .cloned()
-                });
+            let entry = folder.selected_entry().cloned();
             (count, folder.selection_size(), entry)
         });
 
@@ -377,7 +375,7 @@ impl FilePane {
                     .text_size(px(12.5))
                     .text_center()
                     .text_color(theme.foreground)
-                    .child(entry.name.clone()),
+                    .child(gpui::SharedString::new(entry.name())),
             )
             .child(
                 div()
@@ -441,20 +439,13 @@ mod tests {
     use ferret_vfs::{Entry, EntryKind, Metadata};
 
     fn entry(name: &str, kind: EntryKind, len: u64) -> Entry {
-        Entry {
-            path: VfsPath::local(format!("/x/{name}")),
-            name: name.to_string(),
-            kind,
-            metadata: Some(Metadata {
-                len,
-                modified: Some(
-                    std::time::SystemTime::UNIX_EPOCH
-                        + std::time::Duration::from_secs(1_756_000_000),
-                ),
-                ..Default::default()
-            }),
-            link_target: None,
-        }
+        Entry::new(VfsPath::local(format!("/x/{name}")), name, kind).with_metadata(Some(Metadata {
+            len,
+            modified: Some(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_756_000_000),
+            ),
+            ..Default::default()
+        }))
     }
 
     #[test]

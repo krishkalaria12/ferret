@@ -2,18 +2,111 @@
 //! visible at all.
 //!
 //! Both re-derive the display order rather than moving rows, which is what
-//! lets a path-keyed selection survive them (see the module header).
+//! lets an id-keyed selection survive them (see the module header).
+
+use aho_corasick::AhoCorasick;
+use rayon::slice::ParallelSliceMut as _;
 
 use super::*;
+
+/// How the listing is ordered: the key and direction the user picked, plus
+/// the two `settings.browser` rules that shape every comparison.
+///
+/// A struct rather than four parameters because `cmp_entries` is called from
+/// five places and two of them are inside a comparator closure, where an extra
+/// pair of positional `bool`s is exactly the kind of thing that gets swapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SortRules {
+    pub key: SortKey,
+    pub order: SortOrder,
+    /// `settings.browser.directories_first`. Folders sort above files whatever
+    /// the key is; off, they interleave.
+    pub directories_first: bool,
+    /// `settings.browser.natural_sort`. `file10` after `file9` rather than
+    /// before it; off, names compare byte-wise, case-insensitively.
+    pub natural: bool,
+}
+
+impl SortRules {
+    /// Name ascending, with both `settings.browser` rules on — the shipped
+    /// defaults.
+    ///
+    /// Only the tests use it: every real caller has a `Settings` to read, and
+    /// one that invented defaults instead would be the bug D-41 is about. It
+    /// lives here rather than in a test module so the defaults are stated
+    /// beside the type they belong to.
+    #[cfg(test)]
+    pub fn by_name() -> Self {
+        Self {
+            key: SortKey::Name,
+            order: SortOrder::Ascending,
+            directories_first: true,
+            natural: true,
+        }
+    }
+
+    /// The rules with a different key and direction, everything else kept.
+    pub(super) fn with_sort(self, key: SortKey, order: SortOrder) -> Self {
+        Self { key, order, ..self }
+    }
+}
+
+/// Above this many entries, sorting goes parallel.
+///
+/// A 200,000-entry directory is ~3.4 million comparisons and is embarrassingly
+/// parallel; a few thousand is not worth waking a pool for. The threshold is a
+/// guess at where the hand-off stops costing more than the sort — it is safe
+/// to be wrong by a factor of two in either direction.
+const PARALLEL_SORT_THRESHOLD: usize = 20_000;
+
+/// The inline name filter, compiled once per keystroke.
+///
+/// The needle is kept because the empty state names it back ("No items match
+/// «x»"); the matcher is what runs. Filtering used to lowercase the needle
+/// *and* every name into fresh `String`s once per entry — roughly 400,000
+/// allocations for one keystroke on a large directory, and the field fires on
+/// every keystroke (A-13).
+pub(super) struct NameFilter {
+    needle: String,
+    /// `None` when the needle is not ASCII. `ascii_case_insensitive` folds
+    /// only ASCII, so a needle containing `Ä` would silently stop matching
+    /// `ärger`, which is a behaviour change and not a speed-up. Those fall
+    /// back to the old lowercase-both-sides path, which is correct and rare.
+    matcher: Option<AhoCorasick>,
+}
+
+impl NameFilter {
+    pub(super) fn new(needle: String) -> Self {
+        let matcher = needle.is_ascii().then(|| {
+            AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build([needle.as_bytes()])
+                .expect("a single pattern always builds")
+        });
+        Self { needle, matcher }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match &self.matcher {
+            // SIMD, over the name's bytes, with no allocation on either side.
+            Some(matcher) => matcher.is_match(name),
+            None => name.to_lowercase().contains(&self.needle.to_lowercase()),
+        }
+    }
+
+    pub(super) fn needle(&self) -> &str {
+        &self.needle
+    }
+}
 
 impl Folder {
     // ------------------------------------------------------------------
     // Sorting and filtering
 
     pub fn set_sort(&mut self, key: SortKey, order: SortOrder) {
-        let changed = self.sort_key != key || self.sort_order != order;
-        self.sort_key = key;
-        self.sort_order = order;
+        let next = self.rules.with_sort(key, order);
+        let changed = next != self.rules;
+        self.rules = next;
         if changed && !self.loading {
             self.resort();
         }
@@ -21,10 +114,11 @@ impl Folder {
 
     #[allow(dead_code)]
     pub fn toggle_sort_order(&mut self) {
-        self.sort_order = match self.sort_order {
+        let flipped = match self.rules.order {
             SortOrder::Ascending => SortOrder::Descending,
             SortOrder::Descending => SortOrder::Ascending,
         };
+        self.rules = self.rules.with_sort(self.rules.key, flipped);
         if !self.loading {
             self.resort();
         }
@@ -40,9 +134,9 @@ impl Folder {
         }
     }
 
-    #[allow(dead_code)] // the inline filter box arrives with view modes
     pub fn set_filter(&mut self, filter: Option<String>) {
-        self.filter = filter;
+        // Built once here, not once per entry: this is the whole of A-13.
+        self.filter = filter.map(NameFilter::new);
         if !self.loading {
             self.rebuild_order();
         }
@@ -78,16 +172,26 @@ impl Folder {
     }
 
     /// Select a set of display rows (marquee selection).
+    ///
+    /// This is the hot one: it runs on every mouse-move while a band is being
+    /// dragged. It counts as it goes, so the cost is the size of the band
+    /// rather than the size of the directory (A-29).
     pub fn select_rows(&mut self, rows: impl IntoIterator<Item = usize>) {
         self.selection.clear();
+        self.selected_visible_count = 0;
+        self.selected_visible_bytes = 0;
         for row in rows {
-            if let Some(e) = self.entry_at(row) {
-                self.selection.insert(e.path.clone());
+            if let Some(id) = self.id_at(row)
+                && self.selection.insert(id)
+            {
+                self.selected_visible_count += 1;
+                self.selected_visible_bytes += self.row_weight(id);
             }
         }
-        if let Some(last) = self.selection.iter().next().cloned() {
-            self.anchor = Some(last);
+        if let Some(first) = self.selection.iter().next().copied() {
+            self.anchor = Some(first);
         }
+        self.invalidate_selected_paths();
     }
 
     /// Type-ahead: select the first row at or after `from` whose name starts
@@ -97,12 +201,11 @@ impl Folder {
         if n == 0 || prefix.is_empty() {
             return false;
         }
-        let prefix = prefix.to_lowercase();
         for step in 0..n {
             let row = (from + step) % n;
             let matches = self
                 .entry_at(row)
-                .is_some_and(|e| e.name.to_lowercase().starts_with(&prefix));
+                .is_some_and(|e| crate::format::starts_with_ignore_case(e.name(), prefix));
             if matches {
                 self.select_only(row);
                 return true;
@@ -112,8 +215,27 @@ impl Folder {
     }
 
     pub(super) fn resort(&mut self) {
-        let (key, order) = (self.sort_key, self.sort_order);
-        self.entries.sort_by(|a, b| cmp_entries(a, b, key, order));
+        let rules = self.rules;
+        // Taken out so the comparator can read the slab while the id vector is
+        // mutable. Sorting now permutes `u32`s, not `Entry`s.
+        let mut ids = std::mem::take(&mut self.entries);
+        // The comparator closes over the slab rather than over `self`: a
+        // `Folder` holds GPUI tasks and is not `Sync`, but a slice of entries
+        // is. Unstable, because the comparator ends in a name tiebreak and
+        // names are unique within one directory — so the order is total and
+        // stability buys nothing but an n/2 scratch buffer.
+        let slab: &[Option<Entry>] = &self.slab;
+        if ids.len() >= PARALLEL_SORT_THRESHOLD {
+            // On Ferret's pool, not rayon's global one: a bare `par_sort`
+            // would spin up a second pool alongside the one the listing walk
+            // uses (`ferret_vfs::pool`).
+            ferret_vfs::pool::install(|| {
+                ids.par_sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, rules))
+            });
+        } else {
+            ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, rules));
+        }
+        self.entries = ids;
         self.rebuild_index_and_order();
     }
 
@@ -122,133 +244,135 @@ impl Folder {
         self.rebuild_index_and_order();
     }
 
+    /// [`cmp_slots`] against this folder's own slab.
+    pub(super) fn cmp_ids(&self, a: EntryId, b: EntryId) -> std::cmp::Ordering {
+        cmp_slots(&self.slab, a, b, self.rules)
+    }
+
+    /// Where `id` belongs in the sorted top-level listing.
+    ///
+    /// Used for watcher inserts, which have to land in place without
+    /// consulting an index that earlier inserts in the same batch invalidated.
+    pub(super) fn sorted_position(&self, id: EntryId) -> usize {
+        self.entries
+            .partition_point(|&other| self.cmp_ids(other, id) == std::cmp::Ordering::Less)
+    }
+
     /// Flatten the listing — and the listings of any expanded folders —
     /// into the display order the table renders.
+    ///
+    /// This runs on every watcher burst, so it does no heap allocation in the
+    /// steady state: the row vector and the row index are reused in place and
+    /// keep their capacity, and both are keyed on `u32`s rather than on cloned
+    /// paths (A-05, D-36).
     pub(super) fn rebuild_index_and_order(&mut self) {
-        let mut order = Vec::with_capacity(self.entries.len());
-        for ix in 0..self.entries.len() {
-            let entry = &self.entries[ix];
-            let path = entry.path.clone();
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
 
+        for ix in 0..self.entries.len() {
+            let id = self.entries[ix];
+            let mark = order.len();
+            order.push(Row { id, depth: 0 });
+            self.push_expanded_children(id, 1, &mut order);
             // A folder whose subtree contains a match stays visible even when
-            // its own name does not match — otherwise the filter would hide
-            // the only route to a row it just told the user exists.
-            let mut subtree = Vec::new();
-            self.push_expanded_children(&path, 1, &mut subtree);
-            if !self.is_visible(entry) && subtree.is_empty() {
-                continue;
+            // its own name does not — otherwise the filter would hide the only
+            // route to a row it just told the user exists.
+            let has_visible_subtree = order.len() > mark + 1;
+            if !has_visible_subtree && !self.is_visible_id(id) {
+                order.truncate(mark);
             }
-            order.push(Row {
-                source: RowSource::Top(ix),
-                depth: 0,
-            });
-            order.append(&mut subtree);
         }
         self.order = order;
 
-        self.row_of_path.clear();
-        self.top_index.clear();
-        self.known_paths.clear();
-        for (ix, entry) in self.entries.iter().enumerate() {
-            self.top_index.insert(entry.path.clone(), ix);
+        let mut row_of_id = std::mem::take(&mut self.row_of_id);
+        row_of_id.clear();
+        for (row, entry) in self.order.iter().enumerate() {
+            row_of_id.insert(entry.id, row);
         }
-        for (row, source) in self.order.iter().map(|r| r.source.clone()).enumerate() {
-            if let Some(entry) = self.entry_for(&source) {
-                self.row_of_path.insert(entry.path.clone(), row);
-            }
-        }
-        for entry in self.entries.iter().chain(self.children.values().flatten()) {
-            self.known_paths.insert(entry.path.clone());
-        }
-        self.prune_stale_paths();
+        self.row_of_id = row_of_id;
+
+        self.recount_selection();
     }
 
     /// Splice one expanded folder's visible children in beneath it, and
     /// theirs beneath them.
-    fn push_expanded_children(&self, parent: &VfsPath, depth: u16, order: &mut Vec<Row>) {
-        if !self.expanded.contains(parent) {
+    fn push_expanded_children(&self, parent: EntryId, depth: u16, order: &mut Vec<Row>) {
+        if !self.expanded.contains(&parent) {
             return;
         }
-        let Some(children) = self.children.get(parent) else {
+        let Some(children) = self.children.get(&parent) else {
             return; // Expanded but still loading.
         };
-        for (ix, child) in children.iter().enumerate() {
-            let mut subtree = Vec::new();
-            self.push_expanded_children(&child.path, depth + 1, &mut subtree);
-            if !self.is_visible(child) && subtree.is_empty() {
-                continue;
+        for &id in children {
+            let mark = order.len();
+            order.push(Row { id, depth });
+            self.push_expanded_children(id, depth + 1, order);
+            if order.len() == mark + 1 && !self.is_visible_id(id) {
+                order.truncate(mark);
             }
-            order.push(Row {
-                source: RowSource::Child {
-                    parent: parent.clone(),
-                    ix,
-                },
-                depth,
-            });
-            order.append(&mut subtree);
         }
     }
 
-    /// A loaded entry by path, wherever it lives — the browsed listing or an
-    /// expanded folder's.
-    ///
-    /// Indexed through `top_index`, never `row_of_path`: a display row is not
-    /// an entry index once rows can be filtered or nested.
-    pub(super) fn entry_mut(&mut self, path: &VfsPath) -> Option<&mut Entry> {
-        if let Some(ix) = self.top_index.get(path).copied() {
-            return self.entries.get_mut(ix);
-        }
-        let parent = path.parent()?;
-        let children = self.children.get_mut(&parent)?;
-        children.iter_mut().find(|e| e.path == *path)
-    }
-
-    fn entry_for(&self, source: &RowSource) -> Option<&Entry> {
-        match source {
-            RowSource::Top(ix) => self.entries.get(*ix),
-            RowSource::Child { parent, ix } => self.children.get(parent)?.get(*ix),
-        }
-    }
-
-    fn prune_stale_paths(&mut self) {
-        // Against everything loaded, not just what is on screen: a filter
-        // hides rows, it does not delete them.
-        self.selection.retain(|p| self.known_paths.contains(p));
-        self.anchor.retain(|p| self.known_paths.contains(p));
-        self.cursor.retain(|p| self.known_paths.contains(p));
-        self.expanded.retain(|p| self.known_paths.contains(p));
-        self.children.retain(|p, _| self.known_paths.contains(p));
+    fn is_visible_id(&self, id: EntryId) -> bool {
+        self.entry(id).is_some_and(|e| self.is_visible(e))
     }
 
     pub(super) fn is_visible(&self, e: &Entry) -> bool {
         if !self.show_hidden && e.is_hidden() {
             return false;
         }
-        if let Some(f) = &self.filter {
-            return e.name.to_lowercase().contains(&f.to_lowercase());
+        if let Some(filter) = &self.filter {
+            return filter.matches(e.name());
         }
         true
     }
 }
 
-/// Directories sort above files regardless of the sort key
-/// (`settings.browser.directories_first`).
-pub(super) fn cmp_entries(
-    a: &Entry,
-    b: &Entry,
-    key: SortKey,
-    order: SortOrder,
+/// Compare two slab slots by id.
+///
+/// A missing slot sorts last. That cannot happen for ids drawn from `entries`,
+/// but it keeps the ordering total, which a comparator handed to `sort_by`
+/// has to be.
+fn cmp_slots(
+    slab: &[Option<Entry>],
+    a: EntryId,
+    b: EntryId,
+    rules: SortRules,
 ) -> std::cmp::Ordering {
+    let slot = |id: EntryId| slab.get(id.0 as usize).and_then(Option::as_ref);
+    match (slot(a), slot(b)) {
+        (Some(a), Some(b)) => cmp_entries(a, b, rules),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Order two entries under `rules`.
+pub(super) fn cmp_entries(a: &Entry, b: &Entry, rules: SortRules) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    match (a.is_dir_like(), b.is_dir_like()) {
-        (true, false) => return Ordering::Less,
-        (false, true) => return Ordering::Greater,
-        _ => {}
+    // `settings.browser.directories_first`, and it outranks the sort key on
+    // purpose: a folder is a place rather than a file, and mixing the two by
+    // size reads as noise. Off, they sort together like everything else.
+    if rules.directories_first {
+        match (a.is_dir_like(), b.is_dir_like()) {
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            _ => {}
+        }
     }
 
-    let ord = match key {
-        SortKey::Name => crate::format::natural_compare(&a.name, &b.name),
+    let by_name = |a: &str, b: &str| {
+        if rules.natural {
+            crate::format::natural_compare(a, b)
+        } else {
+            crate::format::plain_compare(a, b)
+        }
+    };
+
+    let ord = match rules.key {
+        SortKey::Name => by_name(a.name(), b.name()),
         SortKey::Modified => {
             let av = a
                 .metadata
@@ -264,19 +388,20 @@ pub(super) fn cmp_entries(
             .display_len()
             .unwrap_or(0)
             .cmp(&b.display_len().unwrap_or(0)),
-        // Kind: group by extension, then by name.
+        // Kind: group by extension, then by name. The extension is the one
+        // resolved at listing time (D-35) — deriving it here allocated a
+        // `String` per comparison, millions of them per header click (A-12).
         SortKey::Kind => a
-            .path
             .extension()
-            .cmp(&b.path.extension())
-            .then_with(|| crate::format::natural_compare(&a.name, &b.name)),
+            .cmp(&b.extension())
+            .then_with(|| by_name(a.name(), b.name())),
     };
 
-    let ord = match order {
+    let ord = match rules.order {
         SortOrder::Ascending => ord,
         SortOrder::Descending => ord.reverse(),
     };
 
     // Stable, sensible tiebreak so equal keys keep names findable.
-    ord.then_with(|| crate::format::natural_compare(&a.name, &b.name))
+    ord.then_with(|| by_name(a.name(), b.name()))
 }

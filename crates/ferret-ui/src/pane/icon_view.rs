@@ -116,15 +116,19 @@ impl FilePane {
         };
 
         let tile_icon = entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx);
-        let dragged = if selected {
-            self.folder.read(cx).selected_paths()
+        let dragged: Arc<[VfsPath]> = if selected {
+            self.folder.read(cx).selected_paths_shared()
         } else {
-            vec![entry.path.clone()]
+            Arc::from([entry.path.clone()])
         };
-        let drag_tile = drag_payload(dragged);
         let tile_drop_dir = entry.is_dir_like().then(|| entry.path.clone());
         let drops = self.drops.clone();
         let accent = theme.primary;
+        // Taken before the listeners below capture `entry`. Cheap: a name
+        // short enough to live inline in a `SmolStr` copies rather than
+        // allocating, which is most of them.
+        let label = gpui::SharedString::new(entry.name());
+        let menu_path = entry.path.clone();
 
         div()
             .id(("tile", ix))
@@ -144,8 +148,10 @@ impl FilePane {
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 this.tile_clicked(ix, event, cx);
             }))
-            .on_drag(drag_tile.0, move |_, _, _, cx| {
-                let label = drag_tile.1.clone();
+            // Same as the list: the label is derived when a drag starts, not
+            // once per tile per frame (A-02a).
+            .on_drag(DraggedPaths { paths: dragged }, move |dragged, _, _, cx| {
+                let label = drag_label(&dragged.paths);
                 cx.new(|_| DragPreview { label })
             })
             .external_drag_payload({
@@ -166,7 +172,7 @@ impl FilePane {
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     // Select under the cursor, then open the target menu.
-                    let path = entry.path.clone();
+                    let path = menu_path.clone();
                     this.folder.update(cx, |f, cx| {
                         f.prepare_context_menu(ix);
                         cx.emit(FolderEvent::SelectionChanged);
@@ -182,8 +188,8 @@ impl FilePane {
                     .line_height(px(14.))
                     .text_center()
                     .text_color(label_color)
-                    .when(broken, |label| label.line_through())
-                    .child(entry.name.clone()),
+                    .when(broken, |text| text.line_through())
+                    .child(label),
             )
             .into_any_element()
     }
@@ -244,7 +250,7 @@ impl FilePane {
         position: gpui::Point<gpui::Pixels>,
         cx: &Context<Self>,
     ) -> Option<usize> {
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         let scrolled = gpui_component::scroll::ScrollbarHandle::offset(
             &self.table.read(cx).vertical_scroll_handle,
         );
@@ -267,7 +273,7 @@ impl FilePane {
         if n == 0 {
             return Vec::new();
         }
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         let scrolled = gpui_component::scroll::ScrollbarHandle::offset(
             &self.table.read(cx).vertical_scroll_handle,
         );
@@ -339,7 +345,7 @@ impl FilePane {
         }
 
         // Live-select every tile intersecting the band (content coordinates).
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         let offset = gpui_component::scroll::ScrollbarHandle::offset(&self.icon_scroll);
         let to_content = |p: gpui::Point<gpui::Pixels>| {
             gpui::point(p.x - origin.x + offset.x, p.y - origin.y + offset.y)
@@ -388,7 +394,7 @@ impl FilePane {
     }
 
     fn tile_at(&self, position: gpui::Point<gpui::Pixels>, n: usize) -> Option<usize> {
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         let offset = gpui_component::scroll::ScrollbarHandle::offset(&self.icon_scroll);
         let local = gpui::point(
             position.x - origin.x + offset.x,
@@ -409,7 +415,7 @@ impl FilePane {
         let Some(marquee) = &self.marquee else {
             return div().into_any_element();
         };
-        let origin = *self.pane_origin.lock().unwrap();
+        let origin = *self.pane_origin.lock();
         let left = marquee.start.x.min(marquee.current.x) - origin.x;
         let top = marquee.start.y.min(marquee.current.y) - origin.y;
         let width = (marquee.start.x - marquee.current.x).abs();

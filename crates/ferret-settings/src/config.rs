@@ -37,3 +37,11 @@ pub const MAX_FONT_SIZE: f32 = 24.0;
 /// Bounds on the sidebar width, matching the geometry in `docs/ui-base.html` §4.
 pub const MIN_SIDEBAR_WIDTH: f32 = 180.0;
 pub const MAX_SIDEBAR_WIDTH: f32 = 400.0;
+
+/// Bounds on the docked terminal panel height.
+///
+/// The minimum still leaves a prompt and scrollback readable; the maximum keeps
+/// the file pane present at Ferret's minimum window height, so opening the
+/// terminal never turns the file manager into only a terminal.
+pub const MIN_TERMINAL_HEIGHT: f32 = 120.0;
+pub const MAX_TERMINAL_HEIGHT: f32 = 420.0;

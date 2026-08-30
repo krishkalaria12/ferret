@@ -27,7 +27,7 @@ crates/
   ferret/           # native binary: bootstrap, window, menus, actions
   ferret-ui/        # views, theme tokens, bundled file icons
   ferret-vfs/       # the Vfs trait, local backend, path handling
-  ferret-settings/  # settings schema, keymap, per-folder view preferences
+  ferret-settings/  # settings schema, per-folder view preferences
 xtask/              # fixture generator and listing benchmark
 docs/
   ui-base.html # base explorer shell — the UI reference to build against
@@ -47,8 +47,11 @@ a partial file works and deleting it is always safe. See
 
 ## Build
 
-Requires a stable Rust toolchain (1.90+) and the native build tools GPUI needs on
-your platform. [`just`](https://github.com/casey/just) is optional.
+Requires a stable Rust toolchain (1.90+), Zig 0.16.x for the default Ghostty
+terminal engine, and the native build tools GPUI needs on your platform.
+[`just`](https://github.com/casey/just) is optional. A parser-only recovery build
+can use `cargo check -p ferret-terminal --no-default-features` to select the
+Alacritty fallback without Zig.
 
 ```sh
 just dev          # cargo run -p ferret

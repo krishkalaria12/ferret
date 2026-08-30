@@ -18,4 +18,19 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui_platform.workspace = true
-trash = "5"
+profiling = { workspace = true, optional = true }
+
+[features]
+# Frame, layout and paint spans in the Tracy profiler.
+#
+# Off by default and absent from a release build. Enabling it turns on the
+# `profiling` facade's Tracy backend for the whole graph, so GPUI's own
+# annotations light up with nothing written here — which is what makes the
+# per-frame findings in `docs/audit.html` §3 a flame graph rather than
+# arithmetic. Needs the Tracy profiler application to connect to.
+#
+#     cargo run --release --features profile
+#
+# `puffin` is the self-contained alternative and is a one-line swap here, since
+# both sit behind the same facade.
+profile = ["dep:profiling", "profiling/profile-with-tracy"]

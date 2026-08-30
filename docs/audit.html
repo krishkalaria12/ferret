@@ -1,0 +1,1632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferret — Second audit: correctness, waste and the settings that lie</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens copied from docs/plan.html so the four documents read as one set.
+   Do not diverge: if a colour changes here it changes there.
+   --------------------------------------------------------------------------- */
+:root {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+
+  --measure: 68ch;
+  --rail: 16.5rem;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --accent:      #7aa2f7;
+    --accent-soft: #18202f;
+    --accent-line: #2c405f;
+
+    --ok:   #9ece6a;
+    --warn: #e0af68;
+    --risk: #f7768e;
+    --violet: #bb9af7;
+
+    --ground:  #101116;
+    --panel:   #16181e;
+    --sunken:  #1b1e25;
+    --rule:    #2a2e38;
+    --rule-soft: #22252d;
+
+    --ink:     #e3e5ea;
+    --ink-mid: #a3a8b5;
+    --ink-dim: #767c8b;
+  }
+}
+
+:root[data-theme="dark"] {
+  --accent:      #7aa2f7;
+  --accent-soft: #18202f;
+  --accent-line: #2c405f;
+
+  --ok:   #9ece6a;
+  --warn: #e0af68;
+  --risk: #f7768e;
+  --violet: #bb9af7;
+
+  --ground:  #101116;
+  --panel:   #16181e;
+  --sunken:  #1b1e25;
+  --rule:    #2a2e38;
+  --rule-soft: #22252d;
+
+  --ink:     #e3e5ea;
+  --ink-mid: #a3a8b5;
+  --ink-dim: #767c8b;
+}
+
+:root[data-theme="light"] {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Type scale ---------------------------------------------------------- */
+h1, h2, h3, h4 {
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  margin: 0;
+}
+h1 { font-size: clamp(1.9rem, 4.4vw, 2.9rem); line-height: 1.1; letter-spacing: -0.035em; }
+h2 { font-size: clamp(1.3rem, 2.6vw, 1.6rem); line-height: 1.2; }
+h3 { font-size: 1.06rem; letter-spacing: -0.005em; }
+h4 { font-size: .94rem; letter-spacing: 0; }
+
+p, li { max-width: var(--measure); }
+p { margin: 0 0 .9rem; }
+ul, ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+li { margin-bottom: .35rem; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+code, kbd, .mono { font-family: var(--mono); }
+code {
+  font-size: .875em;
+  background: var(--sunken);
+  border: 1px solid var(--rule-soft);
+  padding: .05em .34em;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+
+/* --- Shell --------------------------------------------------------------- */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: var(--gutter);
+  max-width: 78rem;
+  margin: 0 auto;
+  padding: 0 var(--gutter) 6rem;
+}
+
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 2.25rem 0 2rem;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.5;
+}
+.rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .5rem;
+  padding-bottom: .75rem;
+  margin-bottom: .75rem;
+  border-bottom: 1px solid var(--rule);
+}
+.rail-head b { font-size: .95rem; letter-spacing: -.02em; }
+.rail nav ol { list-style: none; margin: 0; padding: 0; }
+.rail nav li { margin: 0; max-width: none; }
+.rail nav a {
+  display: block;
+  padding: .28rem .5rem .28rem 1.35rem;
+  color: var(--ink-mid);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  position: relative;
+  overflow-wrap: anywhere;
+}
+.rail nav a::before {
+  content: "├─";
+  position: absolute;
+  left: .18rem;
+  color: var(--ink-dim);
+  opacity: .55;
+}
+.rail nav li:last-child a::before { content: "└─"; }
+.rail nav a:hover { color: var(--ink); background: var(--sunken); }
+.rail nav a.is-current {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+.rail .siblings {
+  margin-top: 1.1rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--rule);
+  font-size: .76rem;
+  color: var(--ink-dim);
+}
+.rail .siblings a { display: block; padding: .15rem 0; text-decoration: none; color: var(--ink-mid); }
+.rail .siblings a:hover { color: var(--accent); }
+
+.doc { padding-top: 2.25rem; min-width: 0; }
+
+/* --- Masthead ------------------------------------------------------------ */
+.masthead { padding: 1.5rem 0 2.25rem; border-bottom: 1px solid var(--rule); margin-bottom: 2.5rem; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin: 0 0 .85rem;
+}
+.masthead .lede {
+  font-size: 1.12rem;
+  color: var(--ink-mid);
+  margin: 1rem 0 0;
+  max-width: 58ch;
+}
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 2rem;
+}
+@media (min-width: 46rem) {
+  .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.facts div { background: var(--panel); padding: .8rem .95rem; }
+.facts dt {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: .3rem;
+}
+.facts dd { margin: 0; font-size: .9rem; font-weight: 500; }
+
+/* --- Sections ------------------------------------------------------------ */
+section { padding-top: 3.25rem; }
+section > h2 { margin-bottom: .3rem; }
+.sec-tag {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .08em;
+  color: var(--ink-dim);
+  display: block;
+  margin-bottom: .45rem;
+}
+.sec-intro { color: var(--ink-mid); margin-top: .85rem; }
+h3 { margin-top: 2rem; margin-bottom: .5rem; }
+h4 { margin-top: 1.4rem; margin-bottom: .35rem; }
+
+/* --- Tables -------------------------------------------------------------- */
+.scroller { overflow-x: auto; margin: 1.1rem 0 1.4rem; border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: .875rem; min-width: 34rem; }
+table.wide { min-width: 52rem; }
+caption {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  padding: .7rem .85rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunken);
+}
+th, td { text-align: left; padding: .55rem .85rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-weight: 600;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--sunken); }
+td.num, th.num { font-variant-numeric: tabular-nums; }
+td.id { font-family: var(--mono); font-size: .8rem; color: var(--ink-dim); white-space: nowrap; }
+td.key, th.key { font-family: var(--mono); font-size: .8rem; }
+
+/* --- Pills --------------------------------------------------------------- */
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  padding: .12rem .45rem;
+  border-radius: 3px;
+  border: 1px solid;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.p-core   { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.p-done   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent);   background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.p-later  { color: var(--ink-dim); border-color: var(--rule); background: var(--sunken); }
+.p-risky  { color: var(--risk); border-color: color-mix(in srgb, var(--risk) 40%, transparent); background: color-mix(in srgb, var(--risk) 10%, transparent); }
+.p-warn   { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+.yes { color: var(--ok); font-weight: 600; }
+.no  { color: var(--risk); font-weight: 600; }
+.part { color: var(--warn); }
+
+/* --- Callouts ------------------------------------------------------------ */
+.note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: .85rem 1rem;
+  border-radius: 0 5px 5px 0;
+  margin: 1.2rem 0;
+  font-size: .92rem;
+}
+.note.risk { border-left-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, transparent); }
+.note.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.note.ok   { border-left-color: var(--ok);   background: color-mix(in srgb, var(--ok) 9%, transparent); }
+.note > :last-child { margin-bottom: 0; }
+.note strong { font-family: var(--mono); font-size: .82rem; letter-spacing: .05em; text-transform: uppercase; display: block; margin-bottom: .3rem; }
+
+/* --- Decision blocks ------------------------------------------------------ */
+.dec {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--violet);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+  padding: .9rem 1.05rem;
+  margin: 1rem 0;
+}
+.dec h4 { margin: 0 0 .35rem; font-size: .98rem; }
+.dec h4 .did { color: var(--violet); margin-right: .5rem; }
+.dec p:last-child { margin-bottom: 0; }
+.dec .because {
+  font-size: .88rem;
+  color: var(--ink-mid);
+  border-top: 1px dashed var(--rule);
+  margin-top: .7rem;
+  padding-top: .6rem;
+}
+.dec .because b {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Finding blocks ------------------------------------------------------- */
+.find {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--ink-dim);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+  padding: .9rem 1.05rem;
+  margin: 1rem 0;
+}
+.find.sev1 { border-left-color: var(--risk); }
+.find.sev2 { border-left-color: var(--warn); }
+.find.sev3 { border-left-color: var(--ink-dim); }
+.find > h4 {
+  margin: 0 0 .3rem;
+  display: flex;
+  gap: .55rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.find > h4 .fid { font-family: var(--mono); color: var(--ink-dim); flex: none; }
+.find .where {
+  font-family: var(--mono);
+  font-size: .76rem;
+  color: var(--ink-dim);
+  margin: 0 0 .65rem;
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+.find p { margin-bottom: .6rem; }
+.find ul { font-size: .93rem; margin-bottom: .6rem; }
+.find > :last-child { margin-bottom: 0; }
+.find .fix {
+  border-top: 1px dashed var(--rule);
+  margin-top: .75rem;
+  padding-top: .6rem;
+  font-size: .9rem;
+  color: var(--ink-mid);
+  max-width: 64ch;
+}
+.find .fix b {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Lanes ---------------------------------------------------------------- */
+.lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: .6rem;
+  margin: 1.2rem 0;
+}
+.lane {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: .7rem .8rem;
+}
+.lane h4 {
+  margin: 0 0 .4rem;
+  font-size: .8rem;
+  color: var(--accent);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.lane.no h4 { color: var(--risk); }
+.lane ul { margin: 0; padding-left: 1.05rem; font-size: .85rem; }
+.lane li { margin-bottom: .25rem; max-width: none; }
+
+/* --- Code blocks ---------------------------------------------------------- */
+pre {
+  background: var(--sunken);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: .8rem .9rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.55;
+  margin: 1rem 0;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+pre .c { color: var(--ink-dim); }
+pre .del { color: var(--risk); }
+pre .add { color: var(--ok); }
+
+/* --- Steps ---------------------------------------------------------------- */
+.step {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  margin: .8rem 0;
+  background: var(--panel);
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0 1rem;
+}
+.step .pn {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--violet);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.step h3 { margin: 0 0 .15rem; }
+.step .dep { font-family: var(--mono); font-size: .74rem; color: var(--ink-dim); margin-bottom: .6rem; }
+.step ul { margin-bottom: .6rem; }
+.step .accept {
+  font-size: .86rem;
+  border-top: 1px dashed var(--rule);
+  padding-top: .6rem;
+  color: var(--ink-mid);
+  max-width: 62ch;
+}
+.step .accept b {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Theme toggle --------------------------------------------------------- */
+#theme {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  background: var(--panel);
+  color: var(--ink-mid);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: .2rem .45rem;
+  cursor: pointer;
+  flex: none;
+}
+#theme:hover { color: var(--ink); border-color: var(--accent-line); }
+
+footer {
+  margin-top: 4rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--ink-dim);
+}
+
+/* --- Narrow --------------------------------------------------------------- */
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .rail {
+    position: static;
+    max-height: none;
+    padding: 1.5rem 0 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .rail nav ol { display: flex; flex-wrap: wrap; gap: .2rem; padding-bottom: 1rem; }
+  .rail nav a { padding: .2rem .5rem; border-left: 0; border-radius: 4px; }
+  .rail nav a::before, .rail nav li:last-child a::before { content: none; }
+  .rail .siblings { display: flex; gap: 1rem; padding-bottom: 1rem; }
+  .doc { padding-top: 1.5rem; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-head">
+    <b>ferret/audit</b>
+    <button id="theme" type="button" aria-label="Switch colour theme">theme</button>
+  </div>
+  <nav aria-label="Sections">
+    <ol>
+      <li><a href="#status">what landed</a></li>
+      <li><a href="#what">what this is</a></li>
+      <li><a href="#verdict">the verdict</a></li>
+      <li><a href="#wrong">what the app gets wrong</a></li>
+      <li><a href="#promises">the file that lies</a></li>
+      <li><a href="#render">the render path, again</a></li>
+      <li><a href="#memory">memory &amp; the listing</a></li>
+      <li><a href="#regression">the gap rev 1 opened</a></li>
+      <li><a href="#libraries">libraries worth adopting</a></li>
+      <li><a href="#decisions">decisions</a></li>
+      <li><a href="#measuring">what the budgets miss</a></li>
+      <li><a href="#order">the order to do this in</a></li>
+      <li><a href="#limits">what this did not check</a></li>
+    </ol>
+  </nav>
+  <div class="siblings">
+    companion documents
+    <a href="plan.html">plan.html — whole product</a>
+    <a href="ui-base.html">ui-base.html — phase 1</a>
+    <a href="terminal.html">terminal.html — phase 2</a>
+  </div>
+</aside>
+
+<main class="doc">
+
+<header class="masthead">
+  <p class="eyebrow">Audit · rev 2 · 29 Aug 2026 · <b>all landed</b></p>
+  <h1>What the first audit did not look at</h1>
+  <p class="lede">Rev 1 is finished — twenty-six findings and six decisions, landed. This is the pass over what that left behind, and over the parts of the workspace the first audit passed through without auditing: the settings schema, the sidebar and title bar, the binary, and the asset and theme layers. The headline is not performance this time. It is that the app quietly does the wrong thing in four places, and one of them is wrong for almost every user on earth.</p>
+  <dl class="facts">
+    <div><dt>Reviewed</dt><dd class="mono">16,208 lines · 6 crates</dd></div>
+    <div><dt>Findings</dt><dd>13 (A-27 … A-39) · all fixed</dd></div>
+    <div><dt>Correctness bugs</dt><dd>4 user-visible</dd></div>
+    <div><dt>New decisions</dt><dd>D-39 … D-42</dd></div>
+    <div><dt>Method</dt><dd>Reading, then measuring</dd></div>
+    <div><dt>New dependencies</dt><dd>1 shipped (<code>jiff</code>)</dd></div>
+  </dl>
+</header>
+
+<!-- ==================================================================== -->
+<section id="status">
+  <span class="sec-tag">§0</span>
+  <h2>What landed</h2>
+  <p class="sec-intro">Everything below is fixed. This section says what that cost, what it measured, and — the part worth reading — the three places this document turned out to be wrong.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Measured outcomes</caption>
+    <thead><tr><th>What</th><th class="key">Before</th><th class="key">After</th><th>Finding</th></tr></thead>
+    <tbody>
+      <tr><td>One selection change, 200,000 rows, small band</td><td class="key">691 µs</td><td class="key">597 ns</td><td>A-29</td></tr>
+      <tr><td>One selection change, everything selected</td><td class="key">1.37 ms</td><td class="key">22 ns</td><td>A-29</td></tr>
+      <tr><td>Time to first row, <code>flat/</code> (warm)</td><td class="key">5.8 ms</td><td class="key">0.35 ms</td><td>A-35</td></tr>
+      <tr><td><code>Entry</code>, carried once per row</td><td class="key">144 B</td><td class="key">128 B</td><td>A-34</td></tr>
+      <tr><td>Events lost by other directories during watcher churn</td><td class="key">91%</td><td class="key">none, from that cause</td><td>D-40</td></tr>
+      <tr><td>Syscalls per frame in the sidebar</td><td class="key">7</td><td class="key">0</td><td>A-28</td></tr>
+      <tr><td>Settings shipped and read by nothing</td><td class="key">12</td><td class="key">0</td><td>A-30</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note risk">
+    <strong>Three things this document got wrong</strong>
+    <p>Recorded because a document that only records its successes is not worth
+    consulting the next time.</p>
+    <ol>
+      <li><b>§7 badly understated the watcher gap</b>, calling it "a window
+      measured in milliseconds". Measured before fixing it: writing 240 files
+      into one watched directory while twelve others were subscribed and
+      dropped around it lost <b>91% of them</b>. That is not a window, and it
+      meant D-37 had made things strictly <em>worse</em> than the forty
+      watchers it replaced.</li>
+      <li><b>D-40's proposed fix was not the right one.</b> It called for
+      owning an <code>FSEventStream</code> through <code>fsevent-sys</code> and
+      threading <code>FSEventStreamGetLatestEventId</code> through the
+      rebuild — roughly 300 lines of <code>unsafe</code> FFI. What A-17
+      actually asked for was deduplication by <em>directory</em>, not one
+      stream for the process. Keying the registry that way keeps every bit of
+      A-17's win and gives each directory an independent stream, so there is
+      no rebuild left to make lossless. The fix contains no
+      <code>unsafe</code> at all.</li>
+      <li><b>A-32 claimed "GPUI already models exactly this".</b> True of the
+      type; false of the macOS backend, whose pasteboard <em>write</em> for
+      <code>ExternalPaths</code> is an empty match arm. Three of the four
+      directions work; Ferret&nbsp;→&nbsp;Finder is blocked upstream. See the
+      revised A-32.</li>
+    </ol>
+  </div>
+
+  <div class="note">
+    <strong>Precisely what "none" means in that last row</strong>
+    <p>Registering a directory no longer restarts any other directory's
+    stream, so that cause of loss is gone outright. It is not a claim that no
+    event is ever dropped: a consumer too slow to drain its channel still
+    overflows it, and still gets a <code>Desynced</code> telling it to re-list.
+    That is A-06's contract working, and it is what the regression test asserts
+    — <em>silent</em> staleness is the failure, not loss. Writing that test the
+    other way first, and watching it fail because it never drained the
+    64-event channel, is what made the distinction concrete.</p>
+  </div>
+
+  <div class="note ok">
+    <strong>And one thing it got right, which is worth naming</strong>
+    <p>A-33 predicted that the allocation budget could not see the very finding
+    being reported, because its harness skipped <code>os_icon</code>. Closing
+    that hole was verified by reverting the fix: the budget goes from 2.02
+    allocations per visible row to 3.02 and fails. A budget with a documented
+    hole is a budget that will let the next one through too.</p>
+  </div>
+
+  <div class="note warn">
+    <strong>What the fixes themselves broke</strong>
+    <p>Splitting the selection summary (A-29) left <code>selected_entry</code>
+    scanning the visible rows — which the column view's metadata panel calls
+    once per frame, making it A-16 again, a finding <em>rev 1 had already
+    fixed</em>. A review pass caught it before it shipped and it is now 1.0 µs
+    per frame with the selected row at the end of 200,000. Worth stating
+    plainly: two of this document's thirteen findings were places an earlier
+    fix stopped one step short, and this was very nearly a third.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="what">
+  <span class="sec-tag">§1</span>
+  <h2>What this is</h2>
+  <p class="sec-intro">The second read of the workspace, after the first one was acted on in full.</p>
+
+  <p>Rev 1 asked one question — <em>where is this slow?</em> — and answered it well enough that
+  the answers are now in the code: shared handles in <code>Entry</code>, stable
+  <code>EntryId</code>s, one watcher registry, metadata resolved during the walk, three budgets
+  in CI. The reindex that took 17.8 ms takes 1.8 ms. The listing that filled itself in for
+  half a second arrives complete.</p>
+
+  <p>That success is what makes this pass different. The obvious hot paths have been walked
+  twice; what is left is not more of the same. It is <b>work the first audit never looked
+  at</b> — <code>ferret-settings</code>, <code>ferret-platform</code>, <code>ferret</code>
+  itself, and the sidebar, title bar and menus that make up most of the shell — plus the
+  handful of places where rev 1's own fixes stopped one step short.</p>
+
+  <div class="note warn">
+    <strong>Read this first</strong>
+    <p>Rev 1 said plainly that nothing in it was profiled. That is no longer true, and the
+    distinction matters: this document mixes <b>measured</b> figures with <b>structural</b>
+    claims and labels every one. A measured figure names the command that produced it. A
+    structural claim says what the code does and what that costs in kind, and is not
+    accompanied by a wall-clock number it did not earn.</p>
+  </div>
+
+  <div class="note">
+    <strong>The shape of it</strong>
+    <p>Rev 1's findings were nearly all one thing: <em>work that is O(the directory) running
+    per row or per frame</em>. This one splits three ways, and the biggest group is the one
+    a performance audit does not usually produce.</p>
+    <ul>
+      <li><b>Four correctness bugs</b> (§3, §4). Every date in the app is in the wrong time
+      zone. The default theme setting does not do what it says. Twelve settings do nothing at
+      all. Copy and paste does not reach Finder. None of these is slow; all of them are
+      wrong.</li>
+      <li><b>Six pieces of waste</b> (§5, §6) that rev 1 walked past because they are not in
+      the file list — including one syscall-per-frame that is the exact bug rev 1 fixed as
+      A-25, left standing in the function next to it.</li>
+      <li><b>One regression rev 1 introduced</b> (§7), documented at the time and still open.</li>
+    </ul>
+  </div>
+
+  <h3>How the findings are numbered</h3>
+  <p>Continuing from rev 1 rather than restarting: <code>A-27</code> onward and
+  <code>D-39</code> onward. This is not tidiness. Twenty-six of the old identifiers are cited
+  in code comments — <code>A-05</code> in <code>folder/mod.rs</code>, <code>D-35</code> in
+  <code>entry.rs</code>, <code>A-24</code> in <code>listing.rs</code> — and reusing a number
+  would point a future reader at the wrong finding.</p>
+  <ul>
+    <li><span class="pill p-risky">critical</span> — wrong rather than slow, or a stall on a path a person uses constantly.</li>
+    <li><span class="pill p-warn">major</span> — a real cost, or a promise the app does not keep.</li>
+    <li><span class="pill p-later">minor</span> — waste worth removing while you are already in the file.</li>
+  </ul>
+</section>
+
+<!-- ==================================================================== -->
+<section id="verdict">
+  <span class="sec-tag">§2</span>
+  <h2>The verdict</h2>
+  <p class="sec-intro">Ranked by what a person would actually notice — which, this time, mostly means "notice is wrong" rather than "notice is slow".</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>All findings, most damaging first</caption>
+    <thead>
+      <tr><th>ID</th><th>Finding</th><th class="key">Where</th><th>Sev</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="id">A-27</td><td>Every date the app displays is UTC — the Date Modified column is wrong for anyone not on Greenwich</td><td class="key">format.rs</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-28</td><td><code>places()</code> runs seven <code>is_dir()</code> syscalls and seven allocations on the render path, every frame</td><td class="key">browser/sidebar.rs · platform/macos.rs</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-29</td><td>The selection summary is rebuilt in O(the directory) on <em>every</em> selection change — 0.7–1.4 ms each, during a marquee drag or shift-arrow repeat</td><td class="key">folder/mod.rs</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-30</td><td>Twelve settings are declared, shipped as documentation, and read by nothing</td><td class="key">ferret-settings · ferret-ui</td><td><span class="pill p-risky">critical</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-31</td><td><code>theme: "system"</code> — the default — reads the OS appearance once at launch and never follows it</td><td class="key">ferret/main.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-32</td><td>The clipboard never leaves the process: no interop with Finder, and none between two Ferret windows</td><td class="key">browser/mutations.rs · browser/mod.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-33</td><td><code>IconKey::of</code> allocates a <code>String</code> per row per frame — and the allocation budget cannot see it</td><td class="key">platform/icon.rs · icons.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-34</td><td><code>Metadata</code> carries two fields nothing reads, on every one of 200,000 entries</td><td class="key">vfs/entry.rs</td><td><span class="pill p-warn">major</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-35</td><td><code>LISTING_BATCH_SIZE</code> was tuned when a batch was names only; it now gates the first row on 4,096 <code>stat</code> calls</td><td class="key">vfs/config.rs · vfs/local.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-36</td><td><code>Assets::list</code> ignores the path it is given and returns every embedded asset</td><td class="key">assets.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-37</td><td>The sidebar allocates a row id and a label per row, per frame</td><td class="key">browser/sidebar.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-38</td><td>The table delegate re-reads the model four times per cell and re-resolves the palette per cell</td><td class="key">pane/list.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+      <tr><td class="id">A-39</td><td>The macOS icon conversion swizzles one pixel at a time — carried forward from rev 1 and still undone</td><td class="key">platform/macos.rs</td><td><span class="pill p-later">minor</span></td><td><span class="pill p-done">fixed</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note risk">
+    <strong>If you only do one thing</strong>
+    <p>Fix <b>A-27</b>. Everything else in this table is a cost or an unkept promise; A-27 is
+    the app confidently telling the user something false, in a column they read constantly, on
+    every file they own. A five-and-a-half-hour offset turns "modified 00:30 today" into
+    "19:00 yesterday" — the wrong day, on the wrong date, and nothing about the display
+    suggests it should be doubted.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="wrong">
+  <span class="sec-tag">§3</span>
+  <h2>What the app gets wrong</h2>
+  <p class="sec-intro">Four findings that are not about speed. A file manager's job is to tell you the truth about your files; these are the places it does not.</p>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-27</span> Every date the app displays is UTC <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-ui/src/format.rs:53–75 — <code>format_date</code></p>
+    <p><code>format_date</code> takes a <code>SystemTime</code>, converts it to seconds since
+    the epoch, and runs Howard Hinnant's <code>civil_from_days</code> on it. That algorithm is
+    correct and the implementation is correct. It computes a <em>UTC</em> civil date, and
+    nothing anywhere in the workspace ever applies a local offset:</p>
+    <pre><code>let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+let days = secs.div_euclid(86_400);          // UTC days
+let rem  = secs.rem_euclid(86_400);          // UTC seconds past midnight
+let (h, m) = (rem / 3600, (rem % 3600) / 60);</code></pre>
+    <p>Grepping the whole workspace for any timezone handling returns one hit, and it is a
+    comment in this function's own test asserting the UTC value. There is no offset, no
+    <code>localtime_r</code>, no tz database, nothing.</p>
+    <p>So for a user in IST (+05:30), a file saved at 00:30 on the 4th displays as
+    <b>19:00 on the 3rd</b> — wrong time, wrong day, wrong date. In PST (−08:00) it runs the
+    other way. Only users on UTC see the truth, and they see it only outside British Summer
+    Time. This is on the Date Modified column, the column view's metadata panel, and anywhere
+    else a date appears.</p>
+    <p class="fix"><b>Fix</b> — This is the one place in the workspace where writing it by
+    hand is the wrong instinct. The offset is not a constant: it depends on the date being
+    formatted (DST), on the user's zone, and on a tz database that ships updates several times
+    a year. <code>plan.html</code>'s "no date library — civil-from-days is thirty lines" note
+    was written when formatting was the whole job; it is not any more. See <b>D-39</b>.</p>
+  </div>
+
+  <div class="find sev2">
+    <h4><span class="fid">A-31</span> <code>theme: "system"</code> does not follow the system <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret/src/main.rs:249–254 · crates/ferret-settings/src/schema.rs:22–29</p>
+    <p>The schema documents the default as "Follow the OS appearance, <em>and change with it
+    while running</em>". <code>apply_startup_theme</code> calls
+    <code>Theme::sync_system_appearance</code> exactly once, during startup, and nothing in
+    the workspace observes an appearance change afterwards — grepping for
+    <code>observe_window_appearance</code> or <code>WindowAppearance</code> outside that one
+    line returns nothing.</p>
+    <p>So Ferret reads whether the Mac is in dark mode at launch and then holds that opinion
+    forever. Every user on the macOS "Auto" appearance — which is the OS default — gets a
+    window that is the wrong colour for half of every day, and the setting that promises
+    otherwise is itself the default.</p>
+    <p class="fix"><b>Fix</b> — <code>Window::observe_window_appearance</code> exists in the
+    pinned GPUI revision (<code>gpui/src/window.rs:1958</code>). Register it when the window
+    opens and re-run the same three-way match already in
+    <code>apply_startup_theme</code>. The subscription belongs with the window, so it lives
+    or dies with it.</p>
+  </div>
+
+  <div class="find sev2">
+    <h4><span class="fid">A-32</span> The clipboard never leaves the process <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret-ui/src/browser/mod.rs:172 · browser/mutations.rs:280–335</p>
+    <p>Copy and cut write to a private field:</p>
+    <pre><code>// Browser
+clipboard: Option&lt;(Vec&lt;VfsPath&gt;, bool)&gt;,</code></pre>
+    <p>Two consequences, and the second is the one nobody will report as a bug because it
+    looks like the app is broken rather than incomplete:</p>
+    <ul>
+      <li><b>No interop.</b> Cmd-C in Ferret puts nothing on the system pasteboard, so Cmd-V
+      in Finder, in a Save dialog, or in a terminal does nothing. The reverse also fails:
+      copying in Finder and pasting in Ferret pastes whatever Ferret last copied, or
+      nothing.</li>
+      <li><b>No interop with itself.</b> The field is on <code>Browser</code>, and every
+      window has its own. Copying in one Ferret window and pasting in another is a no-op —
+      silently, because <code>paste_clipboard</code> takes <code>None</code> and returns.</li>
+    </ul>
+    <p class="fix"><b>Fix</b> — No new dependency.
+    <code>ClipboardEntry::ExternalPaths</code> (<code>gpui/src/platform.rs:2355</code>) with
+    <code>App::write_to_clipboard</code> and <code>read_from_clipboard</code>. The cut/copy
+    distinction has no pasteboard representation on macOS, so it stays a local flag beside the
+    system write — which is also how Finder behaves. See <b>D-42</b>.</p>
+    <div class="note warn">
+      <strong>Corrected: "GPUI already models exactly this" is only half true</strong>
+      <p>True of the type; false of the macOS backend. Its pasteboard
+      <em>write</em> for <code>ExternalPaths</code> is an empty match arm —
+      <code>[ClipboardEntry::ExternalPaths(_)] =&gt; {}</code> in
+      <code>gpui_macos/src/pasteboard.rs</code> — and its own tests only ever
+      exercise the read. Reading the backend rather than trusting the type is
+      what turned that up. So of the four directions:</p>
+      <ul>
+        <li>Finder → Ferret — <b>works</b>, GPUI reads <code>ExternalPaths</code> correctly.</li>
+        <li>Ferret → Ferret — <b>works</b>, via the string half.</li>
+        <li>Ferret → terminal or a text field — <b>works</b>, and is useful in its own right.</li>
+        <li>Ferret → Finder — <b>does not</b>, and cannot without patching GPUI.</li>
+      </ul>
+      <p>The <code>ExternalPaths</code> entry is written regardless, so the last
+      row starts working the day that arm is implemented, with no change in
+      Ferret.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="promises">
+  <span class="sec-tag">§4</span>
+  <h2>The file that lies</h2>
+  <p class="sec-intro">One finding, but it is the largest single thing in this audit and it undermines a decision the project has already made.</p>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-30</span> Twelve settings are declared, shipped as documentation, and read by nothing <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-settings/src/schema.rs · default-settings.json · consumers in ferret-ui</p>
+    <p><code>D-12</code> says the settings file is the source of truth and the settings UI is a
+    view over it, and <code>schema.rs</code>'s header adds that "a hand-edited file must never
+    be able to brick the app". Both hold. What nobody checked is the other direction: that a
+    key the file offers actually does something. Twelve do not.</p>
+
+    <div class="scroller">
+    <table class="wide">
+      <caption>Declared, defaulted, serialised into <code>default-settings.json</code>, never read</caption>
+      <thead><tr><th>Key</th><th>What the user expects</th><th>What happens</th></tr></thead>
+      <tbody>
+        <tr><td class="id">browser.directories_first</td><td>Files and folders interleave when false</td><td>Hard-coded <code>true</code> in <code>cmp_entries</code>; the setting is named only in that function's doc comment</td></tr>
+        <tr><td class="id">browser.natural_sort</td><td><code>file10</code> sorts before <code>file9</code> when false</td><td>Hard-coded; <code>natural_compare</code> is unconditional</td></tr>
+        <tr><td class="id">browser.columns</td><td>Which columns list view shows</td><td>Superseded by <code>FolderView::hidden_columns</code>; still validated on load, still never read</td></tr>
+        <tr><td class="id">browser.confirm_permanent_delete</td><td>No dialog before a permanent delete when false</td><td>The dialog is unconditional</td></tr>
+        <tr><td class="id">browser.enter_opens</td><td>Enter renames instead of opening, for Finder muscle memory</td><td>Enter always opens</td></tr>
+        <tr><td class="id">appearance.ui_font_size</td><td>A larger interface</td><td>Clamped and warned about on load, then discarded</td></tr>
+        <tr><td class="id">appearance.row_density</td><td>Compact rows</td><td><code>ROW_HEIGHT</code> is a <code>const</code></td></tr>
+        <tr><td class="id">appearance.alternate_row_colors</td><td>Zebra striping</td><td>Striping was deliberately removed; the setting was not</td></tr>
+        <tr><td class="id">sidebar.show_places</td><td>Hide the Places group</td><td>Always drawn</td></tr>
+        <tr><td class="id">sidebar.show_volumes</td><td>Hide the Volumes group</td><td>Always drawn when non-empty</td></tr>
+        <tr><td class="id">window.restore_session</td><td>Reopen with the previous tabs and geometry</td><td>Nothing is ever saved; the window is always 1180×760, centred</td></tr>
+        <tr><td class="id">window.default_directory</td><td>Where a new window starts</td><td><code>start_directory()</code> reads <code>FERRET_START_DIR</code> or home</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>A thirteenth, <code>keymap</code>, is worse than unread: it is a
+    <code>BTreeMap&lt;String, Option&lt;String&gt;&gt;</code> with a documented
+    <code>null</code>-unbinds convention and a passing test proving the convention parses,
+    while every binding in the app is hard-coded in <code>main.rs</code>. The test asserts
+    that a feature which does not exist is parsed correctly.</p>
+
+    <div class="note warn">
+      <strong>Why this is critical and not cosmetic</strong>
+      <p>These are not internal constants. They are serialised into
+      <code>default-settings.json</code>, which the crate ships, which a test asserts is
+      accurate, and which the module header calls "documentation the user reads and copies
+      from". A user who sets <code>confirm_permanent_delete: false</code> has been told by the
+      project's own documentation that the confirmation is gone. It is not. That is a worse
+      failure than the setting not existing — and for that particular key, it is a failure in
+      the direction of destroying data the user thought they had guarded.</p>
+    </div>
+
+    <p class="fix"><b>Fix</b> — Each one either works or goes, and the split is not close:
+    six are a handful of lines each (<code>directories_first</code>,
+    <code>confirm_permanent_delete</code>, <code>enter_opens</code>,
+    <code>show_places</code>, <code>show_volumes</code>, <code>ui_font_size</code>), and six
+    are features that have not been built (<code>restore_session</code>,
+    <code>default_directory</code>, <code>keymap</code>, <code>row_density</code>,
+    <code>alternate_row_colors</code>, <code>columns</code>). Wire the first six; delete the
+    second six until the feature lands. See <b>D-41</b>, which also proposes the test that
+    stops this recurring.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="render">
+  <span class="sec-tag">§5</span>
+  <h2>The render path, again</h2>
+  <p class="sec-intro">Rev 1 cleared the file list and stopped there. The shell around it was never read, and the same three mistakes are in it.</p>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-28</span> The sidebar does seven syscalls per frame <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-ui/src/browser/sidebar.rs:168 · browser/mutations.rs:422–437 · platform/macos.rs:41–51, :84–128</p>
+    <p>This is <code>A-25</code>, which rev 1 fixed, sitting untouched in the function
+    immediately above the one that was fixed. <code>volumes()</code> was moved to a background
+    timer so render only reads a cached value. <code>places()</code> — one line away, called
+    from the same <code>render_sidebar</code> — was not:</p>
+    <pre><code>// browser/sidebar.rs, inside render_sidebar
+let places  = self.places(cx);      // → platform.places(), every frame
+let favorites = self.favorites(cx); // → clones the Vec&lt;PathBuf&gt;, every frame
+let volumes = self.volumes();       // → cached (A-25)</code></pre>
+    <p>And <code>places()</code> is not a lookup. Each call walks the well-known folders and
+    asks the filesystem whether each one exists, because a folder the user deleted should not
+    appear:</p>
+    <pre><code>fn place(kind: PlaceKind, name: &amp;str, path: PathBuf) -&gt; Option&lt;Place&gt; {
+    if path.is_dir() {                       // ← a stat, per call
+        Some(Place { name: name.to_string(), kind, path })   // ← an allocation, per call
+    } else { None }
+}</code></pre>
+    <p>Seven of those — Desktop, Documents, Downloads, Music, Pictures, Movies, Applications —
+    plus <code>dirs::home_dir()</code>, plus seven <code>String</code>s and eight
+    <code>PathBuf</code>s, every time the sidebar draws. On a warm cache that is cheap enough
+    to have gone unnoticed. On a Mac where <code>~/Documents</code> is in iCloud Drive and has
+    been evicted, or on a machine where the home directory is an SMB mount that has gone away,
+    <code>is_dir()</code> is the call that blocks — and it blocks the window, at frame
+    rate.</p>
+    <p>The audit that fixed <code>volumes()</code> said the reason in one line: "a stale
+    network mount stalls that call, and stalls the window with it". Exactly the same sentence
+    applies here, and <code>places()</code> is the one called unconditionally on every frame
+    rather than once per fifteen seconds.</p>
+    <p class="fix"><b>Fix</b> — The same one, and the machinery already exists.
+    <code>Browser::start_volume_refresh</code> is a background loop that probes and stores;
+    give places the same treatment, or better, fold both into one probe task since they are
+    the same kind of work on the same schedule. Render reads the last known list. Favourites
+    do not need a probe at all — they come from settings — but they should stop being cloned
+    per frame.</p>
+  </div>
+
+  <div class="find sev1">
+    <h4><span class="fid">A-29</span> The selection summary is rebuilt in O(the directory), per selection change <span class="pill p-risky">critical</span></h4>
+    <p class="where">crates/ferret-ui/src/folder/mod.rs:610–629 — <code>refresh_selection_summary</code></p>
+    <p>Rev 1's <code>A-07</code> made the status bar O(1) per frame by caching the selected
+    paths and their byte total. The cache is correct and the status bar is fast. What was
+    never examined is <em>how often the cache is rebuilt</em>, and the answer is: on every
+    single mutation of the selection.</p>
+    <pre><code>pub(super) fn refresh_selection_summary(&amp;mut self) {
+    // ...
+    for (id, entry) in self.visible_entries() {   // ← every row in `order`
+        if self.selection.contains(&amp;id) { paths.push(entry.path.clone()); ... }
+    }
+    self.selected_visible_paths = paths.into();   // ← a fresh Arc&lt;[VfsPath]&gt;
+}</code></pre>
+    <p>Every one of <code>select_only</code>, <code>toggle_select</code>,
+    <code>extend_select</code>, <code>select_rows</code>, <code>select_all</code> and
+    <code>clear_selection</code> ends in that call. Two of them are not one-shot user
+    actions:</p>
+    <ul>
+      <li><b>A marquee drag</b> calls <code>select_rows</code> from
+      <code>update_marquee</code>, which runs on <em>every mouse-move event</em> — at display
+      rate while the band is moving.</li>
+      <li><b>Shift + arrow</b> calls <code>extend_select</code> once per key repeat, roughly
+      thirty times a second once the repeat starts.</li>
+    </ul>
+    <p><b>Measured</b>, on a 200,000-entry listing, release build:</p>
+    <div class="scroller">
+    <table class="wide">
+      <caption>Cost of one selection change (<code>selection_summary_cost</code>, 200,000 rows)</caption>
+      <thead><tr><th>Situation</th><th class="key">Per change</th><th>Share of a 120 Hz frame</th></tr></thead>
+      <tbody>
+        <tr><td>A small band — 200 rows selected</td><td class="key">691 µs</td><td>8%</td></tr>
+        <tr><td>Everything selected (Cmd-A, then any arrow key)</td><td class="key">1.37 ms</td><td>16%</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>The scan dominates the small case; in the large one the <code>Arc&lt;[VfsPath]&gt;</code>
+    is itself 200,000 elements — 4.8 MB allocated and thrown away per mouse-move.</p>
+    <p class="fix"><b>Fix</b> — Rev 1's <code>A-02</code> proposed exactly this and only half
+    of it was done: "keep an ordered selection vector on <code>Folder</code>, rebuilt by the
+    selection mutators rather than derived by scanning". It is still derived by scanning; the
+    change was only that it is scanned once per <em>change</em> rather than once per
+    <em>row per frame</em>. The mutators know what they touched — <code>select_only</code>
+    changes one row, <code>extend_select</code> knows its old and new bounds — so the summary
+    can be maintained incrementally. <code>select_all</code> and <code>clear_selection</code>
+    stay O(n) because they genuinely are.</p>
+  </div>
+
+  <div class="find sev2">
+    <h4><span class="fid">A-33</span> <code>IconKey::of</code> allocates per row per frame <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret-platform/src/icon.rs:61–79 · crates/ferret-ui/src/icons.rs:203–210 · called from pane/mod.rs</p>
+    <p><code>entry_icon</code> runs once per visible row in all three views, and starts by
+    building a cache key:</p>
+    <pre><code>let key = ferret_platform::IconKey::of(local, entry.is_dir_like());
+// → IconKey::Extension(ext.to_ascii_lowercase())   ← a String, per row, per frame</code></pre>
+    <p>Two things are wrong with it. It allocates a <code>String</code> to look something up
+    in a cache — the classic shape rev 1 spent eleven commits removing. And it re-derives the
+    lowercased extension from the path when <code>Entry</code> has cached exactly that value
+    since <code>D-35</code>, precisely so this would not have to happen. For
+    <code>.app</code> bundles it is worse: <code>IconKey::Application</code> allocates the
+    full path as a <code>String</code>.</p>
+    <div class="note warn">
+      <strong>And the budget cannot see it</strong>
+      <p>This is the part worth dwelling on. <code>just budget</code> asserts two allocations
+      per visible row per frame and passes. It passes because its harness deliberately skips
+      <code>os_icon</code> — which needs a GPUI <code>App</code> the harness does not have —
+      and the module says so. So the one number in the repository whose job is to catch a
+      per-row allocation has a hole in it exactly where a per-row allocation is. See
+      §10.</p>
+    </div>
+    <p class="fix"><b>Fix</b> — <code>IconKey::Extension(SmolStr)</code> and a constructor
+    that takes an <code>&amp;Entry</code>, so the key is built from the cached extension and a
+    short extension never touches the heap at all. <code>smol_str</code> is already a
+    dependency of both crates.</p>
+  </div>
+
+  <div class="find sev3">
+    <h4><span class="fid">A-37</span> The sidebar allocates a row id and a label per row, per frame <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-ui/src/browser/sidebar.rs:204, :227, :243, :345 · browser/title_bar.rs:215</p>
+    <p><code>SharedString::from(format!("place-{i}"))</code> for every row, plus
+    <code>label.to_string()</code> for every label, plus
+    <code>format!("Ferret — {title}")</code> once for the window title. Fifteen-odd
+    allocations a frame is not a stall and this is not urgent — but the ids are derived from a
+    counter and could be <code>ElementId::NamedInteger</code>, which GPUI provides for this
+    exact case and which does not allocate.</p>
+  </div>
+
+  <div class="find sev3">
+    <h4><span class="fid">A-38</span> The delegate re-reads the model four times per cell <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-ui/src/pane/list.rs:459–470, :517</p>
+    <p><code>render_td</code> is called once per (row, column). Inside it,
+    <code>self.folder.read(cx)</code> appears four times — for the entry, the selection state,
+    the depth and the expansion — and <code>self.palette(cx)</code> re-resolves the browser
+    palette, which is three <code>Rgba</code>-to-<code>Hsla</code> conversions and a theme
+    lookup. At four columns and forty visible rows that is 640 entity reads and 160 palette
+    resolutions per frame to answer questions that are constant for the row and for the
+    frame.</p>
+    <p class="fix"><b>Fix</b> — Read once at the top of <code>render_td</code>, and hoist the
+    palette to the frame. Neither is O(the directory), which is why this is minor; both are
+    free.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="memory">
+  <span class="sec-tag">§6</span>
+  <h2>Memory &amp; the listing</h2>
+  <p class="sec-intro">Three things the listing rework left slightly out of shape.</p>
+
+  <div class="find sev2">
+    <h4><span class="fid">A-34</span> <code>Metadata</code> carries two fields nothing reads <span class="pill p-warn">major</span></h4>
+    <p class="where">crates/ferret-vfs/src/entry.rs:46–55</p>
+    <p><b>Measured</b> with <code>size_of</code>: <code>Entry</code> is <b>144 bytes</b>,
+    <code>Option&lt;Entry&gt;</code> is also 144 (the niche packs, which is the good news), and
+    <code>Metadata</code> is 48 of those bytes. Two of its five fields are read by nothing in
+    the workspace:</p>
+    <ul>
+      <li><code>created: Option&lt;SystemTime&gt;</code> — 16 bytes. No column shows it, no
+      sort key uses it, no menu offers it.</li>
+      <li><code>readonly: bool</code> — no row draws it, no operation checks it.</li>
+    </ul>
+    <p>On <code>flat/</code> the slab holds 200,000 × 144 = <b>28.8 MB</b>, of which
+    <b>3.2 MB</b> is a creation time nothing will ever display. Dropping both takes
+    <code>Metadata</code> from 48 bytes to 32 and <code>Entry</code> from 144 to 128 — an
+    11% cut to the resident size of a large listing, for deleting two fields.</p>
+    <p class="fix"><b>Fix</b> — Delete them, and take them out of <code>to_metadata</code>
+    while you are there. The counter-argument is that a Date Created column is a plausible
+    feature; the answer is that <code>st_birthtime</code> comes back in the same
+    <code>stat</code> that is already being made, so re-adding the field later costs one line
+    and no syscalls. Carrying 3.2 MB against that is not a trade.</p>
+  </div>
+
+  <div class="find sev3">
+    <h4><span class="fid">A-35</span> <code>LISTING_BATCH_SIZE</code> now gates the first row on 4,096 <code>stat</code> calls <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-vfs/src/config.rs:37 · vfs/local.rs — <code>resolve</code></p>
+    <p>4,096 was chosen when a batch was names only, to amortise a channel send and a model
+    update over enough rows to matter. <code>D-33</code> changed what a batch <em>is</em>:
+    every entry in it now carries a resolved <code>stat</code>, so the constant is doing a
+    second job it was never sized for — bounding how long the first row waits.</p>
+    <p><b>Measured</b>, <code>cargo xtask bench</code> on <code>flat/</code>: time to first row
+    went from <b>2.0 ms</b> before D-33 to <b>5.8 ms</b> after. Both are far inside the 50 ms
+    budget, which is why this is minor rather than a regression — but it is three times worse
+    for no reason, and the same constant also sets the ceiling on how much work a cancelled
+    walk leaves in flight.</p>
+    <p class="fix"><b>Fix</b> — Ramp it. A first batch of 128 puts the first row back under a
+    millisecond; doubling to the existing 4,096 over the next few batches keeps the throughput
+    the constant was chosen for. Roughly six lines, and it makes both jobs the constant is now
+    doing explicit instead of coincidental.</p>
+  </div>
+
+  <div class="find sev3">
+    <h4><span class="fid">A-36</span> <code>Assets::list</code> ignores the path it is given <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-ui/src/assets.rs:27–31</p>
+    <pre><code>fn list(&amp;self, path: &amp;str) -&gt; gpui::Result&lt;Vec&lt;gpui::SharedString&gt;&gt; {
+    let mut out = FerretAssets::iter().map(Into::into).collect::&lt;Vec&lt;_&gt;&gt;();
+    //                          ^ every embedded asset, whatever `path` said
+    out.extend(gpui_component_assets::Assets.list(path)?);
+    Ok(out)
+}</code></pre>
+    <p>The contract is "list the assets under <code>path</code>". This lists all of Ferret's
+    assets under every path, and only delegates the filter to the library half. Nothing
+    currently depends on the answer being right, which is why it has gone unnoticed — but
+    "nothing currently calls this correctly" is a poor thing to be relying on, and the fix is
+    a <code>filter</code>.</p>
+  </div>
+
+  <div class="find sev3">
+    <h4><span class="fid">A-39</span> The macOS icon conversion swizzles one pixel at a time <span class="pill p-later">minor</span></h4>
+    <p class="where">crates/ferret-platform/src/macos.rs — <code>icon_for_path</code></p>
+    <p>Carried forward unchanged from rev 1, which called it "one free byte-level win" and was
+    right to rank it last. AppKit hands back RGBA and GPUI wants BGRA, so the code walks
+    <code>chunks_exact(4)</code> and pushes four bytes at a time — 4,096 iterations per icon at
+    <code>ICON_POINTS = 64</code>. It runs once per file <em>type</em>, off the render path, so
+    it is genuinely not urgent.</p>
+    <p class="fix"><b>Fix</b> — Rev 1 named the right one and it is still right: ask
+    <code>NSBitmapImageRep</code> for the byte order you want via its
+    <code>bitmapFormat</code> and do no conversion at all. Failing that, a <code>u32</code>
+    swizzle over <code>bytemuck::cast_slice</code> is four times fewer iterations and three
+    lines.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="regression">
+  <span class="sec-tag">§7</span>
+  <h2>The gap rev 1 opened</h2>
+  <p class="sec-intro">Not a new finding — an open one, carried here because it is the only thing in the workspace that is worse than it was before the last audit, and because there is now a concrete way to close it.</p>
+
+  <p><code>D-37</code> replaced one <code>notify</code> watcher per <code>Folder</code> with a
+  single shared backend and reference-counted subscriptions. That was right — ten tabs in
+  column view was up to forty native streams — and it came with a cost that was documented in
+  <code>ferret_vfs::watch</code>'s module header at the time rather than discovered later:</p>
+
+  <div class="note risk">
+    <strong>Corrected: this was far worse than stated below</strong>
+    <p>Everything in this section was written before the gap was measured, and
+    it understates it by an order of magnitude. The measurement: writing 240
+    files into one watched directory while twelve others were subscribed and
+    dropped around it lost <b>91% of them</b> — not "a short window", and bad
+    enough that D-37 had made this <em>worse</em> than the forty watchers it
+    replaced. The section is left as written because being wrong in this
+    direction is the interesting part; the fix and what it actually took are
+    in the revised D-40.</p>
+  </div>
+
+  <div class="note">
+    <strong>The cost, as originally stated</strong>
+    <p><code>notify</code>'s FSEvents backend calls <code>stop()</code>, edits its path list,
+    and calls <code>run()</code> again on <em>every</em> <code>watch</code> and
+    <code>unwatch</code>. With one stream per folder that was invisible. With one shared
+    stream, every registration change is a window in which every <em>other</em> watched
+    directory loses events outright — and a lost event is a row that stays stale until
+    something else happens, which is the failure <code>A-06</code> exists to prevent.</p>
+  </div>
+
+  <p>Two things have been checked since, and both matter:</p>
+  <ul>
+    <li><b>Upgrading does not fix it.</b> <code>notify</code> 8.2.0 —
+    two majors ahead of the pinned 7 — has byte-identical <code>watch_inner</code> and
+    <code>unwatch_inner</code>, and still sets <code>since_when</code> to
+    <code>kFSEventStreamEventIdSinceNow</code> once at construction and never advances it. So
+    every rebuilt stream starts from "now" and the events during the rebuild are genuinely
+    gone.</li>
+    <li><b>The fix needs no new package.</b> <code>fsevent-sys</code> 4.1.0 is
+    <em>already in <code>Cargo.lock</code></em>, pulled by <code>notify</code> itself, and it
+    exposes <code>FSEventStreamGetLatestEventId</code>
+    (<code>fsevent-sys-4.1.0/src/fsevent.rs:102</code>) — which is precisely the value that
+    would have to be threaded through for a rebuild to lose nothing.</li>
+  </ul>
+
+  <p>The mitigation already in place — parking idle registrations so navigating away and back
+  costs no rebuild — reduces how often the window opens. It does not close it. See
+  <b>D-40</b>.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="libraries">
+  <span class="sec-tag">§8</span>
+  <h2>Libraries worth adopting</h2>
+  <p class="sec-intro">One that is not optional, two that are already paid for, and one that is a feature rather than a fix.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Recommended</caption>
+    <thead><tr><th>Crate</th><th>Job</th><th class="key">Cost</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td class="id">jiff</td><td>Local time and DST for every date the app displays (A-27)</td><td class="key">New, shipped</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="id">fsevent-sys</td><td>Own the FSEvents stream so a rebuild resumes rather than restarts (§7)</td><td class="key">Already in the lock</td><td><span class="pill p-core">adopt</span></td></tr>
+      <tr><td class="id">bytemuck</td><td>The RGBA→BGRA swizzle, if the <code>bitmapFormat</code> route does not pan out (A-39)</td><td class="key">Already in the lock, via wgpu</td><td><span class="pill p-later">optional</span></td></tr>
+      <tr><td class="id">nucleo</td><td>Fuzzy matching for the filter and the path bar</td><td class="key">New, shipped</td><td><span class="pill p-later">later</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>jiff — the only one that is not a choice</h3>
+  <p>A-27 needs a tz database, and a tz database is not something to hand-roll. The offset for
+  a given instant depends on the user's zone, on whether that instant was in daylight saving,
+  and on a rules file that IANA updates several times a year as governments change their
+  minds. Getting it wrong is exactly as bad as the bug being fixed.</p>
+  <p><code>jiff</code> is the one to reach for over <code>chrono</code> or <code>time</code>:
+  it is the newest of the three, it was written by the author of <code>regex</code> and
+  <code>ripgrep</code> specifically to make the correct thing the easy thing, and it reads the
+  system zoneinfo directly rather than needing a companion crate the way
+  <code>chrono</code> + <code>chrono-tz</code> or <code>time</code> + <code>time-tz</code>
+  do. It is also the only one whose API makes "this instant, in the user's zone, as a civil
+  date" a single call.</p>
+  <div class="note">
+    <strong>What survives</strong>
+    <p><code>civil_from_days</code> and its tests do not need to be deleted. They are correct
+    for what they compute; they were simply asked the wrong question. The smallest honest
+    change is to keep the formatting and replace the <em>input</em> — resolve the
+    <code>SystemTime</code> to a local civil date with <code>jiff</code>, then format that.
+    <code>plan.html</code>'s "no date library, civil-from-days is thirty lines" note should be
+    amended rather than deleted: it was right about formatting and wrong about zones, and
+    saying so is more useful to the next reader than quietly reversing it.</p>
+  </div>
+
+  <h3>fsevent-sys — the registry is already the seam</h3>
+  <p><code>D-37</code>'s own justification was that a registry is where a different
+  change-detection mechanism plugs in when remote mounts arrive. That seam is what makes this
+  cheap now: the local backend can own an <code>FSEventStream</code> directly, store
+  <code>FSEventStreamGetLatestEventId</code> before every <code>stop()</code>, and pass it as
+  <code>since_when</code> on the next <code>run()</code>. Nothing above
+  <code>ferret_vfs::watch</code> changes, because nothing above it knows what a stream is.</p>
+  <p>The honest counter-argument is that this is <code>unsafe</code> FFI in exchange for
+  closing a window measured in milliseconds, on macOS only, and that Windows'
+  <code>ReadDirectoryChangesW</code> has no equivalent problem because notify registers each
+  directory independently there. That is a real argument for deferring it. It is not an
+  argument for leaving the module header's warning as the only mitigation forever.</p>
+
+  <h3>nucleo — a feature, and it should be labelled as one</h3>
+  <p>The filter is a substring match and type-ahead is a prefix match. Both are correct and
+  both are now fast (<code>A-13</code>). <code>nucleo</code> — the matcher behind Helix and
+  Zed's pickers — would make the filter fuzzy, which is a better filter and a
+  <em>different</em> one. It belongs in <code>plan.html</code> as a feature with a decision
+  behind it, not in an audit as an optimisation. Noted here only so the option is on record;
+  the current implementation is not a finding.</p>
+
+  <h3>What not to add</h3>
+  <div class="scroller">
+  <table class="wide">
+    <caption>Rejected, with the reason</caption>
+    <thead><tr><th>Crate</th><th>Why not</th></tr></thead>
+    <tbody>
+      <tr><td class="id">notify 8</td><td>Two majors of churn for byte-identical FSEvents behaviour. Checked, not assumed — see §7. Upgrade when there is a reason, not as a fix for this.</td></tr>
+      <tr><td class="id">chrono / time</td><td>Both need a companion crate for zones. <code>jiff</code> does not. One dependency beats two.</td></tr>
+      <tr><td class="id">humansize</td><td><code>format_size</code> is twenty lines, matches Finder's rounding exactly, and now allocates once. A crate would be a behaviour change dressed as a cleanup.</td></tr>
+      <tr><td class="id">arboard</td><td>The obvious answer to A-32, and unnecessary: GPUI already has <code>ClipboardEntry::ExternalPaths</code> and its platform layer is already linked. A second clipboard implementation in one process is a way to have two of them disagree.</td></tr>
+      <tr><td class="id">mimalloc</td><td>Still "not yet", and for a better reason than last time: the allocation budget now exists and passes at 2.00 per row. Swapping the allocator would make that number incomparable across the change for a win on work that has already been deleted.</td></tr>
+      <tr><td class="id">config / figment</td><td>A-30 is not a parsing problem. The parser is careful, degrades per section, preserves unknown keys and has ten tests. The settings are unread, which no configuration crate fixes.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="decisions">
+  <span class="sec-tag">§9</span>
+  <h2>Decisions</h2>
+  <p class="sec-intro">Four, continuing from <code>D-38</code>. The first is a reversal of a decision <code>plan.html</code> made, and says so.</p>
+
+  <div class="dec">
+    <h4><span class="did">D-39</span> Dates are local, and a library owns the conversion.</h4>
+    <p>Every displayed timestamp is resolved to the user's zone before it is formatted, using
+    <code>jiff</code> and the system tz database. <code>civil_from_days</code> stays and keeps
+    its tests; what changes is that it is handed a local civil datetime rather than a UTC
+    one.</p>
+    <p class="because"><b>Because</b> <code>plan.html</code> decided against a date library on
+    the grounds that formatting is thirty lines. That was true and it is still true — but
+    formatting was never the hard part, and the document did not notice that the easy part was
+    the only part being done. A file manager that reports the wrong modification day is not
+    usefully fast.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-40</span> One watcher per directory, not one for the process. <span class="pill p-done">superseded</span></h4>
+    <p><b>What was decided instead.</b> The proposal below — own an
+    <code>FSEventStream</code> through <code>fsevent-sys</code> and thread
+    <code>FSEventStreamGetLatestEventId</code> through each rebuild — solves
+    the wrong problem at a high price. It assumes one shared stream is
+    required, because that is how D-37 read A-17. It is not:
+    A-17's complaint was "one watcher per <code>Folder</code>", meaning per
+    <em>consumer</em>, and its own words were "for a handful of distinct
+    directories, several of which are shared between tabs".</p>
+    <p>Keying the registry per <em>directory</em> keeps all of that — ten tabs
+    on one folder is one watcher, column view over a deep path is four rather
+    than forty — and gives each directory an independent stream, so
+    registering one cannot disturb another. There is no rebuild left to make
+    lossless, and no <code>unsafe</code> anywhere in the fix. <code>notify</code>
+    8.2.0 was checked and is byte-identical here, so upgrading was never an
+    alternative either.</p>
+    <p class="because"><b>Kept below</b> because the reasoning that led to the
+    wrong answer is worth seeing: it starts from "the shared stream is a given"
+    and optimises within that, which is how a design constraint nobody chose
+    turns into 300 lines of FFI.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-40 (as originally proposed)</span> The macOS watcher resumes from its last event id rather than restarting.</h4>
+    <p>The local backend owns an <code>FSEventStream</code> through <code>fsevent-sys</code>
+    instead of going through <code>notify</code> on macOS. Before every rebuild it stores
+    <code>FSEventStreamGetLatestEventId</code>; the next stream starts from there rather than
+    from <code>kFSEventStreamEventIdSinceNow</code>. <code>notify</code> stays for Windows,
+    where the problem does not exist.</p>
+    <p class="because"><b>Because</b> the registry closed forty native streams and opened one
+    delivery gap, and the gap is the kind of bug that is invisible until someone loses work to
+    it. Doing this behind the registry is a change to one file; doing it after remote mounts
+    have added a second mechanism is a change to a design.</p>
+    <p class="because"><b>Deferrable if</b> the <code>unsafe</code> surface is judged too much
+    for the size of the window. In that case the parked-registration mitigation stands and the
+    module header stays the record — but that is a decision to take deliberately, not by
+    default.</p>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-41</span> Every setting either works or is deleted, and a test enforces it.</h4>
+    <p>The six cheap ones are wired up. The six that need a feature are removed from the schema
+    and from <code>default-settings.json</code> until that feature lands, and
+    <code>keymap</code> goes with them. A test asserts that every field the schema serialises
+    is named somewhere outside <code>ferret-settings</code>.</p>
+    <p class="because"><b>Because</b> <code>D-12</code> made the file the source of truth, and
+    a source of truth that is ignored is worse than no file at all — it is documentation that
+    lies. The test is the part that matters: this class of drift is invisible to every other
+    check in the repository, and it will recur the moment a setting is added ahead of the code
+    that reads it.</p>
+    <div class="note">
+      <strong>The test is cheap and slightly unusual</strong>
+      <p>It cannot be a compile-time check, because "is read" is not a property the type system
+      sees. But <code>Settings::default().to_json()</code> already enumerates every shipped key,
+      and a test can walk that list and grep the workspace source for each name. Crude, and it
+      would have caught all twelve of these on the day each was written.</p>
+    </div>
+  </div>
+
+  <div class="dec">
+    <h4><span class="did">D-42</span> The clipboard is the system's, not the browser's.</h4>
+    <p>Copy and cut write <code>ClipboardEntry::ExternalPaths</code> to the system pasteboard
+    through GPUI. Paste reads it. The cut flag stays a process-local hint beside the system
+    write, because macOS has no pasteboard representation for it.</p>
+    <p class="because"><b>Because</b> a file manager whose copy does not reach Finder is not a
+    file manager the user can adopt, and "Finished when" in <code>AGENTS.md</code> is
+    explicitly "you can set Ferret as your default file manager and not miss the system one".
+    Copy and paste between the two is table stakes for that sentence, and the fact that it also
+    fails between two Ferret windows means the current design cannot be extended into
+    working — it has to be replaced.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="measuring">
+  <span class="sec-tag">§10</span>
+  <h2>What the budgets miss</h2>
+  <p class="sec-intro">Rev 1 added three budgets and a profiler. They work — and this audit found four things none of them can see, which is worth writing down while it is fresh.</p>
+
+  <p>The budgets caught something real on their first run: the allocation budget failed at 4.00
+  per row against a predicted floor of 2, and the cause was <code>format!</code> reallocating
+  its buffer in both <code>format_size</code> and <code>format_date</code>. That is exactly
+  the job. But three of this audit's four largest findings sailed past all of them.</p>
+
+  <div class="scroller">
+  <table class="wide">
+    <caption>Why each budget missed what it missed</caption>
+    <thead><tr><th>Finding</th><th>Which budget should have caught it</th><th>Why it did not</th></tr></thead>
+    <tbody>
+      <tr><td class="id">A-33</td><td>Allocations per frame</td><td>The harness skips <code>os_icon</code> because it needs a GPUI <code>App</code>. The gap is documented in the module — and a documented hole in the one check whose job is to have no holes is still a hole.</td></tr>
+      <tr><td class="id">A-29</td><td>Allocations per frame</td><td>It measures a <em>scroll</em>. Nothing in the harness changes the selection, so the one path that is O(the directory) is never exercised.</td></tr>
+      <tr><td class="id">A-28</td><td>Nothing</td><td>No budget covers the shell. Every measurement in the repository points at the file list, because that is where rev 1 was looking.</td></tr>
+      <tr><td class="id">A-27</td><td>Nothing — correctly</td><td>A timezone bug is not a budget's job. It is a test's, and there was no test that formatted a known instant and asserted a local result, because the function has only ever been asked for a UTC one.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Three additions, in the same spirit as rev 1's</h3>
+  <ul>
+    <li><b>Close the icon hole.</b> The allocation harness skips <code>os_icon</code> for a
+    real reason, but <code>gpui::TestAppContext</code> can supply the <code>App</code> it
+    needs. Moving the budget to a <code>#[gpui::test]</code> is a smaller change than the hole
+    is a risk.</li>
+    <li><b>Script a selection, not just a scroll.</b> One marquee-drag's worth of
+    <code>select_rows</code> calls in the same budget would have put A-29 on the first run,
+    and it is four lines.</li>
+    <li><b>A date test with a zone in it.</b> Set <code>TZ</code>, format a known instant,
+    assert the local result. It is the only way this class of bug is ever caught, and it is
+    the test that should land in the same commit as D-39.</li>
+  </ul>
+
+  <div class="note ok">
+    <strong>What is genuinely working</strong>
+    <p>Worth saying, because an audit that only lists faults gives a false impression. The
+    watcher burst budget is the strongest thing in the repository: 5,000 creates and 5,000
+    deletes, asserting the model matches the disk <em>exactly</em>, converging in 87.5 ms and
+    26.6 ms. It covers three findings at once and it would fail loudly if any of them
+    regressed. Gate 7 — no per-frame work may be O(the directory) — is the right rule, and
+    A-29 is a reminder that it needs to be applied to <em>per-interaction</em> work too.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="order">
+  <span class="sec-tag">§11</span>
+  <h2>The order to do this in</h2>
+  <p class="sec-intro">Sequenced so each step is independently shippable, with the correctness bugs first — because unlike rev 1, most of this is not about speed. <b>All six steps landed in this order</b>, one commit each, plus a seventh reviewing the six.</p>
+
+  <div class="note ok">
+    <strong>The seventh step was not planned, and should have been</strong>
+    <p>A review pass over the six commits found two real defects in them: an
+    O(the directory) scan reintroduced on the render path (see §0), and a race
+    in the watcher registry that returned a spurious error when an idle
+    eviction landed between two lock acquisitions. Neither was caught by the
+    test suite as it stood. Both are the kind of thing that only surfaces by
+    re-reading work while it is still fresh — which argues for making that a
+    step rather than a courtesy.</p>
+  </div>
+
+  <div class="step">
+    <span class="part">1</span>
+    <div>
+      <h4>The wrong answers</h4>
+      <p class="mono">A-27 · A-31 · D-39 · jiff · small</p>
+      <ul>
+        <li>Local dates, with the <code>TZ</code>-setting test that proves it.</li>
+        <li><code>observe_window_appearance</code>, so the default theme setting means what it says.</li>
+      </ul>
+      <p class="accept">Done when a file saved a minute ago reads as a minute ago in a
+      non-UTC zone, and switching macOS to dark mode with Ferret open changes the
+      window.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="part">2</span>
+    <div>
+      <h4>The settings file</h4>
+      <p class="mono">A-30 · D-41 · no dependencies · medium</p>
+      <ul>
+        <li>Wire the six that are a handful of lines each.</li>
+        <li>Delete the six that need a feature, and <code>keymap</code> with them.</li>
+        <li>Add the coverage test, so this is the last time.</li>
+      </ul>
+      <p class="accept">Done when every key in <code>default-settings.json</code> changes
+      something observable, and the test fails if one stops doing so.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="part">3</span>
+    <div>
+      <h4>The shell's render path</h4>
+      <p class="mono">A-28 · A-29 · A-33 · A-37 · A-38 · independent · small</p>
+      <ul>
+        <li>Probe places on the same background timer as volumes; render reads the last answer.</li>
+        <li>Maintain the selection summary incrementally in the mutators.</li>
+        <li><code>IconKey</code> from the cached extension, and close the budget's icon hole in the same commit.</li>
+        <li>The two minors while in the files.</li>
+      </ul>
+      <p class="accept">Done when the allocation budget covers <code>os_icon</code> and a
+      scripted marquee, and both pass.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="part">4</span>
+    <div>
+      <h4>The clipboard</h4>
+      <p class="mono">A-32 · D-42 · no dependencies · small</p>
+      <p class="accept">Done when copying in Ferret and pasting in Finder moves a file, and
+      the reverse works too.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="part">5</span>
+    <div>
+      <h4>The listing's remaining shape</h4>
+      <p class="mono">A-34 · A-35 · A-36 · A-39 · small</p>
+      <ul>
+        <li>Drop the two dead <code>Metadata</code> fields; re-measure <code>Entry</code>.</li>
+        <li>Ramp the batch size; re-measure time to first row.</li>
+        <li><code>Assets::list</code> honours its argument; the swizzle gets its
+        <code>bitmapFormat</code>.</li>
+      </ul>
+      <p class="accept">Done when <code>Entry</code> is 128 bytes and time to first row is
+      back under a millisecond.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <span class="part">6</span>
+    <div>
+      <h4>The watcher gap</h4>
+      <p class="mono">D-40 · fsevent-sys · unsafe · medium</p>
+      <p class="accept">Done when opening a second directory does not cost the first one any
+      events — which needs a test that writes to directory A while subscribing to directory B,
+      and that test is most of the work.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="limits">
+  <span class="sec-tag">§12</span>
+  <h2>What this did not check</h2>
+  <p class="sec-intro">Stated plainly, so nothing here is mistaken for a clean bill of health it did not earn.</p>
+  <ul>
+    <li><b>Windows was read, not run.</b> Again. <code>windows.rs</code> was read for the
+    <code>places()</code> shape (identical to macOS, so A-28 applies to both) and for the
+    icon cache. The <code>unsafe</code> <code>SHGetFileInfo</code> path was not audited with
+    the care the macOS one received, and no finding here has been reproduced on Windows.</li>
+    <li><b>No profiler was attached</b>, before or after. The figures come from
+    <code>cargo xtask bench</code>, <code>just budget</code>, and four
+    <code>#[ignore]</code>d measurements run in release. Tracy is wired up
+    (<code>--features profile</code>) and was not used; a flame graph might well disagree
+    with the ordering of §5.</li>
+    <li><b>Three fixes are not covered by an automated test</b>, because each
+    needs a real window or a real pasteboard. A-31's theme following an OS
+    appearance change; and the three working directions of A-32's clipboard.
+    The logic either side of each is unit-tested — the date conversion across
+    five zones, the clipboard's text parsing and its rejection of prose — but
+    the round trip through the platform is a manual check. A-27 <em>is</em>
+    covered: the zone is a parameter, so a test can name one.</li>
+    <li><b>The terminal phase was not considered.</b> <code>terminal.html</code> is a plan,
+    not code. Where a finding here interacts with it — the shared worker pool, the clipboard,
+    the settings schema — this document assumes Phase 2 has not started.</li>
+    <li><b>Nothing was checked for security.</b> The <code>unsafe</code> AppKit block, the
+    path handling around symlinks, and the new <code>fsevent-sys</code> proposal in D-40 all
+    deserve a pass that this is not.</li>
+    <li><b>Rev 1's own work was re-read, not re-derived.</b> A-29, A-33 and A-35 are all
+    places where rev 1's fixes stopped one step short — and A-28 was a fix
+    applied to one function and not to the one beside it. That pattern held up
+    within this pass too: the A-29 fix itself very nearly reintroduced A-16.
+    It is the most reliable place to look for a rev 3.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Ferret · second audit · rev 2 · 29 August 2026 · <b>all findings landed</b> · GPL-3.0-or-later<br>
+  Companion to <a href="plan.html">plan.html</a> (whole product), <a href="ui-base.html">ui-base.html</a> (phase 1)
+  and <a href="terminal.html">terminal.html</a> (phase 2).
+  New IDs A-27…A-39 and D-39…D-42 continue the numbering of rev 1, whose A-01…A-26 and D-33…D-38 are cited
+  throughout the source and must not be reused; a rev 3 starts at A-40 and D-43.
+  D-39 amends <code>plan.html</code>'s "no date library" note. D-40 was superseded by a
+  simpler fix than the one it proposed — see §0 and §9.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  // Theme toggle: attribute beats media query in both directions.
+  var root = document.documentElement;
+  var btn = document.getElementById('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('ferret-plan-theme'); } catch (e) {}
+  if (saved === 'dark' || saved === 'light') root.setAttribute('data-theme', saved);
+
+  btn.addEventListener('click', function () {
+    var explicit = root.getAttribute('data-theme');
+    var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var current = explicit || (systemDark ? 'dark' : 'light');
+    var next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('ferret-plan-theme', next); } catch (e) {}
+  });
+
+  // Mark the section currently in view in the rail. Same rule as plan.html:
+  // the last section whose top has passed the line is the one being read.
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail nav a'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
+  var ticking = false;
+
+  function mark() {
+    ticking = false;
+    var line = window.scrollY + 120;
+    var active = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].offsetTop <= line) active = sections[i]; else break;
+    }
+    links.forEach(function (a) { a.classList.remove('is-current'); });
+    if (active && byId[active.id]) byId[active.id].classList.add('is-current');
+  }
+
+  window.addEventListener('scroll', function () {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(mark); }
+  }, { passive: true });
+  window.addEventListener('resize', mark, { passive: true });
+  mark();
+})();
+</script>
+</body>
+</html>

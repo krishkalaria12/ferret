@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ferret", "crates/ferret-platform",
     "crates/ferret-settings",
+    "crates/ferret-terminal",
     "crates/ferret-ui",
     "crates/ferret-vfs",
     "xtask",
@@ -17,9 +18,20 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/ferret-fm/ferret"
 
 [workspace.dependencies]
-# GPUI is tracked from Zed's Git repository; the exact commit is pinned by Cargo.lock.
-# `gpui-component` resolves `gpui` from the same Git source, so Cargo unifies both to a
-# single crate instance. Do not add a `rev` to one without pinning the other to match.
+# GPUI is tracked from Zed's Git repository. The exact commit is pinned by
+# `Cargo.lock`, which is what reproducibility rests on for a binary.
+#
+# **Do not add a `rev` here.** It is the obvious hygiene fix and it is wrong:
+# `gpui-component` declares `gpui = { version = "0.2.2", git = ".../zed" }`
+# with no revision of its own, so a `rev` on this line makes a *different*
+# source id, and Cargo then compiles two `gpui` crates instead of unifying
+# them. That is precisely the "confusing type mismatch errors" failure — tried,
+# 217 of them. The pin below on `gpui-component` is safe because nothing else
+# in the graph resolves that package.
+#
+# Bump the GPUI side with `cargo update -p gpui`, deliberately, in its own
+# commit; `gpui-component`'s unpinned edge follows it to the same commit, which
+# is what keeps them unified.
 gpui = { git = "https://github.com/zed-industries/zed" }
 # Ferret targets macOS and Windows for now; the Linux backends are not enabled
 # here. Note that `gpui-base` still turns `wayland` and `x11` on transitively,
@@ -36,24 +48,81 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     # depend on a feature some other crate happens to enable.
     "runtime_shaders",
 ] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 # Embedded SVGs backing `IconName`. Without registering these as the app's asset
 # source, every gpui-component icon renders empty.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 
 ferret-platform = { path = "crates/ferret-platform" }
 ferret-ui = { path = "crates/ferret-ui" }
 ferret-settings = { path = "crates/ferret-settings" }
+ferret-terminal = { path = "crates/ferret-terminal" }
 ferret-vfs = { path = "crates/ferret-vfs" }
 
+# Every crate below this line is already in `Cargo.lock` — each is an edge to
+# something the workspace compiles anyway, not a new package. D-38 asks that
+# each one carry the job it does, so the next person knows what would justify
+# removing it again.
+
+# A-13. One case-insensitive matcher is built per keystroke and run over the
+# names with no allocation on either side, instead of lowercasing both sides
+# once per entry. It is also the engine search will want when that lands.
+aho-corasick = "1"
 anyhow = "1"
-async-trait = "0.1"
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs" }
+arc-swap = "1"
 async-channel = "2"
+async-trait = "0.1"
+# The allocations-per-frame budget in `ferret-ui` (`docs/audit.html` §11).
+# A counting global allocator with a far better story than a hand-rolled one,
+# behind ferret-ui's `dhat-heap` feature so it is compiled only when that
+# budget is being run — never in a release build, never in a normal test run.
+dhat = "0.3"
 dirs = "6"
+# The folder indices key on `EntryId`s and on names read from the user's own
+# disk, never on attacker-chosen input, so they were paying SipHash for a
+# threat model Ferret does not have. If a remote backend ever keys a map on
+# server-supplied names, that map wants a seeded hasher instead — see §9.
+foldhash = "0.2"
 futures = "0.3"
+# A-27 / D-39. Every date the app shows is a *local* civil date, and the
+# offset for a given instant depends on the user's zone and on whether that
+# instant was in daylight saving — a rules file IANA revises several times a
+# year. `jiff` reads the system zoneinfo directly, where chrono and time each
+# need a companion crate to do the same. Formatting is still Ferret's own
+# (`format::format_date`); this owns the conversion, which is the part that
+# cannot be hand-rolled correctly.
+jiff = "0.2"
+# D-34. Parallel enumeration for bulk file work — the tree copy today, and
+# folder-size-on-demand and the operations queue's conflict scan when those
+# land. Deliberately *not* used for the single-directory listing (one directory
+# is one serial readdir, which no walker changes) and not for search, which
+# `ignore` will own because honouring .gitignore is that feature. One walker
+# per job, never both for the same job.
+jwalk = "0.9"
 notify = "7"
+portable-pty = "=0.9.0"
+# Not for speed first: `std`'s poisoning was doing active harm. Every lock in
+# Ferret guards a few nanoseconds — a map lookup, a `Point`, an `Option` — and
+# two of them swallowed a poisoned lock into an indistinguishable "no value",
+# so one panic anywhere turned icons or column widths off permanently. There is
+# no poisoning here, so `lock()` returns the guard and those paths cannot exist.
+parking_lot = "0.12"
+# A-12. Sorting 200,000 rows on a header click is embarrassingly parallel, and
+# is safe to parallelise only now that the comparator no longer allocates.
+rayon = "1"
 rust-embed = "8"
+# Bounded collections that never reach the heap: at most four table columns,
+# at most two of them hideable.
+smallvec = "1"
 smol = "2"
+# D-35. `SmolStr` stores up to 22 bytes inline, so cloning an `Entry` whose
+# name fits — which is most of them — costs a memcpy rather than a heap
+# allocation and an atomic. `gpui::SharedString` is a newtype over this same
+# type, so the render boundary converts for free; `ferret-vfs` takes the leaf
+# crate directly rather than a GPUI dependency it is documented not to have.
+smol_str = "0.3"
 thiserror = "2"
 trash = "5"
 
@@ -73,6 +142,14 @@ image = { version = "0.25", default-features = false }
 # macOS icon lookup (D-18). All three crates are already in the tree via gpui,
 # so these are direct edges to something already compiled rather than a new
 # dependency stack.
+# The `profiling` facade, already in the lock because `gpui` and `wgpu` pull
+# it. Its `scope!` macros compile to nothing until a backend feature is on, and
+# GPUI's draw path is already annotated — `window.rs` carries
+# `#[profiling::function]` and calls `finish_frame!()`. Turning a backend on is
+# therefore the whole of the instrumentation work. See `ferret`'s `profile`
+# feature; nothing is pulled in unless it is enabled.
+profiling = { version = "1", default-features = false }
+
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSGeometry"] }
 objc2-app-kit = { version = "0.2", features = [
@@ -88,6 +165,16 @@ serde_json = "1"
 
 [profile.dev]
 opt-level = 0
+# Ferret links GPUI, so the debug info the linker has to chew through dominates
+# an incremental build. Line tables are all a *backtrace* needs — file and line
+# for every frame — at a fraction of full DWARF.
+#
+# The trade is real and worth knowing: this is enough to read a panic and to
+# step through code, and not enough to inspect variables in lldb. If you are
+# debugging interactively, `cargo build --config 'profile.dev.debug=true'` gets
+# them back for one build without touching this file. `split-debuginfo` is the
+# other half and is platform-specific, so it lives in `.cargo/config.toml`.
+debug = "line-tables-only"
 
 # GPUI is unusably slow when its dependencies are built unoptimised.
 [profile.dev.package."*"]

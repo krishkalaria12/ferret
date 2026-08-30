@@ -16,10 +16,8 @@ pub const MAX_VOLUMES: usize = 64;
 /// releases; showing them produces two entries for the same disk.
 pub const VOLUME_EXCLUSIONS: &[&str] = &["Recovery", "Preboot", "VM", "Update"];
 
-/// How many bytes of a directory listing `places()` may read while probing
-/// whether a well-known folder exists.
-///
-/// The existence probes are one `stat` each in practice; the budget only
-/// matters for the volume scan, where a stale NFS mount could otherwise hang
-/// the sidebar.
-pub const PROBE_TIMEOUT_MS: u64 = 250;
+// There was a `PROBE_TIMEOUT_MS` here, written for the hazard of a stale NFS
+// mount hanging the sidebar during `volumes()`. It was never wired up, and the
+// hazard it guarded no longer reaches a frame: the browser probes volumes from
+// a background timer and render only reads the last known list (A-25). A
+// timeout would now only truncate a slow answer that costs nothing to wait for.

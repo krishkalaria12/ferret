@@ -16,10 +16,7 @@ impl Browser {
 
         // Each tab reports its left edge from inside its own prefix slot,
         // which is the only element in a `Tab` this crate owns.
-        self.tab_lefts
-            .lock()
-            .unwrap()
-            .resize(self.tabs.len(), px(0.));
+        self.tab_lefts.lock().resize(self.tabs.len(), px(0.));
 
         let tabs = self
             .tabs
@@ -41,7 +38,7 @@ impl Browser {
                             .items_center()
                             .pl(px(8.))
                             .on_prepaint(move |bounds, _, _| {
-                                if let Some(slot) = lefts.lock().unwrap().get_mut(ix) {
+                                if let Some(slot) = lefts.lock().get_mut(ix) {
                                     *slot = bounds.origin.x;
                                 }
                             })
@@ -124,10 +121,7 @@ impl Browser {
                     .selected_index(self.active)
                     .text_size(px(12.5))
                     .on_click(cx.listener(|this, ix: &usize, _window, cx| {
-                        if *ix < this.tabs.len() {
-                            this.active = *ix;
-                            cx.notify();
-                        }
+                        this.activate_tab(*ix, cx);
                     }))
                     .children(tabs),
             )
@@ -138,7 +132,7 @@ impl Browser {
     /// at or before the pointer. `None` before the first paint, or left of the
     /// first tab.
     fn tab_at(&self, x: gpui::Pixels) -> Option<usize> {
-        let lefts = self.tab_lefts.lock().unwrap();
+        let lefts = self.tab_lefts.lock();
         lefts
             .iter()
             .rposition(|&left| left <= x)
@@ -156,9 +150,8 @@ impl Browser {
         }
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
-        self.active = to;
         self.tab_drag = Some(to);
-        cx.notify();
+        self.activate_tab(to, cx);
     }
 
     pub(super) fn end_tab_drag(&mut self, cx: &mut Context<Self>) {

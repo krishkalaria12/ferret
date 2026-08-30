@@ -8,7 +8,7 @@
 
 use crate::config::MAX_VOLUMES;
 use crate::errors::{PlatformError, Result};
-use crate::{Place, PlaceKind, Platform};
+use crate::{Place, PlaceKind, Platform, validate_terminal_directory};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub struct Windows;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
 fn spawn_explorer(args: &[String], action: &'static str, path: PathBuf) -> Result<()> {
     use std::os::windows::process::CommandExt;
@@ -32,6 +33,28 @@ fn spawn_explorer(args: &[String], action: &'static str, path: PathBuf) -> Resul
         Ok(_) => Ok(()),
         Err(source) => Err(PlatformError::from_io(action, path, source)),
     }
+}
+
+fn spawn_terminal(path: &Path) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let path_text = path.to_string_lossy().into_owned();
+    let windows_terminal = std::process::Command::new("wt.exe")
+        .args(["-d", &path_text])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    if windows_terminal.is_ok() {
+        return Ok(());
+    }
+
+    let escaped = path_text.replace('\'', "''");
+    let command = format!("Set-Location -LiteralPath '{escaped}'");
+    std::process::Command::new("powershell.exe")
+        .args(["-NoExit", "-Command", &command])
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|source| PlatformError::from_io("open a terminal in", path, source))
 }
 
 fn place(kind: PlaceKind, name: &str, path: PathBuf) -> Option<Place> {
@@ -60,6 +83,12 @@ impl Platform for Windows {
         smol::unblock(move || spawn_explorer(&[arg], "reveal", owned)).await
     }
 
+    async fn open_in_terminal(&self, path: &Path) -> Result<()> {
+        let owned = path.to_path_buf();
+        validate_terminal_directory(&owned)?;
+        smol::unblock(move || spawn_terminal(&owned)).await
+    }
+
     async fn move_to_trash(&self, path: &Path) -> Result<()> {
         let owned = path.to_path_buf();
         if !owned.exists() {
@@ -77,21 +106,6 @@ impl Platform for Windows {
                     source: std::io::Error::other(other.to_string()),
                 },
             })
-    }
-
-    async fn remove_permanently(&self, path: &Path) -> Result<()> {
-        let owned = path.to_path_buf();
-        smol::unblock(move || {
-            let md = std::fs::symlink_metadata(&owned)
-                .map_err(|source| PlatformError::from_io("read", &owned, source))?;
-            let outcome = if md.is_dir() {
-                std::fs::remove_dir_all(&owned)
-            } else {
-                std::fs::remove_file(&owned)
-            };
-            outcome.map_err(|source| PlatformError::from_io("delete", &owned, source))
-        })
-        .await
     }
 
     fn places(&self) -> Vec<Place> {
@@ -170,8 +184,8 @@ impl Platform for Windows {
 // Icons (D-18)
 
 use crate::icon::{IconBitmap, IconKey, IconProvider};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Icon size to ask the shell for, in pixels.
 ///
@@ -187,17 +201,21 @@ const ICON_PIXELS: i32 = 32;
 pub struct WindowsIcons {
     /// Resolved icons, keyed by type — bounded by the number of *types* seen,
     /// never by the number of files.
+    ///
+    /// `parking_lot`, so there is no poisoning to swallow: `lookup` used to
+    /// turn a lock poisoned anywhere in the process into a permanent, silent
+    /// "this type has no icon".
     cache: Mutex<HashMap<IconKey, Option<IconBitmap>>>,
 }
 
 impl IconProvider for WindowsIcons {
     fn lookup(&self, key: &IconKey) -> Option<IconBitmap> {
         // Cache only: this runs once per visible row while a frame is built.
-        self.cache.lock().ok()?.get(key)?.clone()
+        self.cache.lock().get(key)?.clone()
     }
 
     fn resolve(&self, key: &IconKey, sample: &std::path::Path) -> bool {
-        if self.cache.lock().is_ok_and(|c| c.contains_key(key)) {
+        if self.cache.lock().contains_key(key) {
             return false;
         }
         let bitmap = icon_for_path(sample, matches!(key, IconKey::Directory))
@@ -205,9 +223,7 @@ impl IconProvider for WindowsIcons {
         let cached_something = bitmap.is_some();
         // Failures are cached too, so an unreadable type is not retried once
         // per frame forever.
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(key.clone(), bitmap);
-        }
+        self.cache.lock().insert(key.clone(), bitmap);
         cached_something
     }
 }

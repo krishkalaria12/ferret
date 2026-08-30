@@ -82,8 +82,10 @@ impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg = cx.theme().background;
         let folder_gone = self.active_folder_is_gone(cx);
-        let dragging =
-            self.sidebar_drag.is_some() || self.tab_drag.is_some() || self.favorite_drag.is_some();
+        let dragging = self.sidebar_drag.is_some()
+            || self.terminal_drag.is_some()
+            || self.tab_drag.is_some()
+            || self.favorite_drag.is_some();
 
         // Keyboard actions that belong to the shell rather than the pane.
         v_flex()
@@ -95,6 +97,7 @@ impl Render for Browser {
             .when(dragging, |el| {
                 el.on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                     this.update_sidebar_drag(event.position.x, cx);
+                    this.update_terminal_drag(event.position.y, cx);
                 }))
                 .on_mouse_up(
                     gpui::MouseButton::Left,
@@ -114,6 +117,22 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(
                 cx.listener(|this, _: &actions::ToggleSidebar, _, cx| this.toggle_sidebar(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::ToggleTerminal, window, cx| {
+                    this.toggle_terminal(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::FocusTerminalOrPane, window, cx| {
+                    this.focus_terminal_or_pane(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::ToggleTerminalSync, _, cx| {
+                this.toggle_terminal_sync(cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::TerminalPaste, _, cx| this.paste_into_terminal(cx)),
             )
             .on_action(cx.listener(|this, _: &actions::NewTab, window, cx| {
                 let dir = this.active().folder.read(cx).dir.clone();
@@ -176,6 +195,11 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::ToggleTheme, window, cx| {
                 this.toggle_theme(window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &actions::OpenInTerminal, window, cx| {
+                    this.open_current_in_terminal(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &actions::AddToFavorites, _, cx| {
                 this.add_current_to_favorites(cx)
             }))
@@ -260,7 +284,10 @@ impl Render for Browser {
                                     .border_color(cx.theme().border.opacity(0.7))
                                     .child(self.render_active_pane(window, cx)),
                             )
-                            .child(self.render_status_bar(cx)),
+                            .child(self.render_status_bar(cx))
+                            .when(self.terminal_visible, |el| {
+                                el.child(self.render_terminal_panel(window, cx))
+                            }),
                     ),
             )
     }

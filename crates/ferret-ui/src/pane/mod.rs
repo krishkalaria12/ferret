@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ferret_settings::{SortKey, SortOrder, ViewMode};
@@ -34,7 +36,7 @@ use gpui_component::{
 };
 
 use crate::actions;
-use crate::folder::{Folder, FolderEvent};
+use crate::folder::{Folder, FolderEvent, ListingProfile};
 use crate::format::{format_date, format_size};
 use crate::state::FerretState;
 use crate::theme::BrowserPalette;
@@ -52,9 +54,9 @@ pub use drag::{DraggedPaths, droppable};
 pub use list::FileColumn;
 
 use column_view::AncestorColumn;
-use drag::{DragPreview, DropQueue, ToggleQueue, drag_payload, external_payload, queue_drop};
+use drag::{DragPreview, DropQueue, ToggleQueue, drag_label, external_payload, queue_drop};
 use icon_view::Marquee;
-use list::{ColumnWidths, ListDelegate, SizeToContentQueue};
+use list::{ColumnLayout, ColumnWidths, Columns, ListDelegate, SizeToContentQueue};
 use menu::SpaceMenu;
 use rename::Renaming;
 
@@ -102,9 +104,9 @@ pub struct FilePane {
     marquee: Option<Marquee>,
     /// Shared with the delegate and the tile renderer for focus-aware fills.
     pane_focused: Arc<AtomicBool>,
-    /// Columns the user has turned off, shared with the delegate. Persisted
-    /// per folder through `FolderView::hidden_columns`.
-    hidden_columns: Arc<std::sync::Mutex<Vec<FileColumn>>>,
+    /// Which columns are on screen, shared with the delegate. What is hidden
+    /// is persisted per folder through `FolderView::hidden_columns`.
+    columns: Columns,
     /// Latest known pane width, shared with the delegate so the Name column
     /// can absorb the spare width the way §4 demands.
     pane_width: Arc<AtomicUsize>,
@@ -128,7 +130,7 @@ pub struct FilePane {
     /// The empty-space context menu, mounted at the right-click position.
     space_menu: Option<SpaceMenu>,
     /// Pane origin in window coordinates, for positioning the menu.
-    pane_origin: Arc<std::sync::Mutex<gpui::Point<gpui::Pixels>>>,
+    pane_origin: Arc<Mutex<gpui::Point<gpui::Pixels>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -163,22 +165,21 @@ impl FilePane {
     ) -> Self {
         let pane_focused = Arc::new(AtomicBool::new(false));
         let pane_width = Arc::new(AtomicUsize::new(0));
-        let drops: DropQueue = Arc::new(std::sync::Mutex::new(None));
-        let toggles: ToggleQueue = Arc::new(std::sync::Mutex::new(None));
-        let widths: ColumnWidths = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let sizing_requests: SizeToContentQueue = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let hidden_columns = Arc::new(std::sync::Mutex::new(
+        let drops: DropQueue = Arc::new(Mutex::new(None));
+        let toggles: ToggleQueue = Arc::new(Mutex::new(None));
+        let widths: ColumnWidths = Arc::new(Mutex::new(HashMap::new()));
+        let sizing_requests: SizeToContentQueue = Arc::new(Mutex::new(Vec::new()));
+        let columns: Columns = Arc::new(arc_swap::ArcSwap::from_pointee(ColumnLayout::new(
             hidden_columns
                 .iter()
-                .filter_map(|key| FileColumn::from_key(key))
-                .collect::<Vec<_>>(),
-        ));
+                .filter_map(|key| FileColumn::from_key(key)),
+        )));
         let table = cx.new(|cx| {
             let delegate = ListDelegate {
                 folder: folder.clone(),
                 pane_focused: pane_focused.clone(),
                 pane_width: pane_width.clone(),
-                hidden_columns: hidden_columns.clone(),
+                columns: columns.clone(),
                 drops: drops.clone(),
                 toggles: toggles.clone(),
                 widths: widths.clone(),
@@ -243,7 +244,7 @@ impl FilePane {
             focus,
             view_mode,
             pane_focused,
-            hidden_columns,
+            columns,
             icon_scroll: gpui::UniformListScrollHandle::new(),
             ancestors: Vec::new(),
             column_scroll: gpui::UniformListScrollHandle::new(),
@@ -251,7 +252,7 @@ impl FilePane {
             anchor_chain_right: false,
             marquee: None,
             pane_width,
-            pane_origin: Arc::new(std::sync::Mutex::new(gpui::point(px(0.), px(0.)))),
+            pane_origin: Arc::new(Mutex::new(gpui::point(px(0.), px(0.)))),
             space_menu: None,
             typeahead: String::new(),
             typeahead_at: std::time::Instant::now(),
@@ -288,25 +289,22 @@ impl FilePane {
     }
 
     /// Hidden column keys for the settings file, in a stable order.
+    ///
+    /// `ColumnLayout` already holds them in `HIDEABLE` order, so this is the
+    /// stable order rather than the order they were toggled off in.
     pub fn hidden_column_keys(&self) -> Vec<String> {
-        let hidden = self.hidden_columns.lock().unwrap();
-        FileColumn::HIDEABLE
-            .into_iter()
-            .filter(|c| hidden.contains(c))
+        self.columns
+            .load()
+            .hidden()
+            .iter()
             .map(|c| c.key().to_string())
             .collect()
     }
 
     /// Show or hide one column from the header's config menu.
     fn toggle_column(&mut self, column: FileColumn, cx: &mut Context<Self>) {
-        {
-            let mut hidden = self.hidden_columns.lock().unwrap();
-            if let Some(at) = hidden.iter().position(|c| *c == column) {
-                hidden.remove(at);
-            } else {
-                hidden.push(column);
-            }
-        }
+        let next = self.columns.load().with_toggled(column);
+        self.columns.store(Arc::new(next));
         // `refresh` is the "columns changed" hook: the table caches its column
         // groups, so a plain notify repaints stale geometry — the removed
         // column's slot stays behind and the config slot draws twice.

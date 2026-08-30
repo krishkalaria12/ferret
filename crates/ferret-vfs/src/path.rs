@@ -1,5 +1,7 @@
+use smol_str::SmolStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Identifies a mounted remote backend. Unused until remote mounts land, but
 /// present so [`VfsPath`] does not have to change shape when they do.
@@ -8,22 +10,36 @@ pub struct MountId(pub u32);
 
 /// A location the [`crate::Vfs`] can address.
 ///
-/// Local paths keep a real [`PathBuf`], so the standard library does the work
+/// Local paths keep a real [`Path`], so the standard library does the work
 /// and platform semantics — drive letters, UNC, UTF-16, case-insensitivity —
 /// stay correct without being reimplemented. Remote paths are always
 /// `/`-separated UTF-8, which is what SFTP, S3 and WebDAV all speak.
 ///
 /// Keeping the two apart in the type system is the point: it stops POSIX
 /// assumptions leaking into remote code, and Windows assumptions leaking out.
+///
+/// Both variants hold a shared handle rather than an owned buffer (D-35).
+/// Paths are long, they are genuinely shared — one lives in the listing, in
+/// the selection set, in a drag payload and in whatever background task is
+/// stat-ing it — and the render path clones them constantly. As an `Arc`,
+/// every one of those clones is a refcount bump instead of a heap allocation
+/// and a copy of sixty-odd bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VfsPath {
-    Local(PathBuf),
-    Remote { mount: MountId, path: String },
+    Local(Arc<Path>),
+    Remote { mount: MountId, path: Arc<str> },
 }
 
 impl VfsPath {
     pub fn local(path: impl Into<PathBuf>) -> Self {
-        VfsPath::Local(path.into())
+        VfsPath::Local(Arc::from(path.into()))
+    }
+
+    pub fn remote(mount: MountId, path: impl AsRef<str>) -> Self {
+        VfsPath::Remote {
+            mount,
+            path: Arc::from(path.as_ref()),
+        }
     }
 
     pub fn as_local(&self) -> Option<&Path> {
@@ -57,15 +73,12 @@ impl VfsPath {
     /// The containing directory, or `None` at a root.
     pub fn parent(&self) -> Option<VfsPath> {
         match self {
-            VfsPath::Local(p) => p.parent().map(|p| VfsPath::Local(p.to_path_buf())),
+            VfsPath::Local(p) => p.parent().map(|p| VfsPath::Local(Arc::from(p))),
             VfsPath::Remote { mount, path } => {
                 let trimmed = path.trim_end_matches('/');
                 let cut = trimmed.rfind('/')?;
                 let parent = if cut == 0 { "/" } else { &trimmed[..cut] };
-                Some(VfsPath::Remote {
-                    mount: *mount,
-                    path: parent.to_string(),
-                })
+                Some(VfsPath::remote(*mount, parent))
             }
         }
     }
@@ -102,25 +115,20 @@ impl VfsPath {
 
     pub fn join(&self, name: &str) -> VfsPath {
         match self {
-            VfsPath::Local(p) => VfsPath::Local(p.join(name)),
-            VfsPath::Remote { mount, path } => VfsPath::Remote {
-                mount: *mount,
-                path: format!("{}/{}", path.trim_end_matches('/'), name),
-            },
+            VfsPath::Local(p) => VfsPath::Local(Arc::from(p.join(name))),
+            VfsPath::Remote { mount, path } => {
+                VfsPath::remote(*mount, format!("{}/{}", path.trim_end_matches('/'), name))
+            }
         }
     }
 
     /// The extension in lowercase, for icon and preview dispatch.
-    pub fn extension(&self) -> Option<String> {
-        let name = self.file_name()?;
-        // A leading dot makes a hidden file, not an extension: `.gitignore`
-        // has no extension, `archive.tar.gz` has `gz`.
-        let (_, ext) = name.trim_start_matches('.').rsplit_once('.')?;
-        if ext.is_empty() {
-            None
-        } else {
-            Some(ext.to_ascii_lowercase())
-        }
+    ///
+    /// Prefer [`crate::Entry::extension`] wherever an entry is in hand: this
+    /// re-derives the answer, and the file list asks the same question once
+    /// per row per frame and millions of times inside a Kind sort (A-12).
+    pub fn extension(&self) -> Option<SmolStr> {
+        self.file_name().and_then(lowercase_extension)
     }
 
     /// Whether the platform considers this hidden purely from its name.
@@ -145,6 +153,23 @@ impl VfsPath {
     }
 }
 
+/// The lowercased extension of a file name, or `None` when it has none.
+///
+/// A leading dot makes a hidden file, not an extension: `.gitignore` has no
+/// extension, `archive.tar.gz` has `gz`. Already-lowercase names — nearly all
+/// of them — come back without touching the heap, because a `SmolStr` this
+/// short lives inline.
+pub(crate) fn lowercase_extension(name: &str) -> Option<SmolStr> {
+    let (_, ext) = name.trim_start_matches('.').rsplit_once('.')?;
+    if ext.is_empty() {
+        return None;
+    }
+    if ext.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Some(SmolStr::from(ext.to_ascii_lowercase()));
+    }
+    Some(SmolStr::new(ext))
+}
+
 impl fmt::Display for VfsPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -156,13 +181,13 @@ impl fmt::Display for VfsPath {
 
 impl From<PathBuf> for VfsPath {
     fn from(value: PathBuf) -> Self {
-        VfsPath::Local(value)
+        VfsPath::Local(Arc::from(value))
     }
 }
 
 impl From<&Path> for VfsPath {
     fn from(value: &Path) -> Self {
-        VfsPath::Local(value.to_path_buf())
+        VfsPath::Local(Arc::from(value))
     }
 }
 
@@ -186,10 +211,7 @@ mod tests {
     fn remote_containment_needs_the_same_mount() {
         let a = remote("/data");
         let same_mount = remote("/data/inner");
-        let other_mount = VfsPath::Remote {
-            mount: MountId(2),
-            path: "/data/inner".into(),
-        };
+        let other_mount = VfsPath::remote(MountId(2), "/data/inner");
 
         assert!(same_mount.starts_with(&a));
         // Two servers can both have /data; one is not inside the other.
@@ -201,10 +223,7 @@ mod tests {
     use super::*;
 
     fn remote(path: &str) -> VfsPath {
-        VfsPath::Remote {
-            mount: MountId(1),
-            path: path.to_string(),
-        }
+        VfsPath::remote(MountId(1), path)
     }
 
     #[test]

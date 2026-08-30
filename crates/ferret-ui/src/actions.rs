@@ -15,6 +15,8 @@ pub mod context {
     pub const PATH_BAR: &str = "PathBar";
     /// The sidebar has focus.
     pub const SIDEBAR: &str = "Sidebar";
+    /// The terminal panel has focus.
+    pub const TERMINAL: &str = "Terminal";
     /// `gpui-component`'s table installs this inside the file pane. Ferret
     /// rebinds Tab here so focus can leave the pane instead of walking the
     /// table's columns (§8).
@@ -30,6 +32,13 @@ actions!(
         Refresh,
         ToggleHidden,
         ToggleSidebar,
+        ToggleTerminal,
+        FocusTerminalOrPane,
+        ToggleTerminalSync,
+        /// Paste is its own action inside the terminal: the pane's `Paste`
+        /// moves files, and encoding the shortcut itself would send the shell
+        /// a raw `0x16` instead of the clipboard (§9).
+        TerminalPaste,
         NewTab,
         CloseTab,
         FocusPathBar,
@@ -37,6 +46,7 @@ actions!(
         ViewAsColumns,
         ViewAsIcons,
         ToggleTheme,
+        OpenInTerminal,
         AddToFavorites,
         FocusFilter,
         ClearFilter,

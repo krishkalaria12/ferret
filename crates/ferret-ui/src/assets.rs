@@ -24,8 +24,18 @@ impl AssetSource for Assets {
         gpui_component_assets::Assets.load(path)
     }
 
+    /// Assets under `path`, from both halves.
+    ///
+    /// The prefix filter is not decoration: this returned *every* embedded
+    /// Ferret asset whatever it was asked for, and only delegated the filter
+    /// to the library half (A-36). Nothing depended on the answer being right,
+    /// which is why it went unnoticed — and "nothing calls this correctly yet"
+    /// is a poor thing to rely on.
     fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
-        let mut out = FerretAssets::iter().map(Into::into).collect::<Vec<_>>();
+        let mut out: Vec<gpui::SharedString> = FerretAssets::iter()
+            .filter(|asset| asset.starts_with(path))
+            .map(Into::into)
+            .collect();
         out.extend(gpui_component_assets::Assets.list(path)?);
         Ok(out)
     }
@@ -37,4 +47,30 @@ pub fn file_icons_json() -> String {
     FerretAssets::get("icons/file-icons.json")
         .map(|f| String::from_utf8_lossy(&f.data).into_owned())
         .unwrap_or_else(|| "{}".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listing_a_directory_does_not_return_the_whole_bundle() {
+        let icons = Assets
+            .list("icons/file/")
+            .expect("the icon directory lists");
+        assert!(!icons.is_empty(), "the bundled file icons must be found");
+        assert!(
+            icons.iter().all(|a| a.starts_with("icons/file/")),
+            "list(path) must return assets under `path`, not everything"
+        );
+
+        // And a path with nothing under it returns nothing from our half.
+        let none = Assets
+            .list("icons/nothing-here/")
+            .expect("an empty listing is not an error");
+        assert!(
+            !none.iter().any(|a| a.starts_with("icons/file/")),
+            "an unrelated prefix must not drag in the icon set"
+        );
+    }
 }

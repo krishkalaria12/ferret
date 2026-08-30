@@ -6,6 +6,13 @@
 //! from `cx.theme()`, and only what `gpui-component` has no concept of lives
 //! in [`theme`].
 
+// The allocations-per-frame budget's counting allocator (`docs/audit.html`
+// §11). Test builds only, and only with `--features dhat-heap`; a release
+// binary never sees it.
+#[cfg(all(test, feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 pub mod actions;
 mod assets;
 mod browser;
@@ -21,6 +28,19 @@ pub use browser::{Browser, TITLE_BAR_HEIGHT, TRAFFIC_LIGHT_DIAMETER};
 pub use format::{format_date, format_size, natural_compare};
 pub use state::{FerretState, load_state};
 pub use theme::{BrowserPalette, TerminalPalette, register as register_theme};
+
+/// Write any settings or folder preferences the debounce has not flushed yet.
+///
+/// Saving is debounced by [`config::SAVE_DEBOUNCE`](ferret_settings::config::SAVE_DEBOUNCE)
+/// so a run of sort clicks costs one write rather than one per click — which
+/// means quitting inside that window would otherwise drop the last one. The
+/// binary hooks this to `App::on_app_quit`; it is the one config write allowed
+/// to block, because there is no next frame left to protect.
+pub fn flush_pending_saves(cx: &mut gpui::App) {
+    if cx.has_global::<FerretState>() {
+        cx.global_mut::<FerretState>().flush_pending_saves();
+    }
+}
 
 use gpui::{
     AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,

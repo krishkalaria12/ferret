@@ -2,49 +2,74 @@ use super::*;
 use ferret_vfs::{EntryKind, Metadata, SymlinkTarget};
 
 fn entry(name: &str, kind: EntryKind, len: u64, modified: Option<SystemTime>) -> Entry {
-    Entry {
-        path: VfsPath::local(format!("/x/{name}")),
-        name: name.to_string(),
-        kind,
-        metadata: Some(Metadata {
-            len,
-            modified,
-            // Mirror what LocalFs produces: the leading dot is hidden.
-            hidden: name.starts_with('.'),
-            ..Default::default()
-        }),
-        link_target: None,
-    }
+    Entry::new(VfsPath::local(format!("/x/{name}")), name, kind).with_metadata(Some(Metadata {
+        len,
+        modified,
+        // Mirror what LocalFs produces: the leading dot is hidden.
+        hidden: name.starts_with('.'),
+    }))
+}
+
+/// An entry inside an expanded folder, at its real path.
+///
+/// Distinct from [`entry`] because a child's path is what `by_path` keys on:
+/// giving `/x/src`'s children `/x/...` paths would make them collide with
+/// their own parent's siblings, and the subtree assertions below would pass
+/// without proving anything.
+fn child(dir: &str, name: &str, kind: EntryKind, len: u64) -> Entry {
+    Entry::new(VfsPath::local(format!("{dir}/{name}")), name, kind).with_metadata(Some(Metadata {
+        len,
+        hidden: name.starts_with('.'),
+        ..Default::default()
+    }))
 }
 
 fn t(secs: u64) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
+/// Plant a listing directly, as `apply_batch` would.
+fn plant(f: &mut Folder, entries: Vec<Entry>) {
+    for entry in entries {
+        let id = f.insert(entry, Placement::Top);
+        f.entries.push(id);
+    }
+}
+
 fn populated() -> Folder {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         false,
+        ListingProfile::BROWSING,
     );
-    f.entries = vec![
-        entry("report.pdf", EntryKind::File, 500, t(300)),
-        entry("zebra.txt", EntryKind::File, 100, t(200)),
-        entry("src", EntryKind::Dir, 0, t(100)),
-        entry(".hidden", EntryKind::File, 10, t(400)),
-    ];
+    plant(
+        &mut f,
+        vec![
+            entry("report.pdf", EntryKind::File, 500, t(300)),
+            entry("zebra.txt", EntryKind::File, 100, t(200)),
+            entry("src", EntryKind::Dir, 0, t(100)),
+            entry(".hidden", EntryKind::File, 10, t(400)),
+        ],
+    );
     // Tests skip the streaming phase; sort as `finish_loading` would.
     f.loading = false;
     f.resort();
     f
 }
 
+/// Names in display order — what the file list would draw.
+fn row_names(f: &Folder) -> Vec<String> {
+    (0..f.row_count())
+        .map(|r| f.entry_at(r).unwrap().name().to_string())
+        .collect()
+}
+
 #[test]
 fn hidden_entries_are_filtered_until_shown() {
     let f = populated();
     assert_eq!(f.row_count(), 3);
-    assert_eq!(f.entry_at(0).unwrap().name, "src");
+    assert_eq!(f.entry_at(0).unwrap().name(), "src");
 
     let mut f = populated();
     f.set_show_hidden(true);
@@ -55,10 +80,7 @@ fn hidden_entries_are_filtered_until_shown() {
 fn folders_come_first_then_natural_name_order() {
     let mut f = populated();
     f.set_show_hidden(true);
-    let names: Vec<_> = (0..f.row_count())
-        .map(|r| f.entry_at(r).unwrap().name.clone())
-        .collect();
-    assert_eq!(names, ["src", ".hidden", "report.pdf", "zebra.txt"]);
+    assert_eq!(row_names(&f), ["src", ".hidden", "report.pdf", "zebra.txt"]);
 }
 
 #[test]
@@ -66,7 +88,7 @@ fn size_sort_uses_display_len_and_reverses() {
     let mut f = populated();
     f.set_show_hidden(true);
     f.set_sort(SortKey::Size, SortOrder::Ascending);
-    assert_eq!(f.entry_at(0).unwrap().name, "src"); // dirs pinned first
+    assert_eq!(f.entry_at(0).unwrap().name(), "src"); // dirs pinned first
     assert_eq!(
         f.entry_at(1).unwrap().display_len(),
         Some(10),
@@ -82,9 +104,204 @@ fn modified_sort_orders_by_time() {
     let mut f = populated();
     f.set_show_hidden(true);
     f.set_sort(SortKey::Modified, SortOrder::Ascending);
-    assert_eq!(f.entry_at(0).unwrap().name, "src");
-    assert_eq!(f.entry_at(1).unwrap().name, "zebra.txt");
-    assert_eq!(f.entry_at(f.row_count() - 1).unwrap().name, ".hidden");
+    assert_eq!(f.entry_at(0).unwrap().name(), "src");
+    assert_eq!(f.entry_at(1).unwrap().name(), "zebra.txt");
+    assert_eq!(f.entry_at(f.row_count() - 1).unwrap().name(), ".hidden");
+}
+
+#[test]
+fn kind_sort_groups_by_the_cached_extension() {
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name().with_sort(SortKey::Kind, SortOrder::Ascending),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("b.txt", EntryKind::File, 1, None),
+            entry("a.zip", EntryKind::File, 1, None),
+            entry("c.txt", EntryKind::File, 1, None),
+            entry("Makefile", EntryKind::File, 1, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+
+    // No extension sorts before every extension, then txt, then zip — and
+    // within one extension, natural name order.
+    assert_eq!(row_names(&f), ["Makefile", "b.txt", "c.txt", "a.zip"]);
+}
+
+#[test]
+fn directories_first_can_be_turned_off() {
+    // `settings.browser.directories_first`. On, a folder outranks the sort
+    // key; off, it sorts among the files like anything else.
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("a-file.txt", EntryKind::File, 1, None),
+            entry("z-folder", EntryKind::Dir, 0, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["z-folder", "a-file.txt"], "folders pinned");
+
+    f.rules.directories_first = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["a-file.txt", "z-folder"], "interleaved");
+}
+
+#[test]
+fn natural_sort_can_be_turned_off() {
+    // `settings.browser.natural_sort`. On, digit runs compare numerically;
+    // off, they compare byte-wise, which is what `ls` does.
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("file9.txt", EntryKind::File, 1, None),
+            entry("file10.txt", EntryKind::File, 1, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["file9.txt", "file10.txt"], "9 before 10");
+
+    f.rules.natural = false;
+    f.resort();
+    assert_eq!(row_names(&f), ["file10.txt", "file9.txt"], "byte order");
+}
+
+/// What a full scan says the selection summary should be.
+///
+/// The incrementally-maintained counters (A-29) are only worth having if they
+/// agree with this after every operation — a drifted count is a status bar
+/// that lies, and it would drift silently.
+fn scanned_summary(f: &Folder) -> (usize, u64) {
+    let mut count = 0;
+    let mut bytes = 0;
+    for row in 0..f.row_count() {
+        if f.is_row_selected(row)
+            && let Some(entry) = f.entry_at(row)
+        {
+            count += 1;
+            bytes += entry.display_len().unwrap_or(0);
+        }
+    }
+    (count, bytes)
+}
+
+fn assert_summary_agrees(f: &Folder, after: &str) {
+    let scanned = scanned_summary(f);
+    assert_eq!(
+        (f.selection_count(), f.selection_size()),
+        scanned,
+        "the maintained summary drifted from a full scan after {after}"
+    );
+    // And the lazily-built path list has to agree with both.
+    assert_eq!(
+        f.selected_paths().len(),
+        scanned.0,
+        "the path list disagrees with the count after {after}"
+    );
+}
+
+#[test]
+fn the_selection_summary_never_drifts() {
+    let mut f = populated(); // src, report.pdf, zebra.txt, .hidden
+    f.set_show_hidden(true);
+    assert_summary_agrees(&f, "the initial listing");
+
+    // Every mutator, in sequences that leave the selection in different
+    // shapes — each one adjusts the totals rather than rescanning, so each
+    // one is a chance to drift.
+    f.select_only(0);
+    assert_summary_agrees(&f, "select_only");
+
+    f.toggle_select(2);
+    assert_summary_agrees(&f, "toggle_select adding");
+    f.toggle_select(2);
+    assert_summary_agrees(&f, "toggle_select removing");
+    // Toggling the same row twice more, to catch a counter that only drifts
+    // on a second pass.
+    f.toggle_select(1);
+    f.toggle_select(1);
+    assert_summary_agrees(&f, "toggle_select twice");
+
+    f.extend_select(3);
+    assert_summary_agrees(&f, "extend_select forwards");
+    f.extend_select(0);
+    assert_summary_agrees(&f, "extend_select backwards past the anchor");
+
+    f.select_rows([0, 2]);
+    assert_summary_agrees(&f, "select_rows");
+    f.select_rows([1, 1, 1]);
+    assert_summary_agrees(&f, "select_rows with duplicates");
+    f.select_rows([]);
+    assert_summary_agrees(&f, "select_rows with nothing");
+
+    f.select_all();
+    assert_summary_agrees(&f, "select_all");
+    f.clear_selection();
+    assert_summary_agrees(&f, "clear_selection");
+
+    // And across the operations that change *visibility* rather than the
+    // selection, which are the ones that must fall back to a full recount.
+    f.select_all();
+    f.set_filter(Some("t".into()));
+    assert_summary_agrees(&f, "a filter hiding some of the selection");
+    f.set_filter(None);
+    assert_summary_agrees(&f, "clearing the filter");
+    f.set_sort(SortKey::Size, SortOrder::Descending);
+    assert_summary_agrees(&f, "re-sorting");
+    f.set_show_hidden(false);
+    assert_summary_agrees(&f, "hiding hidden files");
+}
+
+#[test]
+fn the_summary_survives_a_watcher_burst() {
+    // The path that used to rebuild everything: a probe replaces an entry,
+    // and the totals have to follow its new size.
+    let mut f = populated();
+    f.select_all();
+    assert_summary_agrees(&f, "select_all");
+
+    // A selected file grows.
+    f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/report.pdf"),
+        Ok(entry("report.pdf", EntryKind::File, 9_999, t(1))),
+    )]);
+    assert_summary_agrees(&f, "a selected file changing size");
+
+    // A selected file vanishes.
+    f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/report.pdf"),
+        Err(ferret_vfs::VfsError::NotFound {
+            path: VfsPath::local("/x/report.pdf"),
+        }),
+    )]);
+    assert_summary_agrees(&f, "a selected file being deleted");
+
+    // And one arrives, unselected.
+    f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/new.txt"),
+        Ok(entry("new.txt", EntryKind::File, 42, t(2))),
+    )]);
+    assert_summary_agrees(&f, "an unselected file appearing");
 }
 
 #[test]
@@ -130,13 +347,52 @@ fn filter_narrows_and_reports_misses() {
     let mut f = populated();
     f.set_filter(Some("PDF".into()));
     assert_eq!(f.row_count(), 1);
-    assert_eq!(f.entry_at(0).unwrap().name, "report.pdf");
+    assert_eq!(f.entry_at(0).unwrap().name(), "report.pdf");
 
     f.set_filter(Some("zzz".into()));
     assert_eq!(f.row_count(), 0);
     // And clearing restores.
     f.set_filter(None);
     assert_eq!(f.row_count(), 3);
+}
+
+#[test]
+fn the_filter_reports_its_needle_back_verbatim() {
+    // The empty state names it — "No items match «PDF»" — so the compiled
+    // matcher must not be the only thing kept.
+    let mut f = populated();
+    f.set_filter(Some("PDF".into()));
+    assert_eq!(f.filter(), Some("PDF"));
+    f.set_filter(None);
+    assert_eq!(f.filter(), None);
+}
+
+#[test]
+fn a_non_ascii_needle_still_folds_case() {
+    // The aho-corasick fast path folds ASCII only, so anything else has to
+    // fall back rather than silently stop matching.
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        vec![
+            entry("Ärger.txt", EntryKind::File, 1, None),
+            entry("plain.txt", EntryKind::File, 1, None),
+        ],
+    );
+    f.loading = false;
+    f.resort();
+
+    f.set_filter(Some("ärg".into()));
+    assert_eq!(row_names(&f), ["Ärger.txt"]);
+
+    // And an ASCII needle still reaches into a non-ASCII name.
+    f.set_filter(Some("TXT".into()));
+    assert_eq!(f.row_count(), 2);
 }
 
 #[test]
@@ -164,9 +420,15 @@ fn shift_arrow_grows_and_shrinks_against_a_fixed_anchor() {
 /// Expand a folder without touching the executor, by planting its
 /// children directly — the model half of what `load_children` does.
 fn expand_with(f: &mut Folder, parent: &str, children: Vec<Entry>) {
-    let parent = VfsPath::local(parent);
-    f.expanded.insert(parent.clone());
-    f.children.insert(parent, children);
+    let parent = f
+        .id_of(&VfsPath::local(parent))
+        .expect("the folder being expanded must be listed");
+    f.expanded.insert(parent);
+    let ids = children
+        .into_iter()
+        .map(|child| f.insert(child, Placement::Nested))
+        .collect();
+    f.children.insert(parent, ids);
     f.rebuild_index_and_order();
 }
 
@@ -179,17 +441,14 @@ fn expanded_children_are_spliced_in_beneath_their_parent() {
         &mut f,
         "/x/src",
         vec![
-            entry("main.rs", EntryKind::File, 10, t(1)),
-            entry("lib.rs", EntryKind::File, 20, t(2)),
+            child("/x/src", "main.rs", EntryKind::File, 10),
+            child("/x/src", "lib.rs", EntryKind::File, 20),
         ],
     );
 
     // Children land directly under their parent, not at the end.
-    let names: Vec<_> = (0..f.row_count())
-        .map(|r| f.entry_at(r).unwrap().name.clone())
-        .collect();
     assert_eq!(
-        names,
+        row_names(&f),
         ["src", "main.rs", "lib.rs", "report.pdf", "zebra.txt"]
     );
 
@@ -212,7 +471,7 @@ fn a_child_row_is_selectable_like_any_other() {
     expand_with(
         &mut f,
         "/x/src",
-        vec![entry("main.rs", EntryKind::File, 10, t(1))],
+        vec![child("/x/src", "main.rs", EntryKind::File, 10)],
     );
 
     f.select_only(1); // main.rs
@@ -225,18 +484,44 @@ fn a_child_row_is_selectable_like_any_other() {
 }
 
 #[test]
+fn a_nested_name_does_not_shadow_a_top_level_one() {
+    // `by_name` indexes the browsed directory only, so an expanded folder
+    // holding a file named like a sibling of its parent must not take that
+    // name over — nor free it when the subtree is dropped.
+    let mut f = populated();
+    expand_with(
+        &mut f,
+        "/x/src",
+        vec![child("/x/src", "zebra.txt", EntryKind::File, 1)],
+    );
+    assert!(f.contains_name("zebra.txt"));
+
+    let top = f.id_of(&VfsPath::local("/x/zebra.txt")).unwrap();
+    let nested = f.id_of(&VfsPath::local("/x/src/zebra.txt")).unwrap();
+    assert_ne!(top, nested);
+    assert_eq!(f.by_name.get("zebra.txt"), Some(&top), "the top-level one");
+
+    let src = f.id_of(&VfsPath::local("/x/src")).unwrap();
+    f.forget_subtree(src);
+    f.rebuild_index_and_order();
+    assert!(
+        f.contains_name("zebra.txt"),
+        "collapsing the subtree must not unindex the sibling"
+    );
+}
+
+#[test]
 fn collapsing_forgets_the_subtree_it_was_showing() {
     let mut f = populated();
     expand_with(
         &mut f,
         "/x/src",
-        vec![entry("main.rs", EntryKind::File, 10, t(1))],
+        vec![child("/x/src", "main.rs", EntryKind::File, 10)],
     );
     assert_eq!(f.row_count(), 4);
 
-    // Collapse by hand, mirroring `toggle_expanded`'s model half.
-    f.expanded.remove(&VfsPath::local("/x/src"));
-    f.forget_subtree(&VfsPath::local("/x/src"));
+    let src = f.id_of(&VfsPath::local("/x/src")).unwrap();
+    f.forget_subtree(src);
     f.rebuild_index_and_order();
 
     assert_eq!(f.row_count(), 3);
@@ -253,28 +538,57 @@ fn the_filter_reaches_into_expanded_children() {
         &mut f,
         "/x/src",
         vec![
-            entry("main.rs", EntryKind::File, 10, t(1)),
-            entry("notes.txt", EntryKind::File, 20, t(2)),
+            child("/x/src", "main.rs", EntryKind::File, 10),
+            child("/x/src", "notes.txt", EntryKind::File, 20),
         ],
     );
 
     f.set_filter(Some("rs".into()));
-    let names: Vec<_> = (0..f.row_count())
-        .map(|r| f.entry_at(r).unwrap().name.clone())
-        .collect();
     // "src" does not itself match, but it is kept as the route to a child
     // that does — a filter that hid it would hide the match with it.
+    let names = row_names(&f);
     assert_eq!(names, ["src", "main.rs"], "{names:?}");
 }
 
 /// The model half of `start_loading`, without the executor.
 fn begin_reload(f: &mut Folder) {
+    f.carried = CarriedState {
+        selection: f
+            .selection
+            .iter()
+            .filter_map(|&id| Some(f.entry(id)?.path.clone()))
+            .collect(),
+        anchor: f.anchor.and_then(|id| Some(f.entry(id)?.path.clone())),
+        cursor: f.cursor.and_then(|id| Some(f.entry(id)?.path.clone())),
+        expanded: f
+            .expanded
+            .iter()
+            .filter_map(|&id| Some(f.entry(id)?.path.clone()))
+            .collect(),
+    };
+    f.slab.clear();
+    f.free.clear();
     f.entries.clear();
     f.order.clear();
-    f.row_of_path.clear();
-    f.top_index.clear();
-    f.known_paths.clear();
+    f.row_of_id.clear();
+    f.by_path.clear();
+    f.by_name.clear();
     f.children.clear();
+    f.expanded.clear();
+    f.selection.clear();
+    f.anchor = None;
+    f.cursor = None;
+}
+
+/// The model half of `apply_batch`, including the carried-state restore.
+fn land(f: &mut Folder, entries: Vec<Entry>) {
+    for entry in entries {
+        let path = entry.path.clone();
+        let id = f.insert(entry, Placement::Top);
+        f.entries.push(id);
+        f.restore_carried(id, &path);
+    }
+    f.rebuild_index_and_order();
 }
 
 #[test]
@@ -283,40 +597,92 @@ fn a_reload_leaves_no_index_pointing_at_the_old_listing() {
     expand_with(
         &mut f,
         "/x/src",
-        vec![entry("main.rs", EntryKind::File, 10, t(1))],
+        vec![child("/x/src", "main.rs", EntryKind::File, 10)],
     );
     assert!(f.has_entry(&VfsPath::local("/x/report.pdf")));
 
     begin_reload(&mut f);
 
-    // Every derived index goes with the listing it described. A stale
-    // `top_index` is the dangerous one: a watcher probe arriving mid-
-    // reload would resolve an old path to an index that now points at a
-    // different entry, and overwrite that one instead.
-    assert!(f.top_index.is_empty(), "top_index must not survive");
-    assert!(f.known_paths.is_empty(), "known_paths must not survive");
+    // Every derived index goes with the listing it described. A stale name
+    // index is the dangerous one: a watcher probe arriving mid-reload would
+    // resolve an old name to a slot that now holds a different entry, and
+    // overwrite that one instead.
+    assert!(f.by_name.is_empty(), "the name index must not survive");
+    assert!(f.by_path.is_empty(), "the path index must not survive");
     assert!(f.children.is_empty(), "children must be re-read");
     assert!(!f.has_entry(&VfsPath::local("/x/report.pdf")));
 
     // Which folders are open is the user's intent, not derived state, so
     // a refresh must not collapse the tree.
-    assert!(f.expanded.contains(&VfsPath::local("/x/src")));
+    assert!(f.carried.expanded.contains(&VfsPath::local("/x/src")));
+}
+
+#[test]
+fn a_reload_restores_selection_cursor_and_expansion_by_path() {
+    let mut f = populated();
+    expand_with(
+        &mut f,
+        "/x/src",
+        vec![child("/x/src", "main.rs", EntryKind::File, 10)],
+    );
+    f.select_only(0); // src
+    let before = f.id_of(&VfsPath::local("/x/src")).unwrap();
+
+    begin_reload(&mut f);
+    // The same directory comes back, in a different arrival order.
+    land(
+        &mut f,
+        vec![
+            entry("zebra.txt", EntryKind::File, 100, t(200)),
+            entry("src", EntryKind::Dir, 0, t(100)),
+            entry("report.pdf", EntryKind::File, 500, t(300)),
+        ],
+    );
+
+    let after = f.id_of(&VfsPath::local("/x/src")).unwrap();
+    assert_ne!(before, after, "a reload allocates fresh ids");
+    assert_eq!(f.selection_count(), 1, "the selection came back");
+    assert_eq!(
+        f.cursor_path().as_ref().map(ToString::to_string).as_deref(),
+        Some("/x/src")
+    );
+    assert!(
+        f.expanded.contains(&after),
+        "an open folder is still open after a refresh"
+    );
+}
+
+#[test]
+fn a_reload_forgets_what_no_longer_exists() {
+    let mut f = populated();
+    f.select_only(0); // src
+
+    begin_reload(&mut f);
+    land(&mut f, vec![entry("other.txt", EntryKind::File, 1, t(1))]);
+    // `finish_loading` drops whatever the listing never produced.
+    f.carried = CarriedState::default();
+
+    assert_eq!(f.selection_count(), 0);
+    assert_eq!(f.cursor_path(), None);
 }
 
 #[test]
 fn a_probe_after_a_reload_edits_the_right_entry() {
     let mut f = populated();
     begin_reload(&mut f);
+    f.carried = CarriedState::default();
 
     // The new listing happens to put a different file where "src" was.
-    f.entries = vec![
-        entry("aaa.txt", EntryKind::File, 1, t(1)),
-        entry("bbb.txt", EntryKind::File, 2, t(2)),
-    ];
-    f.rebuild_index_and_order();
+    land(
+        &mut f,
+        vec![
+            entry("aaa.txt", EntryKind::File, 1, t(1)),
+            entry("bbb.txt", EntryKind::File, 2, t(2)),
+        ],
+    );
 
     // A probe for a path from the *old* listing must find nothing rather
-    // than land on whatever now sits at the old index.
+    // than land on whatever now sits at the old slot.
     let changed = f.apply_probes(vec![(
         std::path::PathBuf::from("/x/zebra.txt"),
         Err(ferret_vfs::VfsError::NotFound {
@@ -324,9 +690,7 @@ fn a_probe_after_a_reload_edits_the_right_entry() {
         }),
     )]);
     assert!(!changed, "a vanished stale path changes nothing");
-    assert_eq!(f.row_count(), 2);
-    assert_eq!(f.entry_at(0).unwrap().name, "aaa.txt");
-    assert_eq!(f.entry_at(1).unwrap().name, "bbb.txt");
+    assert_eq!(row_names(&f), ["aaa.txt", "bbb.txt"]);
 }
 
 #[test]
@@ -352,9 +716,9 @@ fn marquee_selection_replaces_rather_than_accumulates() {
 fn extending_in_an_empty_folder_is_harmless() {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         false,
+        ListingProfile::BROWSING,
     );
     f.loading = false;
     assert_eq!(f.extend_cursor(1), None);
@@ -407,7 +771,7 @@ fn watcher_probes_insert_and_remove_without_relisting() {
     )]);
     assert!(changed);
     assert_eq!(f.row_count(), 4);
-    assert_eq!(f.entry_at(1).unwrap().name, "aaa.txt"); // after src, before report
+    assert_eq!(f.entry_at(1).unwrap().name(), "aaa.txt"); // after src, before report
 
     // It vanishes: the row goes without a re-list.
     let changed = f.apply_probes(vec![(
@@ -418,6 +782,102 @@ fn watcher_probes_insert_and_remove_without_relisting() {
     )]);
     assert!(changed);
     assert_eq!(f.row_count(), 3);
+}
+
+#[test]
+fn watcher_probe_batch_removes_each_original_entry() {
+    let mut f = populated(); // src, report.pdf, zebra.txt, .hidden
+
+    // `report.pdf` is before `zebra.txt` in `entries`. Removing it used to
+    // shift zebra's index, then the stale index for zebra removed `.hidden`.
+    // A watcher burst must resolve both against the same pre-batch model.
+    let changed = f.apply_probes(vec![
+        (
+            std::path::PathBuf::from("/x/report.pdf"),
+            Err(ferret_vfs::VfsError::NotFound {
+                path: VfsPath::local("/x/report.pdf"),
+            }),
+        ),
+        (
+            std::path::PathBuf::from("/x/zebra.txt"),
+            Err(ferret_vfs::VfsError::NotFound {
+                path: VfsPath::local("/x/zebra.txt"),
+            }),
+        ),
+    ]);
+
+    assert!(changed);
+    let names: Vec<&str> = f
+        .entries
+        .iter()
+        .map(|&id| f.entry(id).unwrap().name())
+        .collect();
+    assert_eq!(names, ["src", ".hidden"]);
+}
+
+#[test]
+fn a_file_rewritten_in_place_keeps_its_row_and_its_selection() {
+    // The point of a stable id: an editor saving over a selected file sends
+    // a probe that replaces the entry wholesale, and the selection, cursor
+    // and anchor must all still be pointing at it afterwards.
+    let mut f = populated();
+    f.select_only(1); // report.pdf
+    let id = f.id_of(&VfsPath::local("/x/report.pdf")).unwrap();
+
+    let changed = f.apply_probes(vec![(
+        std::path::PathBuf::from("/x/report.pdf"),
+        Ok(entry("report.pdf", EntryKind::File, 999, t(5000))),
+    )]);
+
+    assert!(changed);
+    assert_eq!(
+        f.id_of(&VfsPath::local("/x/report.pdf")),
+        Some(id),
+        "the same row, not a new one"
+    );
+    assert_eq!(f.selection_count(), 1);
+    assert_eq!(
+        f.selection_size(),
+        999,
+        "the new size reaches the status bar"
+    );
+    assert_eq!(f.cursor_row(), Some(1));
+}
+
+#[test]
+fn removed_slots_are_reused_rather_than_leaked() {
+    // A watched directory churning for hours must not grow the slab without
+    // bound: every removal returns its slot.
+    let mut f = populated();
+    let baseline = f.slab.len();
+
+    for round in 0..50 {
+        let name = format!("churn-{round}.tmp");
+        f.apply_probes(vec![(
+            std::path::PathBuf::from(format!("/x/{name}")),
+            Ok(entry(&name, EntryKind::File, 1, t(1))),
+        )]);
+        f.apply_probes(vec![(
+            std::path::PathBuf::from(format!("/x/{name}")),
+            Err(ferret_vfs::VfsError::NotFound {
+                path: VfsPath::local(format!("/x/{name}")),
+            }),
+        )]);
+    }
+
+    assert_eq!(f.slab.len(), baseline + 1, "one slot, reused fifty times");
+    assert_eq!(f.row_count(), 3, "and the listing is back where it started");
+}
+
+#[test]
+fn contains_name_answers_for_the_browsed_directory() {
+    let f = populated();
+    assert!(f.contains_name("report.pdf"));
+    assert!(
+        f.contains_name(".hidden"),
+        "a hidden row still owns its name"
+    );
+    assert!(!f.contains_name("nothing.txt"));
 }
 
 #[test]
@@ -432,22 +892,250 @@ fn selecting_out_of_range_is_harmless() {
 fn symlinked_directories_sort_as_directories() {
     let mut f = Folder::new(
         VfsPath::local("/x"),
-        SortKey::Name,
-        SortOrder::Ascending,
+        SortRules::by_name(),
         true,
+        ListingProfile::BROWSING,
     );
-    f.entries = vec![
-        entry("b.txt", EntryKind::File, 1, None),
-        entry(
-            "a-link",
-            EntryKind::Symlink {
-                target_kind: Some(SymlinkTarget::Dir),
-            },
-            0,
-            None,
-        ),
-    ];
+    plant(
+        &mut f,
+        vec![
+            entry("b.txt", EntryKind::File, 1, None),
+            entry(
+                "a-link",
+                EntryKind::Symlink {
+                    target_kind: Some(SymlinkTarget::Dir),
+                },
+                0,
+                None,
+            ),
+        ],
+    );
     f.loading = false;
     f.resort();
-    assert_eq!(f.entry_at(0).unwrap().name, "a-link");
+    assert_eq!(f.entry_at(0).unwrap().name(), "a-link");
+}
+
+/// How long one full reindex of a large listing takes.
+///
+/// A measurement, not an assertion: it is what the D-36 numbers in the
+/// commit history were taken with, so the claim stays reproducible.
+/// `cargo test -p ferret-ui --release reindex_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn reindex_cost_on_a_large_listing() {
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| entry(&format!("file-{i:06}.txt"), EntryKind::File, i, t(i)))
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        f.rebuild_index_and_order();
+    }
+    println!("reindex: {:?} per pass", start.elapsed() / 10);
+}
+
+/// How long a Kind-header click and a filter keystroke cost on a large
+/// listing. A measurement, not an assertion — same role as
+/// [`reindex_cost_on_a_large_listing`].
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn sort_and_filter_cost_on_a_large_listing() {
+    const EXTS: [&str; 8] = ["txt", "rs", "png", "md", "toml", "json", "zip", "log"];
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| {
+                entry(
+                    &format!("file-{i:06}.{}", EXTS[i as usize % EXTS.len()]),
+                    EntryKind::File,
+                    i,
+                    t(i),
+                )
+            })
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+
+    let start = std::time::Instant::now();
+    for i in 0..6 {
+        let order = if i % 2 == 0 {
+            SortOrder::Ascending
+        } else {
+            SortOrder::Descending
+        };
+        f.rules = f.rules.with_sort(SortKey::Kind, order);
+        f.resort();
+    }
+    println!("kind sort: {:?} per click", start.elapsed() / 6);
+
+    let start = std::time::Instant::now();
+    for needle in ["f", "fi", "fil", "file", "file-1", "file-12"] {
+        f.set_filter(Some(needle.to_string()));
+    }
+    println!("filter: {:?} per keystroke", start.elapsed() / 6);
+}
+
+/// What one selection change costs on a large listing (A-29).
+///
+/// A measurement, not an assertion — the sibling of
+/// `reindex_cost_on_a_large_listing`. Run with
+/// `cargo test -p ferret-ui --release selection_summary_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn selection_summary_cost() {
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| entry(&format!("file-{i:06}.txt"), EntryKind::File, i, t(i)))
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+    f.select_only(0);
+
+    // A marquee drag: extend the band by one row, over and over.
+    let start = std::time::Instant::now();
+    for row in 1..201 {
+        f.extend_select(row);
+        std::hint::black_box((f.selection_count(), f.selection_size()));
+    }
+    println!("small band:  {:?} per change", start.elapsed() / 200);
+
+    // The worst case: everything selected, then one more change.
+    f.select_all();
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        f.toggle_select(0);
+        std::hint::black_box((f.selection_count(), f.selection_size()));
+    }
+    println!("everything selected: {:?} per change", start.elapsed() / 20);
+}
+
+/// What the column view's metadata panel costs per frame (A-16, and the
+/// regression this nearly became). A measurement, not an assertion.
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn selected_entry_cost() {
+    let mut f = Folder::new(
+        VfsPath::local("/x"),
+        SortRules::by_name(),
+        true,
+        ListingProfile::BROWSING,
+    );
+    plant(
+        &mut f,
+        (0..200_000)
+            .map(|i| entry(&format!("file-{i:06}.txt"), EntryKind::File, i, t(i)))
+            .collect(),
+    );
+    f.loading = false;
+    f.resort();
+
+    // The worst case for a scan: the one selected row is the very last.
+    f.select_only(f.row_count() - 1);
+
+    let start = std::time::Instant::now();
+    for _ in 0..1_000 {
+        std::hint::black_box(f.selected_entry().map(|e| e.name().len()));
+    }
+    println!("selected_entry: {:?} per frame", start.elapsed() / 1_000);
+}
+
+// ----------------------------------------------------------------------
+// What a listing asks the backend for (A-14)
+
+/// `Capabilities` as the local backend reports them on this platform.
+fn local_caps() -> ferret_vfs::Capabilities {
+    ferret_vfs::LocalFs::new().capabilities()
+}
+
+fn caps_with_hidden_in_listing(hidden_in_listing: bool) -> ferret_vfs::Capabilities {
+    ferret_vfs::Capabilities {
+        hidden_in_listing,
+        ..local_caps()
+    }
+}
+
+#[test]
+fn a_browsed_listing_always_asks_for_everything() {
+    // Every column the file pane draws needs it, so there is nothing to skip.
+    for key in [
+        SortKey::Name,
+        SortKey::Modified,
+        SortKey::Size,
+        SortKey::Kind,
+    ] {
+        let rules = SortRules {
+            key,
+            ..SortRules::by_name()
+        };
+        for show_hidden in [false, true] {
+            assert_eq!(
+                ListingProfile::BROWSING.detail(rules, show_hidden, local_caps()),
+                ferret_vfs::ListingDetail::Full,
+                "{key:?}/{show_hidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_navigating_listing_skips_the_stat_only_when_nothing_can_observe_it() {
+    let by_name = SortRules::by_name();
+    let by_size = SortRules {
+        key: SortKey::Size,
+        ..by_name
+    };
+    let unix = caps_with_hidden_in_listing(false);
+    let windows = caps_with_hidden_in_listing(true);
+
+    // The case the profile exists for: nothing drawn needs metadata, and the
+    // hidden flag cannot change the answer because hidden rows are shown.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_name, true, unix),
+        ferret_vfs::ListingDetail::NamesOnly
+    );
+    // Windows reports the hidden attribute with the name, so the filter costs
+    // nothing and the skip is safe either way.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_name, false, windows),
+        ferret_vfs::ListingDetail::NamesOnly
+    );
+
+    // On Unix with hidden rows filtered, `UF_HIDDEN` rides the same call —
+    // skipping it would show `bin`, `etc` and `usr` in an ancestor column of
+    // `/` while the pane beside it hid them.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_name, false, unix),
+        ferret_vfs::ListingDetail::Full
+    );
+    // And ordering by a key the entries would not carry is a sort over zeroes.
+    assert_eq!(
+        ListingProfile::NAVIGATING.detail(by_size, true, unix),
+        ferret_vfs::ListingDetail::Full
+    );
 }
