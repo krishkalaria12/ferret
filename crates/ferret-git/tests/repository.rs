@@ -246,3 +246,51 @@ fn a_refused_operation_carries_gits_own_message() {
         "git's own words must survive: {text}"
     );
 }
+
+/// A symlink to a directory is recorded by git under its **own** path.
+///
+/// The distinction the listing has to respect. Ferret classifies such a link as
+/// directory-*like*, because double-clicking it navigates — but git gives it
+/// mode `120000` and emits it as an ordinary changed-file record, so it lands in
+/// the file index and never in the per-directory roll-up. A lookup keyed on
+/// "navigates like a directory" therefore asks the wrong map and finds nothing,
+/// and a modified link stays silently unbadged in every view.
+///
+/// Written against a real repository rather than a byte literal on purpose: the
+/// claim being tested is about what git does, not about the parser.
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_directory_is_indexed_as_a_file() {
+    let Some(fixture) = repository("dirlink") else {
+        return;
+    };
+    fixture.write("realdir/a.txt", "a\n");
+    std::os::unix::fs::symlink("realdir", fixture.path("dirlink")).unwrap();
+    fixture.git(&["add", "-A"]);
+    fixture.git(&["commit", "-qm", "one"]);
+
+    // Repoint the link. The link changed; nothing inside `realdir` did.
+    std::fs::remove_file(fixture.path("dirlink")).unwrap();
+    std::os::unix::fs::symlink(".", fixture.path("dirlink")).unwrap();
+
+    let repo = ferret_git::discover(&VfsPath::local(fixture.root.clone()))
+        .unwrap()
+        .unwrap();
+    let index = ferret_git::status(&repo).unwrap().index;
+
+    // Present as a file…
+    assert_eq!(
+        index.status_for(&fixture.path("dirlink"), false),
+        Some(FileStatus::Modified),
+        "git records the link itself, under its own path"
+    );
+    // …and absent from the directory map, which is what the badge lookup used
+    // to consult for it.
+    assert_eq!(
+        index.status_for(&fixture.path("dirlink"), true),
+        None,
+        "a changed symlink puts nothing in the per-directory roll-up"
+    );
+    // The directory it points at is untouched, and must not inherit a badge.
+    assert_eq!(index.status_for(&fixture.path("realdir"), true), None);
+}

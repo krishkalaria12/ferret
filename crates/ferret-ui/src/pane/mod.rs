@@ -310,9 +310,15 @@ impl FilePane {
     ///
     /// One atomic load and one hash of a borrowed path — no allocation, so
     /// this is safe to call once per row per frame (Gate 7).
+    ///
+    /// `is_directory`, **not** `is_dir_like`: the flag picks which of the two
+    /// indices to hash against, and git puts a symlink in the file one whatever
+    /// its target is. A symlink to a directory is dir-*like* — it navigates —
+    /// so `is_dir_like` sent it to the directory roll-up, where it is not and
+    /// never will be, and editing one left the row silently unbadged.
     fn git_status(&self, entry: &ferret_vfs::Entry) -> Option<ferret_git::FileStatus> {
         let path = entry.path.as_local()?;
-        self.git.load().status_for(path, entry.is_dir_like())
+        self.git.load().status_for(path, entry.is_directory())
     }
 
     /// Hidden column keys for the settings file, in a stable order.

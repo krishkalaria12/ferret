@@ -207,9 +207,13 @@ impl ListDelegate {
     /// One atomic load and one hash of a path already held by the entry: no
     /// join, no format, no allocation. That is the whole of what Gate 7 asks
     /// of this feature, and it is checked by `just budget`.
+    ///
+    /// `is_directory` rather than `is_dir_like`, for the reason spelled out on
+    /// `FilePane::git_status`: git records a symlink under its own path even
+    /// when it points at a directory.
     fn git_status(&self, entry: &ferret_vfs::Entry) -> Option<ferret_git::FileStatus> {
         let path = entry.path.as_local()?;
-        self.git.load().status_for(path, entry.is_dir_like())
+        self.git.load().status_for(path, entry.is_directory())
     }
 }
 
