@@ -244,6 +244,10 @@ pub struct Browser {
     /// The commit dialog's state, kept across opens so a message survives an
     /// accidental Escape. `None` until the dialog is opened for the first time.
     commit_dialog: Option<Entity<CommitDialog>>,
+    /// Re-reads git status when the window comes back to the front. Held here
+    /// so it lasts as long as the window does; see
+    /// [`Browser::observe_git_activation`] for why the feature needs it.
+    _git_activation: Subscription,
 }
 
 struct BrowserTab {
@@ -370,6 +374,7 @@ impl Browser {
             sidebar_focus: cx.focus_handle(),
             git: GitPanel::new(),
             commit_dialog: None,
+            _git_activation: Self::observe_git_activation(window, cx),
         };
         this.push_tab(start_directory(), window, cx);
         if this.terminal_visible {

@@ -60,6 +60,19 @@ pub(super) struct CommitDialog {
     /// The repository name, shown under the title so a commit cannot be made
     /// into the wrong repository without the chance to notice.
     repository: SharedString,
+    /// The work tree the draft above belongs to.
+    ///
+    /// The name is for the *reader*; this is for the code, and they are not
+    /// interchangeable — two checkouts of the same project are both called
+    /// `ferret`. See [`Browser::open_commit_dialog`], which resets the draft
+    /// when this changes.
+    worktree: PathBuf,
+    /// True from the moment Commit is pressed until git has answered.
+    ///
+    /// The dialog stays up for that whole window, so this is what stops a
+    /// second press queueing a second commit and what tells the user which
+    /// state they are in.
+    committing: bool,
     /// The body's painted height, written on prepaint and read by the builder
     /// that positions the dialog.
     ///
@@ -71,7 +84,12 @@ pub(super) struct CommitDialog {
 }
 
 impl CommitDialog {
-    fn new(repository: SharedString, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        repository: SharedString,
+        worktree: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let message =
             cx.new(|cx| TextareaState::new(window, cx).placeholder("Describe what changed"));
         // Typing has to repaint the dialog, because the Commit button is
@@ -82,6 +100,8 @@ impl CommitDialog {
             message,
             stage_all: true,
             repository,
+            worktree,
+            committing: false,
             height: Arc::new(Mutex::new(ESTIMATED_HEIGHT)),
             _subscriptions: vec![subscription],
         }
@@ -94,12 +114,37 @@ impl CommitDialog {
     fn can_commit(&self, cx: &App) -> bool {
         !self.text(cx).is_empty()
     }
+
+    /// Point the dialog at a repository, discarding the draft if it is a
+    /// different one.
+    ///
+    /// A draft is only ever meaningful for the tree it was written about, and
+    /// the checkbox goes back to its default with it: "stage all" turned off
+    /// deliberately in one repository is not a decision about another.
+    fn follow(
+        &mut self,
+        repository: SharedString,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.repository = repository;
+        if self.worktree != worktree {
+            self.worktree = worktree.to_path_buf();
+            self.stage_all = true;
+            self.message.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+        }
+        cx.notify();
+    }
 }
 
 impl Render for CommitDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let ready = self.can_commit(cx);
+        let committing = self.committing;
+        let ready = self.can_commit(cx) && !committing;
         let measured = self.height.clone();
 
         v_flex()
@@ -152,6 +197,10 @@ impl Render for CommitDialog {
                 Checkbox::new("git-stage-all")
                     .label("Stage all changes first (git add -A)")
                     .checked(self.stage_all)
+                    // Changing what is about to be staged, after it has been
+                    // staged, would describe a commit that is not the one
+                    // running.
+                    .disabled(committing)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.stage_all = *checked;
                         cx.notify();
@@ -171,12 +220,22 @@ impl Render for CommitDialog {
                         Button::new("commit-cancel")
                             .outline()
                             .label("Cancel")
+                            // Dismissing mid-commit would leave git running
+                            // behind a dialog that claimed to have cancelled it.
+                            .disabled(committing)
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
                     )
                     .child(
                         Button::new("commit-ok")
                             .primary()
-                            .label("Commit")
+                            // Named for what is happening, not spun: the dialog
+                            // now outlives the operation, so this label is the
+                            // only thing saying why it is still on screen.
+                            .label(if committing {
+                                "Committing…"
+                            } else {
+                                "Commit"
+                            })
                             .disabled(!ready)
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(Confirm { secondary: false }), cx)
@@ -212,18 +271,22 @@ impl Browser {
             return;
         }
         let name = SharedString::from(repo.name().to_string());
+        let worktree = repo.workdir().to_path_buf();
 
         let dialog = match &self.commit_dialog {
             Some(existing) => {
+                // The entity outlives each open, and so would its draft: the
+                // repository can have changed since the last one, and a message
+                // written about repository A must not be presented as the
+                // message for repository B. `follow` keeps the draft only if
+                // the work tree is the same one.
                 existing.update(cx, |dialog, cx| {
-                    // The repository can have changed since the last open.
-                    dialog.repository = name.clone();
-                    cx.notify();
+                    dialog.follow(name.clone(), &worktree, window, cx);
                 });
                 existing.clone()
             }
             None => {
-                let created = cx.new(|cx| CommitDialog::new(name, window, cx));
+                let created = cx.new(|cx| CommitDialog::new(name, worktree, window, cx));
                 self.commit_dialog = Some(created.clone());
                 created
             }
@@ -238,46 +301,86 @@ impl Browser {
 
         let browser = cx.weak_entity();
         let measured = dialog.read(cx).height.clone();
-        window.open_dialog(cx, move |modal, window, _cx| {
+        window.open_dialog(cx, move |modal, window, cx| {
             let dialog = dialog.clone();
             let browser = browser.clone();
+            let committing = dialog.read(cx).committing;
             modal
                 .w(px(DIALOG_WIDTH))
                 .close_button(false)
+                // While git is running there is no way out of the dialog that
+                // would stop it, so neither Escape nor the backdrop offers one.
+                // Both come back the instant it settles.
+                .keyboard(!committing)
+                .overlay_closable(!committing)
                 // `Dialog` centres itself horizontally and then puts its top at
                 // a tenth of the viewport, because it cannot know how tall it
                 // is going to be. This view does know — it measured itself last
                 // frame — so it finishes the job.
                 .margin_top(px(centred_top(*measured.lock(), window)))
                 .child(dialog.clone())
+                // Always `false`: the dialog is never closed by confirming it.
+                //
+                // Closing here would be closing on "the commit has been
+                // *started*", and git has not answered yet. A `pre-commit` hook
+                // that rejects, an unset `user.email`, a lock held by the
+                // terminal panel below — each of those arrives after this
+                // returns, and with the modal already gone the user gets a
+                // toast and an empty screen, and has to reopen the dialog to
+                // act on a message that was only preserved by a separate rule
+                // elsewhere. `settle_commit_dialog` dismisses it on success
+                // instead, which is the only outcome that means "done".
                 .on_ok(move |_, window, cx| {
                     let Some(browser) = browser.upgrade() else {
                         return true;
                     };
-                    let (message, stage_all) =
-                        dialog.read_with(cx, |dialog, cx| (dialog.text(cx), dialog.stage_all));
-                    if message.is_empty() {
-                        // Keep the dialog open rather than committing nothing.
+                    let (message, stage_all, committing) = dialog.read_with(cx, |dialog, cx| {
+                        (dialog.text(cx), dialog.stage_all, dialog.committing)
+                    });
+                    // An empty message commits nothing; a second Confirm while
+                    // one is in flight would queue a duplicate.
+                    if message.is_empty() || committing {
                         return false;
                     }
+                    dialog.update(cx, |dialog, cx| {
+                        dialog.committing = true;
+                        cx.notify();
+                    });
                     browser.update(cx, |browser, cx| {
                         browser.git_commit(message, stage_all, window, cx);
                     });
-                    true
+                    false
                 })
         });
         cx.notify();
     }
 
-    /// Clear the message after a commit lands, so the next one starts empty.
-    pub(super) fn clear_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// git has answered. Take the dialog out of its in-flight state, and — only
+    /// if the commit landed — clear the message and dismiss it.
+    ///
+    /// A refused commit keeps both the dialog and the message, which is the
+    /// whole point: the fix is usually a word in the message or the checkbox
+    /// beneath it, and the user is already looking at both.
+    pub(super) fn settle_commit_dialog(
+        &mut self,
+        committed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(dialog) = self.commit_dialog.clone() else {
             return;
         };
         dialog.update(cx, |dialog, cx| {
-            dialog.message.update(cx, |state, cx| {
-                state.set_value("", window, cx);
-            });
+            dialog.committing = false;
+            if committed {
+                dialog.message.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+            }
+            cx.notify();
         });
+        if committed {
+            window.close_dialog(cx);
+        }
     }
 }

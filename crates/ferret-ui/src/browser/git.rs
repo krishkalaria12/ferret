@@ -28,24 +28,34 @@ pub(crate) struct GitSnapshot {
     /// `None` when the folder is not in a repository, or the status could not
     /// be read. Either way the segment is absent and no row carries a badge.
     status: Option<RepoStatus>,
-    /// The browsed directory sits inside a directory git reported as wholly
-    /// untracked, so git said nothing about anything in it (`docs/git.html`
-    /// §7, rule 4).
+    /// The wholly-untracked directory the browsed folder sits inside, if it
+    /// does. git collapses such a directory to a single entry and says nothing
+    /// about anything within it, so the listing has to (`docs/git.html` §7,
+    /// rule 4).
     ///
     /// Resolved once here, when the snapshot is built, rather than per row: the
     /// answer is the same for every row in one listing, and a per-row ancestor
     /// walk is exactly the O(the directory) work Gate 7 forbids.
-    all_untracked: bool,
+    ///
+    /// The path is kept rather than a bare flag because the rows a snapshot is
+    /// asked about are **not** all in the browsed folder. Column view draws
+    /// every ancestor column at once, so browsing `repo/vendor/lib` under an
+    /// untracked `vendor/` also renders `repo`'s own listing — where the
+    /// tracked, clean siblings of `vendor` would inherit the fallback and be
+    /// badged as untracked.
+    untracked_root: Option<PathBuf>,
 }
 
 impl GitSnapshot {
     /// The badge for one row. One hash of a borrowed path, no allocation.
     pub(crate) fn status_for(&self, path: &Path, is_dir: bool) -> Option<FileStatus> {
         let status = self.status.as_ref()?;
-        status
-            .index
-            .status_for(path, is_dir)
-            .or_else(|| self.all_untracked.then_some(FileStatus::Untracked))
+        status.index.status_for(path, is_dir).or_else(|| {
+            // `starts_with` is component-wise and borrows both sides, so the
+            // narrowing costs no allocation.
+            let root = self.untracked_root.as_deref()?;
+            path.starts_with(root).then_some(FileStatus::Untracked)
+        })
     }
 
     /// What the status bar reads. `None` outside a repository, which is what
@@ -60,10 +70,10 @@ impl GitSnapshot {
     /// an empty snapshot returns on the first `?` before it ever hashes a path,
     /// so a version of this that allocated per row would sail through.
     #[cfg(all(test, feature = "dhat-heap"))]
-    pub(crate) fn from_status(status: RepoStatus, all_untracked: bool) -> Self {
+    pub(crate) fn from_status(status: RepoStatus, untracked_root: Option<PathBuf>) -> Self {
         Self {
             status: Some(status),
-            all_untracked,
+            untracked_root,
         }
     }
 }
@@ -216,6 +226,40 @@ impl Browser {
         .detach();
     }
 
+    /// Re-read the status whenever the window comes back to the front.
+    ///
+    /// **The watchers do not cover the working tree, and cannot.** Both of them
+    /// — the active folder's, and the one on the resolved git directory — are
+    /// `RecursiveMode::NonRecursive`, so an edit to `src/main.rs` made by
+    /// another program while Ferret is showing the repository *root* changes
+    /// neither watched directory: the root watcher does not see a write nested
+    /// below it, and `.git` is untouched until something stages or commits. The
+    /// count and every rolled-up badge then stay stale until the user happens to
+    /// navigate.
+    ///
+    /// The obvious repair is a recursive watch on the work tree, and it is the
+    /// wrong one: it means a descriptor per directory over `node_modules`,
+    /// `target` and every other tree git is going to ignore anyway, on a feature
+    /// whose whole design (D-48, "no timer") is that an idle window costs
+    /// nothing.
+    ///
+    /// Activation is the cheap answer, because it is exactly the moment the
+    /// staleness starts to matter. Editing elsewhere and coming back *is* the
+    /// scenario, and the user cannot see a stale badge in a window that is not
+    /// in front of them. One debounced read per return to the window, and
+    /// nothing at all while it sits unfocused.
+    pub(super) fn observe_git_activation(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.observe_window_activation(window, |this, window, cx| {
+            // Fires on deactivation too; leaving is not a reason to read.
+            if window.is_window_active() {
+                this.request_git_refresh(cx);
+            }
+        })
+    }
+
     /// Ask for a status read, eventually.
     ///
     /// Every trigger in `docs/git.html` §5 lands here, and the debounce is what
@@ -260,19 +304,28 @@ impl Browser {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
-                this.git.reading = false;
+                // The generation check comes first, and `reading` is cleared
+                // only inside it. A slow read for repository A landing after
+                // the user has navigated to B would otherwise clear *B's*
+                // guard, and the next watcher event would start a second
+                // status process against B while the first was still running —
+                // the single-flight guard defeated, and two snapshots free to
+                // arrive out of order. `GitPanel::clear` has already cleared
+                // the flag for the repository this result belongs to.
                 if this.git.generation != generation {
                     return;
                 }
+                this.git.reading = false;
                 match result {
                     Ok(status) => {
-                        let all_untracked = dir
+                        let untracked_root = dir
                             .as_local()
-                            .is_some_and(|dir| status.index.is_inside_untracked_root(dir));
+                            .and_then(|dir| status.index.untracked_root_for(dir))
+                            .map(Path::to_path_buf);
                         this.git.error = None;
                         this.git.snapshot.store(Arc::new(GitSnapshot {
                             status: Some(status),
-                            all_untracked,
+                            untracked_root,
                         }));
                     }
                     Err(GitError::NotInstalled) => {
@@ -422,14 +475,18 @@ impl Browser {
                         window.push_notification(Notification::error(err.to_string()), cx);
                     }
                 }
-                // A message that has been committed must not come back in the
-                // next dialog. One that was *refused* must, which is why this
-                // is on the success path only.
+                // The dialog is still up — it stays up for the whole operation
+                // (D-52) — so this is where it learns what happened. A message
+                // that has been committed must not come back in the next
+                // dialog; one that was *refused* must, and the dialog holding
+                // it stays on screen for the user to correct.
                 if action == GitAction::Commit
-                    && outcome.is_ok()
                     && let Some(browser) = this.upgrade()
                 {
-                    browser.update(cx, |browser, cx| browser.clear_commit_message(window, cx));
+                    let committed = outcome.is_ok();
+                    browser.update(cx, |browser, cx| {
+                        browser.settle_commit_dialog(committed, window, cx)
+                    });
                 }
             });
 

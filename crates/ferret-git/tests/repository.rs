@@ -190,8 +190,11 @@ fn status_reports_the_branch_and_every_kind_of_change() {
         index.status_for(&fixture.path("vendor/lib/x.txt"), false),
         None
     );
-    assert!(index.is_inside_untracked_root(&fixture.path("vendor/lib")));
-    assert!(!index.is_inside_untracked_root(&fixture.path("sub")));
+    assert_eq!(
+        index.untracked_root_for(&fixture.path("vendor/lib")),
+        Some(fixture.path("vendor").as_path())
+    );
+    assert_eq!(index.untracked_root_for(&fixture.path("sub")), None);
 }
 
 #[test]

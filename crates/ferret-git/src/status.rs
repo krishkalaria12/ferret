@@ -122,6 +122,12 @@ impl Head {
         matches!(self, Head::Detached(_))
     }
 
+    /// On a named branch with at least one commit — the only state a plain
+    /// `git push` has a source and a destination to work out for itself.
+    pub fn is_branch(&self) -> bool {
+        matches!(self, Head::Branch(_))
+    }
+
     pub fn is_unborn(&self) -> bool {
         matches!(self, Head::Unborn(_))
     }
@@ -197,16 +203,21 @@ impl StatusIndex {
         }
     }
 
-    /// Whether `dir` is, or is inside, a directory git reported as wholly
-    /// untracked.
+    /// The wholly-untracked directory `dir` is, or is inside, if there is one.
     ///
-    /// Answered once per refresh by the caller and cached as a flag, never per
-    /// row: the walk is short but it is not free, and the answer is the same
-    /// for every row in a listing.
-    pub fn is_inside_untracked_root(&self, dir: &Path) -> bool {
+    /// Answered once per refresh by the caller and cached, never per row: the
+    /// walk is short but it is not free, and the answer is the same for every
+    /// row in a listing.
+    ///
+    /// The *root* comes back rather than a yes/no, because the answer only
+    /// licenses the caller to assume "untracked" for paths beneath that root —
+    /// and a listing can show rows from outside it. See
+    /// `GitSnapshot::status_for`.
+    pub fn untracked_root_for(&self, dir: &Path) -> Option<&Path> {
         self.untracked_roots
             .iter()
-            .any(|root| dir.starts_with(root))
+            .find(|root| dir.starts_with(root))
+            .map(PathBuf::as_path)
     }
 
     /// Whether badges were dropped for size (D-49). The status bar's tooltip
@@ -675,12 +686,19 @@ mod tests {
             index.status_for(Path::new("/w/node_modules/react/index.js"), false),
             None
         );
-        assert!(index.is_inside_untracked_root(Path::new("/w/node_modules")));
-        assert!(index.is_inside_untracked_root(Path::new("/w/node_modules/react")));
-        assert!(!index.is_inside_untracked_root(Path::new("/w/src")));
+        let root = Path::new("/w/node_modules");
+        assert_eq!(index.untracked_root_for(root), Some(root));
+        assert_eq!(
+            index.untracked_root_for(Path::new("/w/node_modules/react")),
+            Some(root)
+        );
+        assert_eq!(index.untracked_root_for(Path::new("/w/src")), None);
         // Not a prefix match on text: `/w/node_modules_old` is a different
         // directory that happens to start with the same bytes.
-        assert!(!index.is_inside_untracked_root(Path::new("/w/node_modules_old")));
+        assert_eq!(
+            index.untracked_root_for(Path::new("/w/node_modules_old")),
+            None
+        );
     }
 
     #[test]

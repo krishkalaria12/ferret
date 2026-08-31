@@ -84,8 +84,11 @@ fn git_of(n: usize) -> GitHandle {
         status.index.tracked_len() > 0,
         "the budget must run against a populated index, not an empty one"
     );
+    // No untracked-root fallback: every row here is a tracked file, so the
+    // budget measures the index lookup itself rather than the `starts_with`
+    // shortcut in front of it.
     std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(GitSnapshot::from_status(
-        status, false,
+        status, None,
     )))
 }
 

@@ -101,8 +101,7 @@ impl Browser {
             }
         }
 
-        let can_push = status.tracking.is_some_and(|tracking| tracking.ahead > 0)
-            || (status.upstream.is_none() && !status.head.is_unborn());
+        let can_push = can_push(status);
         let can_commit = status.counts.has_something_to_commit();
         let has_remote = status.upstream.is_some();
         // Everything is disabled while a mutation is in flight (D-50).
@@ -151,6 +150,21 @@ impl Browser {
 
         Some(row.into_any_element())
     }
+}
+
+/// Whether the Push button is shown at all.
+///
+/// Either there is an upstream and commits it does not have, or there is no
+/// upstream yet and a first push would create one.
+///
+/// The second arm requires a **named branch**, not merely "not unborn". A
+/// detached HEAD normally has no upstream and is not unborn either, so without
+/// that it renders an enabled Push whose `git push` has no current branch to
+/// send and fails the moment it is clicked — a button offering to do something
+/// git will refuse.
+fn can_push(status: &ferret_git::RepoStatus) -> bool {
+    status.tracking.is_some_and(|tracking| tracking.ahead > 0)
+        || (status.upstream.is_none() && status.head.is_branch())
 }
 
 /// One `↑n` / `↓n` group.
@@ -217,7 +231,48 @@ fn count_tooltip(counts: &ferret_git::Counts) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferret_git::Counts;
+    use ferret_git::{Counts, RepoStatus};
+
+    /// Parse real porcelain rather than building a `RepoStatus` by hand, so
+    /// these assert against the same headers git actually emits.
+    fn status(text: &str) -> RepoStatus {
+        RepoStatus::parse(
+            &text.replace('@', "\0").into_bytes(),
+            std::path::Path::new("/w"),
+        )
+    }
+
+    #[test]
+    fn push_is_offered_only_where_git_has_somewhere_to_send() {
+        // A branch with an upstream it is ahead of: the ordinary case.
+        assert!(can_push(&status(
+            "# branch.oid abc1234@# branch.head main@\
+             # branch.upstream origin/main@# branch.ab +3 -0@"
+        )));
+        // Ahead of nothing is nothing to push.
+        assert!(!can_push(&status(
+            "# branch.oid abc1234@# branch.head main@\
+             # branch.upstream origin/main@# branch.ab +0 -2@"
+        )));
+        // A branch with no upstream at all: `git push` would create one, so
+        // the button is the invitation to do it.
+        assert!(can_push(&status(
+            "# branch.oid abc1234@# branch.head feat/x@"
+        )));
+
+        // A detached HEAD also has no upstream, and is not unborn — the shape
+        // that used to slip through. Plain `git push` has no current branch
+        // here and fails outright, so nothing may be advertised.
+        assert!(!can_push(&status(
+            "# branch.oid 51be0adc951f1e88a30b5b60857c9442c58d13f0@# branch.head (detached)@"
+        )));
+        // A fresh `git init` has no commit to send.
+        assert!(!can_push(&status(
+            "# branch.oid (initial)@# branch.head main@"
+        )));
+        // Headers absent or unparseable: no guess.
+        assert!(!can_push(&status("")));
+    }
 
     #[test]
     fn the_breakdown_names_only_what_is_there() {
