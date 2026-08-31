@@ -103,6 +103,12 @@ jiff = "0.2"
 # `ignore` will own because honouring .gitignore is that feature. One walker
 # per job, never both for the same job.
 jwalk = "0.9"
+# One call: `kill(-pid, SIGKILL)`, to end a timed-out git *and the ssh,
+# credential helper or hook it started* — each of which inherited the pipes
+# Ferret is reading, so killing git alone leaves the read with no EOF and the
+# timeout with nothing to return. `std` can put the child in its own process
+# group but gives no way to signal one.
+libc = "0.2"
 notify = "7"
 portable-pty = "=0.9.0"
 # Not for speed first: `std`'s poisoning was doing active harm. Every lock in

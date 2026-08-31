@@ -1908,6 +1908,7 @@ version = "0.1.0"
 dependencies = [
  "ferret-vfs",
  "foldhash 0.2.0",
+ "libc",
  "smol_str",
  "thiserror 2.0.20",
  "windows-sys 0.59.0",

@@ -29,6 +29,17 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// path possible at all (the child must still be owned to be killed).
 pub const WAIT_POLL: Duration = Duration::from_millis(5);
 
+/// How long the pipe readers are given to finish after the child has been
+/// waited for or killed.
+///
+/// Reaching EOF on a pipe whose only writer has exited is immediate, so this is
+/// never spent in the ordinary case. It exists for the one that is not
+/// ordinary: something git started — an SSH multiplexer, a hook's own daemon —
+/// inherited the handle and outlived it. Long enough that a loaded machine
+/// scheduling two threads is not mistaken for that; short enough that the user
+/// gets an answer.
+pub const REAP_GRACE: Duration = Duration::from_millis(500);
+
 /// How long refresh requests coalesce before one status process is started.
 ///
 /// A `git add -A` in the terminal panel produces a burst of watcher events in

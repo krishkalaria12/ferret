@@ -10,7 +10,8 @@
 use std::ffi::OsStr;
 use std::io::{Read, Write as _};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crate::config;
@@ -122,13 +123,18 @@ pub(crate) fn run(
         }
     };
 
-    // Both pipes are drained on their own threads. Reading them in sequence
-    // deadlocks the moment git fills the one that is not being read — which is
-    // exactly what a status of a large repository does.
+    // Both pipes are drained on their own threads, which report back over a
+    // channel rather than through a join handle — see `collect`, which needs to
+    // stop waiting for them. Reading them in sequence deadlocks the moment git
+    // fills the one that is not being read, which is exactly what a status of a
+    // large repository does.
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || read_capped(out_pipe.as_mut()));
-    let err_reader = std::thread::spawn(move || read_capped(err_pipe.as_mut()));
+    let (sender, readers) = channel();
+    spawn_reader(sender.clone(), Pipe::Stdout, move || {
+        read_capped(out_pipe.as_mut())
+    });
+    spawn_reader(sender, Pipe::Stderr, move || read_capped(err_pipe.as_mut()));
 
     // Dropping the handle at the end of the closure is what gives git EOF;
     // without it a `commit -F -` waits forever for a message that has already
@@ -140,22 +146,23 @@ pub(crate) fn run(
     }
 
     let deadline = Instant::now() + timeout;
+    let timed_out = || GitError::TimedOut {
+        command: label,
+        dir: dir.to_path_buf(),
+        seconds: timeout.as_secs(),
+    };
+
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // The readers end as soon as the pipes close, which the
-                    // kill guarantees — so this cannot leak a thread.
-                    let _ = out_reader.join();
-                    let _ = err_reader.join();
-                    return Err(GitError::TimedOut {
-                        command: label,
-                        dir: dir.to_path_buf(),
-                        seconds: timeout.as_secs(),
-                    });
+                    // git is still alive, so the group it leads certainly is:
+                    // kill the tree, which releases whatever inherited the
+                    // pipes, and the readers then reach EOF and end.
+                    kill_tree(&mut child);
+                    let _ = collect(&readers, Instant::now() + config::REAP_GRACE);
+                    return Err(timed_out());
                 }
                 std::thread::sleep(config::WAIT_POLL);
             }
@@ -169,9 +176,25 @@ pub(crate) fn run(
         }
     };
 
-    let stdout = out_reader.join().unwrap_or(Err(Capped));
-    let stderr = err_reader.join().unwrap_or(Err(Capped));
-    let (Ok(stdout), Ok(stderr)) = (stdout, stderr) else {
+    // git has exited, and normally both pipes are already at EOF — but "git has
+    // exited" does not mean nothing holds its stdout. A `push` over SSH with a
+    // `ControlMaster` leaves a multiplexer running that inherited the very
+    // handle being read here, and waiting on that unconditionally is a hang with
+    // no deadline at all. So the drain is bounded too, and overrunning it is
+    // reported as the timeout it is.
+    //
+    // Nothing is killed on this path. `try_wait` has already reaped git, which
+    // frees its pid — and its pid *was* the group id, so signalling the group
+    // now would be signalling whatever the system next put there. The reader
+    // threads are left to end on their own when the descendant finally closes
+    // the handle; each holds one file descriptor and no lock.
+    let Some((first, second)) =
+        collect(&readers, deadline.max(Instant::now() + config::REAP_GRACE))
+    else {
+        return Err(timed_out());
+    };
+
+    let (Ok(stdout), Ok(stderr)) = (first, second) else {
         return Err(GitError::OutputTooLarge {
             command: label,
             limit: config::MAX_OUTPUT_BYTES,
@@ -183,6 +206,108 @@ pub(crate) fn run(
         stdout,
         stderr,
     })
+}
+
+/// What one reader thread sends back: which pipe it drained, and what it got.
+///
+/// The tag is what lets [`collect`] put the two answers back in order after
+/// receiving them in whichever order they finished.
+type Drained = (Pipe, Captured);
+
+/// One pipe's bytes, or the fact that it overran [`config::MAX_OUTPUT_BYTES`].
+type Captured = std::result::Result<Vec<u8>, Capped>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pipe {
+    Stdout,
+    Stderr,
+}
+
+/// Drain one pipe on its own thread, reporting over `sender`.
+///
+/// The thread is deliberately never joined. On the timeout path it may still be
+/// blocked in a `read` on a handle some descendant of git is holding open, and
+/// the whole point of that path is that it returns anyway; the thread ends on
+/// its own when the handle finally closes.
+fn spawn_reader(
+    sender: Sender<Drained>,
+    pipe: Pipe,
+    read: impl FnOnce() -> Captured + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let _ = sender.send((pipe, read()));
+    });
+}
+
+/// Both reads, as `(stdout, stderr)`, or `None` if `deadline` passed first.
+fn collect(readers: &Receiver<Drained>, deadline: Instant) -> Option<(Captured, Captured)> {
+    let mut out = None;
+    let mut err = None;
+    while out.is_none() || err.is_none() {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        match readers.recv_timeout(remaining) {
+            Ok((Pipe::Stdout, read)) => out = Some(read),
+            Ok((Pipe::Stderr, read)) => err = Some(read),
+            // Both senders dropped without both answers arriving: a reader
+            // panicked. Treat the missing side as empty rather than hanging.
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => return None,
+        }
+    }
+    Some((
+        out.unwrap_or_else(|| Ok(Vec::new())),
+        err.unwrap_or_else(|| Ok(Vec::new())),
+    ))
+}
+
+/// Kill git *and everything it started*.
+///
+/// Killing the immediate child is not enough. git delegates the slow work to
+/// other programs — `ssh` for a push, a credential helper for a fetch, an
+/// arbitrary script for a hook — and each of them inherited the stdout and
+/// stderr handles being read above. Killing git alone leaves those handles open
+/// in a process that is still running, so the reads never reach EOF and a
+/// timeout that promised to return in five seconds returns in never.
+fn kill_tree(child: &mut Child) {
+    kill_descendants(child.id());
+    let _ = child.kill();
+    // Reaped here so the child does not sit as a zombie for the life of the
+    // window; the descendants are the platform's problem once signalled.
+    let _ = child.wait();
+}
+
+/// Signal the process group git was spawned into (see [`harden`]).
+///
+/// Negating the pid addresses the group rather than the process, which reaches
+/// every descendant that has not deliberately left it.
+#[cfg(unix)]
+fn kill_descendants(pid: u32) {
+    // SAFETY: `kill` is async-signal-safe and takes no pointers. The group id
+    // is git's own pid, which `process_group(0)` made a group leader, so this
+    // cannot name a group Ferret did not create — and the child has not been
+    // reaped yet, so the id has not been recycled.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+/// Windows has no process groups in the Unix sense, and the job-object
+/// equivalent cannot be applied without a window in which the child has already
+/// started and could have spawned before being assigned. `taskkill /T` walks the
+/// parent-pid chain instead, which is exact here because it is called while git
+/// is still alive to be the root of that walk.
+#[cfg(windows)]
+fn kill_descendants(pid: u32) {
+    let mut command = Command::new("taskkill");
+    command
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_console_window(&mut command);
+    if let Ok(mut killer) = command.spawn() {
+        let _ = killer.wait();
+    }
 }
 
 /// Run, and turn a non-zero exit into [`GitError::Failed`] carrying git's own
@@ -212,7 +337,7 @@ pub(crate) fn run_checked(
 /// The child overran [`config::MAX_OUTPUT_BYTES`].
 struct Capped;
 
-fn read_capped(pipe: Option<&mut impl Read>) -> std::result::Result<Vec<u8>, Capped> {
+fn read_capped(pipe: Option<&mut impl Read>) -> Captured {
     let Some(pipe) = pipe else {
         return Ok(Vec::new());
     };
@@ -250,8 +375,26 @@ fn harden(command: &mut Command) {
         // Ferret's own commit messages arrive on stdin, so nothing here should
         // ever consult a message template.
         .env_remove("GIT_INDEX_FILE");
+    own_process_group(command);
     no_console_window(command);
 }
+
+/// Give git a process group of its own, so [`kill_tree`] has something to aim
+/// at.
+///
+/// Without this the child joins Ferret's group and there is no way to reach its
+/// descendants — and signalling the group would mean signalling Ferret. It also
+/// detaches git from the terminal Ferret was launched from, which is the right
+/// answer anyway: a `^C` in that terminal must not reach a push that a window is
+/// running.
+#[cfg(unix)]
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_process_group(_command: &mut Command) {}
 
 /// Stop a console window flashing over the desktop on every status read.
 ///
@@ -270,6 +413,7 @@ fn no_console_window(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn a_message_is_capped_on_a_character_boundary() {
@@ -329,5 +473,94 @@ mod tests {
         assert_eq!(conclusion_first(leading), leading);
         let plain = "Everything up-to-date";
         assert_eq!(conclusion_first(plain), plain);
+    }
+
+    /// A temporary repository to run the two timeout tests in, or `None` when
+    /// git is not installed — the crate is built to work without it (D-43).
+    fn scratch_repository(tag: &str) -> Option<PathBuf> {
+        if Command::new("git").arg("--version").output().is_err() {
+            return None;
+        }
+        let root = std::env::temp_dir().join(format!("ferret-git-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).ok()?;
+        Command::new("git")
+            .current_dir(&root)
+            .args(["init", "-q", "."])
+            .status()
+            .ok()?;
+        Some(root)
+    }
+
+    /// The timeout is a promise, and a *descendant* of git is what breaks it.
+    ///
+    /// This alias backgrounds a `sleep` and returns, so git exits at once with
+    /// a grandchild still holding the stdout it inherited. Waiting on the pipe
+    /// readers unconditionally — which is what joining their threads does —
+    /// therefore blocks for the full thirty seconds on a call that asked for a
+    /// third of one, with the git action stuck as busy for the duration.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_the_pipes_cannot_outlive_the_timeout() {
+        let Some(root) = scratch_repository("descendant") else {
+            return;
+        };
+
+        let started = Instant::now();
+        let result = run(
+            &root,
+            "stall",
+            &[
+                OsStr::new("-c"),
+                OsStr::new("alias.stall=!sh -c 'sleep 30 &'"),
+                OsStr::new("stall"),
+            ],
+            None,
+            Duration::from_millis(300),
+        );
+        let elapsed = started.elapsed();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            matches!(result, Err(GitError::TimedOut { .. })),
+            "a read that cannot be completed must be reported as a timeout"
+        );
+        // Generously above the deadline plus the reap grace, and far below the
+        // thirty seconds the lingering grandchild would otherwise impose.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "returned in {elapsed:?}, so it waited on the descendant"
+        );
+    }
+
+    /// The ordinary timeout: git itself will not finish. It must be killed and
+    /// reported, rather than polled until the window is closed.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_that_never_finishes_is_killed_and_reported() {
+        let Some(root) = scratch_repository("hang") else {
+            return;
+        };
+
+        let started = Instant::now();
+        let result = run(
+            &root,
+            "stall",
+            &[
+                OsStr::new("-c"),
+                OsStr::new("alias.stall=!sleep 30"),
+                OsStr::new("stall"),
+            ],
+            None,
+            Duration::from_millis(300),
+        );
+        let elapsed = started.elapsed();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            matches!(result, Err(GitError::TimedOut { .. })),
+            "a git that never finishes must be reported as a timeout"
+        );
+        assert!(elapsed < Duration::from_secs(5), "returned in {elapsed:?}");
     }
 }

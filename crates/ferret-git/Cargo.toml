@@ -15,6 +15,10 @@ foldhash.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Killing a timed-out git's whole process group. See `command::kill_tree`.
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 # `CREATE_NO_WINDOW`, so a status read on a watcher event does not flash a
 # console window over the user's desktop several times a minute.
