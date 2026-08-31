@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ferret_vfs::{EntryKind, MountId, VfsPath};
 
@@ -31,6 +31,17 @@ fn request(root: &Path, pattern: &str) -> SearchRequest {
         filters: SearchFilters::default(),
         limits: SearchLimits::default(),
     }
+}
+
+fn content_request(root: &Path, pattern: &str) -> SearchRequest {
+    let mut request = request(root, "");
+    request.content = Some(ContentQuery {
+        pattern: pattern.into(),
+        syntax: PatternSyntax::Literal,
+        case: CaseMode::Smart,
+        whole_word: false,
+    });
+    request
 }
 
 fn collect(session: &SearchSession) -> Vec<SearchEvent> {
@@ -240,6 +251,117 @@ fn cancellation_closes_the_observable_stream() {
     session.cancel();
     assert!(session.is_cancelled());
     assert!(smol::block_on(session.next()).is_none());
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn streams_one_content_result_per_matching_line() {
+    let root = tempdir("content-lines");
+    fs::write(
+        root.join("notes.txt"),
+        "first needle needle\nno match\nthird needle\n",
+    )
+    .unwrap();
+
+    let session = InProcessSearchService
+        .start(content_request(&root, "needle"))
+        .unwrap();
+    let events = collect(&session);
+    let found = results(&events);
+    assert_eq!(found.len(), 2);
+    assert!(matches!(
+        &found[0].matched,
+        SearchMatch::Content {
+            line: 1,
+            column: 7,
+            preview,
+            ranges,
+        } if preview == "first needle needle" && ranges.len() == 2
+    ));
+    assert!(matches!(
+        &found[1].matched,
+        SearchMatch::Content { line: 3, .. }
+    ));
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn combines_filename_and_regex_content_constraints() {
+    let root = tempdir("content-filters");
+    fs::write(root.join("target.rs"), "alpha 42\nALPHA 7\n").unwrap();
+    fs::write(root.join("other.rs"), "alpha 42\n").unwrap();
+
+    let mut request = content_request(&root, r"alpha \d+");
+    request.name = NameQuery::substring("target");
+    request.content.as_mut().unwrap().syntax = PatternSyntax::Regex;
+    let events = collect(&InProcessSearchService.start(request).unwrap());
+    let found = results(&events);
+    assert_eq!(found.len(), 2, "smart case should match alpha and ALPHA");
+    assert!(found.iter().all(|result| result.name == "target.rs"));
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn skips_binary_files_and_bounds_long_previews() {
+    let root = tempdir("content-bounds");
+    let mut long_line = vec![b'x'; config::MAX_PREVIEW_BYTES * 4];
+    long_line.extend_from_slice(b"needle\n");
+    fs::write(root.join("long.txt"), long_line).unwrap();
+    fs::write(root.join("binary.dat"), b"needle\0after").unwrap();
+
+    let events = collect(
+        &InProcessSearchService
+            .start(content_request(&root, "needle"))
+            .unwrap(),
+    );
+    let found = results(&events);
+    assert_eq!(found.len(), 1);
+    let SearchMatch::Content { preview, .. } = &found[0].matched else {
+        panic!("expected a content match");
+    };
+    assert!(preview.len() <= config::MAX_PREVIEW_BYTES);
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+#[ignore = "measurement; creates a temporary broad content-search corpus"]
+fn parallel_content_search_cost() {
+    let root = tempdir("parallel-cost");
+    let body = format!("{}needle\n", "x".repeat(32 * 1024));
+    for index in 0..2_000 {
+        fs::write(root.join(format!("source-{index}.txt")), &body).unwrap();
+    }
+    let request = content_request(&root, "needle");
+    let parallel_threads = config::live_search_threads();
+
+    let measure = |threads| {
+        let started = Instant::now();
+        let events = collect(
+            &InProcessSearchService
+                .start_for_measurement(request.clone(), threads)
+                .unwrap(),
+        );
+        assert_eq!(results(&events).len(), 2_000);
+        started.elapsed()
+    };
+    let _ = measure(1);
+    let _ = measure(parallel_threads);
+    let mut serial = [Duration::ZERO; 3];
+    let mut parallel = [Duration::ZERO; 3];
+    for index in 0..3 {
+        serial[index] = measure(1);
+        parallel[index] = measure(parallel_threads);
+    }
+    serial.sort_unstable();
+    parallel.sort_unstable();
+    eprintln!(
+        "live content search: serial {:?}, {} workers {:?}",
+        serial[1], parallel_threads, parallel[1]
+    );
 
     fs::remove_dir_all(root).ok();
 }

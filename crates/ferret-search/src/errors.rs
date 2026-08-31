@@ -19,10 +19,17 @@ pub enum SearchError {
     ZeroResultLimit,
     #[error("Ferret can't use {mode} filename matching yet; choose substring matching.")]
     UnsupportedNameMode { mode: &'static str },
-    #[error("Ferret can't search file contents yet; clear the content query and search filenames.")]
-    UnsupportedContentSearch,
+    #[error(
+        "Ferret can't search for content with a pattern longer than {max_bytes} bytes (got {actual_bytes})."
+    )]
+    ContentPatternTooLong {
+        max_bytes: usize,
+        actual_bytes: usize,
+    },
     #[error("Ferret couldn't compile the filename query {pattern:?}: {message}")]
     InvalidNamePattern { pattern: String, message: String },
+    #[error("Ferret couldn't compile the content query {pattern:?}: {message}")]
+    InvalidContentPattern { pattern: String, message: String },
     #[error("Ferret couldn't walk {path}: {message}")]
     Walk { path: VfsPath, message: String },
 }

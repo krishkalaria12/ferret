@@ -10,6 +10,9 @@ repository.workspace = true
 [dependencies]
 async-channel.workspace = true
 ferret-vfs.workspace = true
+grep-matcher.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
 ignore.workspace = true
 regex.workspace = true
 smol_str.workspace = true

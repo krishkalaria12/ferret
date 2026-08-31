@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use ferret_search::{
-    CaseMode, EntryKindFilter, InProcessSearchService, NameQuery, SearchEvent, SearchFinished,
-    SearchGeneration, SearchRequest, SearchResult, SearchScope, SearchScopeKind,
-    SearchService as _,
+    CaseMode, ContentQuery, EntryKindFilter, InProcessSearchService, NameQuery, PatternSyntax,
+    SearchEvent, SearchFinished, SearchGeneration, SearchMatch, SearchRequest, SearchResult,
+    SearchScope, SearchScopeKind, SearchService as _,
 };
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
@@ -55,6 +55,8 @@ pub(super) struct PowerSearch {
     kind: SearchKind,
     scope: SearchScopeKind,
     case_sensitive: bool,
+    content_regex: bool,
+    content_whole_word: bool,
     results: Vec<SearchResult>,
     selected: Option<usize>,
     generation: u64,
@@ -80,7 +82,7 @@ impl PowerSearch {
             cx.new(|cx| InputState::new(window, cx).placeholder("Text or regular expression"));
 
         let mut subscriptions = Vec::with_capacity(3);
-        for input in [&name_input, &extension_input] {
+        for input in [&name_input, &extension_input, &content_input] {
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
@@ -91,20 +93,6 @@ impl PowerSearch {
                 },
             ));
         }
-        subscriptions.push(cx.subscribe_in(
-            &content_input,
-            window,
-            |this, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.warning = Some(
-                        "Content search is laid out now; its indexed engine is the next slice."
-                            .into(),
-                    );
-                    cx.notify();
-                }
-            },
-        ));
-
         Self {
             browser,
             current_folder,
@@ -114,6 +102,8 @@ impl PowerSearch {
             kind: SearchKind::All,
             scope: SearchScopeKind::CurrentFolder,
             case_sensitive: false,
+            content_regex: false,
+            content_whole_word: false,
             results: Vec::new(),
             selected: None,
             generation: 0,
@@ -134,8 +124,9 @@ impl PowerSearch {
         self.truncated = false;
         self.warning = None;
 
-        let pattern = self.name_input.read(cx).value().trim().to_string();
-        if pattern.is_empty() {
+        let name_pattern = self.name_input.read(cx).value().trim().to_string();
+        let content_pattern = self.content_input.read(cx).value().trim().to_string();
+        if name_pattern.is_empty() && content_pattern.is_empty() {
             self.searching = false;
             cx.notify();
             return;
@@ -156,10 +147,24 @@ impl PowerSearch {
         } else {
             self.current_folder.clone()
         };
-        let mut name = NameQuery::substring(pattern);
+        let mut name = NameQuery::substring(name_pattern);
         if self.case_sensitive {
             name.case = CaseMode::Sensitive;
         }
+        let content = (!content_pattern.is_empty()).then_some(ContentQuery {
+            pattern: content_pattern,
+            syntax: if self.content_regex {
+                PatternSyntax::Regex
+            } else {
+                PatternSyntax::Literal
+            },
+            case: if self.case_sensitive {
+                CaseMode::Sensitive
+            } else {
+                CaseMode::Smart
+            },
+            whole_word: self.content_whole_word,
+        });
         let request = SearchRequest {
             generation: SearchGeneration(generation),
             scope: SearchScope {
@@ -167,7 +172,7 @@ impl PowerSearch {
                 roots: vec![root],
             },
             name,
-            content: None,
+            content,
             filters: ferret_search::SearchFilters {
                 kind: self.kind.filter(),
                 extensions,
@@ -180,13 +185,16 @@ impl PowerSearch {
         cx.notify();
         self.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-            let Ok(session) = InProcessSearchService.start(request) else {
-                let _ = this.update(cx, |this, cx| {
-                    this.searching = false;
-                    this.warning = Some("The search could not be started.".into());
-                    cx.notify();
-                });
-                return;
+            let session = match InProcessSearchService.start(request) {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.searching = false;
+                        this.warning = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
             };
             while let Some(event) = session.next().await {
                 let terminal = matches!(event, SearchEvent::Finished(_));
@@ -279,11 +287,26 @@ impl Render for PowerSearch {
                         let Some(result) = this.results.get(index).cloned() else {
                             return div().into_any_element();
                         };
-                        let location = result
-                            .path
-                            .parent()
-                            .map(|path| path.to_string())
-                            .unwrap_or_default();
+                        let (display_name, location, kind_label) = match &result.matched {
+                            SearchMatch::Filename { .. } => (
+                                result.name.to_string(),
+                                result
+                                    .path
+                                    .parent()
+                                    .map(|path| path.to_string())
+                                    .unwrap_or_default(),
+                                if result.kind.is_dir_like() {
+                                    "Folder"
+                                } else {
+                                    "File"
+                                },
+                            ),
+                            SearchMatch::Content { line, preview, .. } => (
+                                format!("{}:{line}", result.name),
+                                preview.to_string(),
+                                "Match",
+                            ),
+                        };
                         let is_dir = result.kind.is_dir_like();
                         let open_target = result.clone();
                         h_flex()
@@ -306,9 +329,7 @@ impl Render for PowerSearch {
                                     } else {
                                         gpui_component::IconName::File
                                     }))
-                                    .child(div().truncate().child(SharedString::from(
-                                        result.name.as_str().to_owned(),
-                                    ))),
+                                    .child(div().truncate().child(display_name)),
                             )
                             .child(
                                 div()
@@ -322,7 +343,7 @@ impl Render for PowerSearch {
                                 div()
                                     .w(px(72.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(if is_dir { "Folder" } else { "File" }),
+                                    .child(kind_label),
                             )
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.selected = Some(index);
@@ -458,10 +479,26 @@ impl Render for PowerSearch {
                                 ),
                             )
                             .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme.muted_foreground)
-                                    .child("regex-ready UI"),
+                                Button::new("search-content-regex")
+                                    .compact()
+                                    .label("Regex")
+                                    .when(self.content_regex, |button| button.primary())
+                                    .when(!self.content_regex, |button| button.outline())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.content_regex = !this.content_regex;
+                                        this.restart_search(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("search-content-word")
+                                    .compact()
+                                    .label("Word")
+                                    .when(self.content_whole_word, |button| button.primary())
+                                    .when(!self.content_whole_word, |button| button.outline())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.content_whole_word = !this.content_whole_word;
+                                        this.restart_search(cx);
+                                    })),
                             ),
                     ),
             )
@@ -506,7 +543,7 @@ impl Render for PowerSearch {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(div().w(px(310.)).child("Name"))
-                    .child(div().flex_1().child("Location"))
+                    .child(div().flex_1().child("Location / matching line"))
                     .child(div().w(px(72.)).child("Kind")),
             )
             .child(div().flex_1().min_h_0().child(if count == 0 {
@@ -515,13 +552,17 @@ impl Render for PowerSearch {
                     .items_center()
                     .justify_center()
                     .text_color(theme.muted_foreground)
-                    .child(if self.name_input.read(cx).value().trim().is_empty() {
-                        "Type a filename to search"
-                    } else if self.searching {
-                        "Searching the filesystem…"
-                    } else {
-                        "No matching files"
-                    })
+                    .child(
+                        if self.name_input.read(cx).value().trim().is_empty()
+                            && self.content_input.read(cx).value().trim().is_empty()
+                        {
+                            "Type a filename or content pattern to search"
+                        } else if self.searching {
+                            "Searching the filesystem…"
+                        } else {
+                            "No matching files"
+                        },
+                    )
                     .into_any_element()
             } else {
                 rows.into_any_element()
@@ -555,7 +596,13 @@ impl Browser {
         }
         let current_folder = self.active().folder.read(cx).dir.clone();
         let search = match &self.power_search {
-            Some(existing) => existing.clone(),
+            Some(existing) => {
+                existing.update(cx, |search, cx| {
+                    search.current_folder = current_folder.clone();
+                    search.restart_search(cx);
+                });
+                existing.clone()
+            }
             None => {
                 let browser = cx.weak_entity();
                 let created = cx.new(|cx| PowerSearch::new(browser, current_folder, window, cx));
