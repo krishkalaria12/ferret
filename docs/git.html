@@ -682,7 +682,7 @@ footer {
     <div><dt>New crate</dt><dd class="mono">ferret-git</dd></div>
     <div><dt>Engine</dt><dd class="mono">the git binary (D-04)</dd></div>
     <div><dt>Wire format</dt><dd class="mono">status --porcelain=v2 -z</dd></div>
-    <div><dt>New decisions</dt><dd>D-43 … D-51</dd></div>
+    <div><dt>New decisions</dt><dd>D-43 … D-53</dd></div>
   </dl>
 </header>
 
@@ -950,10 +950,23 @@ crates/ferret-ui/src/browser/
     <li><span class="step">2</span> <b>The folder watcher fired.</b> The user, or anything else, wrote a file in the directory on screen.</li>
     <li><span class="step">3</span> <b>The <code>.git</code> watcher fired.</b> Somebody committed, checked out, fetched or staged — from Ferret, from the terminal panel, or from another application.</li>
     <li><span class="step">4</span> <b>An action finished.</b> Commit, pull and push each refresh on completion regardless of outcome; a failed pull may still have moved refs.</li>
-    <li><span class="step">5</span> <b>The window regained focus.</b> Covers the case where the repository changed while Ferret was not running its watchers' event loop.</li>
+    <li><span class="step">5</span> <b>The window regained focus.</b> Not a nicety — it is what covers the hole the two watchers leave. Both are <code>NonRecursive</code>, so an edit to <code>src/main.rs</code> made by another program while Ferret is showing the repository <em>root</em> changes neither watched directory: the root watcher does not see a write nested below it, and <code>.git</code> is untouched until something stages or commits. Trigger 2 only ever fires for the one directory on screen.</li>
   </ol>
   <p>There is no timer. A poll is the thing that makes a git integration a background CPU
   cost on an idle machine, and every event above is either free or already being delivered.</p>
+  <p><b>Why not watch the work tree recursively instead.</b> It is the obvious repair for
+  trigger 5's hole and it is the wrong one: a descriptor per directory across
+  <code>node_modules</code>, <code>target</code> and everything else git is going to ignore
+  anyway — on a feature whose whole design is that an idle window costs nothing. Activation
+  is the cheap answer because it is exactly the moment staleness starts to matter: editing
+  elsewhere and coming back <em>is</em> the scenario, and a badge nobody is looking at is not
+  yet wrong. One debounced read per return to the window, and nothing at all while it sits
+  unfocused.</p>
+  <p><b>What this still does not cover</b>, stated rather than glossed: a nested file changed
+  by a background process — a build, a formatter — while Ferret is already focused and
+  showing an ancestor of it. The count stays stale until the next trigger. Revisit with real
+  use; the fix, if it is needed, is a targeted recursive watch bounded by
+  <code>.gitignore</code>, not a timer.</p>
 
   <div class="dec">
     <span class="id">D-48</span>
@@ -1130,13 +1143,51 @@ u &lt;XY&gt; &lt;sub&gt; &lt;m1&gt; &lt;m2&gt; &lt;m3&gt; &lt;mW&gt; &lt;h1&gt; 
     reordering, not an edit: nothing is dropped, reworded or summarised.</p>
   </div>
 
+  <div class="dec">
+    <span class="id">D-52</span>
+    <b>The commit dialog outlives the commit, and closes only on success.</b>
+    <p>Confirming the dialog starts an asynchronous operation; it does not finish one.
+    Closing on the button press therefore closes on <em>"git has been asked"</em>, and
+    everything interesting arrives afterwards — a <code>pre-commit</code> hook that
+    rejects, an unset <code>user.email</code>, an <code>index.lock</code> held by the
+    terminal panel below. With the modal already gone the user gets a toast and an empty
+    screen, and has to reopen the dialog to act on it.</p>
+    <p>So <code>on_ok</code> always returns <code>false</code>. The dialog stays up in an
+    explicit in-flight state — the button reads <em>Committing…</em>, and it, the checkbox
+    and Cancel are all disabled, as are Escape and the backdrop, because none of them
+    would stop the git that is already running. When git answers, success clears the
+    message and dismisses the dialog; failure leaves both, with the notification layer
+    drawing over the modal. The fix for a refused commit is nearly always a word in the
+    message or the checkbox beneath it, and the user is already looking at both.</p>
+  </div>
+
   <h3>Timeouts</h3>
   <p>A status read is capped at <code>STATUS_TIMEOUT</code> (5&nbsp;s) — long enough for a
   cold cache on a large repository over a network mount, short enough that a wedged git does
   not leave the segment permanently spinning. Network operations are capped at
   <code>NETWORK_TIMEOUT</code> (120&nbsp;s), because a real push of a real repository over a
-  real connection takes minutes and killing it at thirty seconds would be worse than useless.
-  A timeout kills the child and reports the timeout as itself.</p>
+  real connection takes minutes and killing it at thirty seconds would be worse than useless.</p>
+
+  <div class="dec">
+    <span class="id">D-53</span>
+    <b>A timeout kills the process <em>tree</em>, and never waits on a pipe forever.</b>
+    <p>Killing the child git is not enough to make a timeout return, and this is the
+    subtle half of it. git delegates the slow work to other programs — <code>ssh</code>
+    for a push, a credential helper for a fetch, an arbitrary script for a hook — and
+    every one of them inherits the stdout and stderr handles Ferret is reading. Kill git
+    alone and those handles stay open in a process that is still running, so the reads
+    never reach EOF; joining the reader threads then blocks past the deadline the timeout
+    just promised, with the action stuck as busy behind it.</p>
+    <p>Two changes, and both are needed. Each invocation is spawned into its own process
+    group (<code>process_group(0)</code>; <code>taskkill /T</code> on Windows, which has no
+    equivalent), so the whole tree can be signalled at once. And the readers report over a
+    channel rather than a join handle, so the drain is bounded by the same deadline as the
+    wait — including on the path where <em>git exited normally</em> and something it
+    started is still holding the pipe, which an SSH <code>ControlMaster</code> does
+    routinely. Nothing is signalled on that path: git has been reaped, its pid was the
+    group id, and signalling a group id the system has since reissued is worse than the
+    two threads left to end on their own.</p>
+  </div>
 </section>
 
 <!-- ==================================================================== -->
