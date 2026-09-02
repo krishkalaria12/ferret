@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use ferret_search::{
-    CaseMode, ContentQuery, EntryKindFilter, InProcessSearchService, NameQuery, PatternSyntax,
-    SearchEvent, SearchFinished, SearchGeneration, SearchMatch, SearchRequest, SearchResult,
-    SearchScope, SearchScopeKind, SearchService as _,
+    CaseMode, ContentQuery, EntryKindFilter, NameQuery, PatternSyntax, RootState, SearchEvent,
+    SearchFinished, SearchGeneration, SearchMatch, SearchRequest, SearchResult, SearchScope,
+    SearchScopeKind, SearchService as _,
 };
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
@@ -63,7 +63,13 @@ pub(super) struct PowerSearch {
     searching: bool,
     truncated: bool,
     warning: Option<String>,
+    /// What the index helper had to say, refreshed when the dialog opens.
+    ///
+    /// Kept here rather than asked for during render: reading it talks to
+    /// another process, and no `Render` impl may do that.
+    index_note: Option<SharedString>,
     search_task: Option<Task<()>>,
+    index_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -110,9 +116,49 @@ impl PowerSearch {
             searching: false,
             truncated: false,
             warning: None,
+            index_note: None,
             search_task: None,
+            index_task: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Asks the search helper what it has indexed, off the UI thread.
+    ///
+    /// Purely informational: the query planner makes its own decision inside
+    /// the service, and nothing here gates a search on the answer. It exists
+    /// so a slow search has a visible reason — still crawling, or no helper at
+    /// all — instead of looking like Ferret being slow.
+    fn refresh_index_note(&mut self, cx: &mut Context<Self>) {
+        self.index_task = Some(cx.spawn(async move |this, cx| {
+            let note = cx
+                .background_executor()
+                .spawn(async {
+                    let service = ferret_search::shared();
+                    match service.index_status() {
+                        Some(status) if status.available => {
+                            let crawling = status
+                                .roots
+                                .iter()
+                                .any(|root| root.state == RootState::Crawling);
+                            Some(if crawling {
+                                format!("Indexing… {} files so far", status.files)
+                            } else {
+                                format!("{} files indexed", status.files)
+                            })
+                        }
+                        Some(_) => Some("Index unavailable; searching the filesystem".into()),
+                        None => service
+                            .unavailable_reason()
+                            .or_else(|| Some("Searching the filesystem directly".into())),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.index_note = note.map(SharedString::from);
+                cx.notify();
+            });
+        }));
     }
 
     fn restart_search(&mut self, cx: &mut Context<Self>) {
@@ -185,7 +231,7 @@ impl PowerSearch {
         cx.notify();
         self.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-            let session = match InProcessSearchService.start(request) {
+            let session = match ferret_search::shared().start(request) {
                 Ok(session) => session,
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
@@ -583,6 +629,9 @@ impl Render for PowerSearch {
                         SharedString::from(format!("{count} results"))
                     })
                     .child(div().flex_1())
+                    .when_some(self.index_note.clone(), |footer, note| {
+                        footer.child(div().mr_3().child(note))
+                    })
                     .child("Double-click to open · Esc to close"),
             )
     }
@@ -599,6 +648,7 @@ impl Browser {
             Some(existing) => {
                 existing.update(cx, |search, cx| {
                     search.current_folder = current_folder.clone();
+                    search.refresh_index_note(cx);
                     search.restart_search(cx);
                 });
                 existing.clone()
@@ -606,6 +656,7 @@ impl Browser {
             None => {
                 let browser = cx.weak_entity();
                 let created = cx.new(|cx| PowerSearch::new(browser, current_folder, window, cx));
+                created.update(cx, |search, cx| search.refresh_index_note(cx));
                 self.power_search = Some(created.clone());
                 created
             }
