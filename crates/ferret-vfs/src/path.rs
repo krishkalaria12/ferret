@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 /// Identifies a mounted remote backend. Unused until remote mounts land, but
 /// present so [`VfsPath`] does not have to change shape when they do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct MountId(pub u32);
 
 /// A location the [`crate::Vfs`] can address.
@@ -168,6 +170,77 @@ pub(crate) fn lowercase_extension(name: &str) -> Option<SmolStr> {
         return Some(SmolStr::from(ext.to_ascii_lowercase()));
     }
     Some(SmolStr::new(ext))
+}
+
+/// How a [`VfsPath`] crosses a process boundary.
+///
+/// A local path is not text — it is a sequence of platform units that only
+/// *usually* decodes as UTF-8. Sending `to_string_lossy` would silently
+/// corrupt every path containing an unpaired surrogate or a non-UTF-8 byte,
+/// and search is precisely the feature that surfaces those files. So the
+/// common case travels as a string and everything else travels as its raw
+/// units, widened to `u32` so one wire form works on both platforms.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum WireVfsPath {
+    LocalText(String),
+    LocalRaw(Vec<u32>),
+    Remote { mount: MountId, path: String },
+}
+
+impl serde::Serialize for VfsPath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            VfsPath::Local(path) => match path.to_str() {
+                Some(text) => WireVfsPath::LocalText(text.to_owned()),
+                None => WireVfsPath::LocalRaw(native_units(path)),
+            },
+            VfsPath::Remote { mount, path } => WireVfsPath::Remote {
+                mount: *mount,
+                path: path.to_string(),
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VfsPath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match WireVfsPath::deserialize(deserializer)? {
+            WireVfsPath::LocalText(text) => VfsPath::local(text),
+            WireVfsPath::LocalRaw(units) => VfsPath::local(from_native_units(&units)),
+            WireVfsPath::Remote { mount, path } => VfsPath::remote(mount, path),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn native_units(path: &Path) -> Vec<u32> {
+    use std::os::unix::ffi::OsStrExt as _;
+    path.as_os_str()
+        .as_bytes()
+        .iter()
+        .map(|b| *b as u32)
+        .collect()
+}
+
+#[cfg(unix)]
+fn from_native_units(units: &[u32]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt as _;
+    let bytes = units.iter().map(|unit| *unit as u8).collect::<Vec<u8>>();
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+}
+
+#[cfg(windows)]
+fn native_units(path: &Path) -> Vec<u32> {
+    use std::os::windows::ffi::OsStrExt as _;
+    path.as_os_str().encode_wide().map(u32::from).collect()
+}
+
+#[cfg(windows)]
+fn from_native_units(units: &[u32]) -> PathBuf {
+    use std::os::windows::ffi::OsStringExt as _;
+    let wide = units.iter().map(|unit| *unit as u16).collect::<Vec<u16>>();
+    PathBuf::from(std::ffi::OsString::from_wide(&wide))
 }
 
 impl fmt::Display for VfsPath {
