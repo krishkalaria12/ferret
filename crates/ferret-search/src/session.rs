@@ -36,6 +36,15 @@ impl SearchSession {
         self.events.recv().await.ok()
     }
 
+    /// The same event stream for a caller that has no async runtime.
+    ///
+    /// The daemon is one: it forwards a session straight onto a socket from a
+    /// thread of its own, and pulling in an executor to await a channel that
+    /// already has a blocking receiver would be a runtime for nothing.
+    pub fn next_blocking(&self) -> Option<SearchEvent> {
+        self.events.recv_blocking().ok()
+    }
+
     pub fn cancel(&self) {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Release);

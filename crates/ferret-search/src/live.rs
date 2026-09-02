@@ -15,14 +15,13 @@ use smol_str::SmolStr;
 
 use crate::config::{
     CONTENT_REGEX_SIZE_LIMIT, CONTENT_SEARCH_HEAP_LIMIT, EVENT_BUFFER, MAX_CONTENT_PATTERN_BYTES,
-    MAX_PATTERN_BYTES, MAX_PREVIEW_BYTES, MAX_RANGES_PER_PREVIEW, MAX_WARNINGS, RESULT_BATCH_SIZE,
-    live_search_threads,
+    MAX_PATTERN_BYTES, MAX_PREVIEW_BYTES, MAX_RANGES_PER_PREVIEW, live_search_threads,
 };
+use crate::sink::EventSink;
 use crate::{
     CaseMode, ContentQuery, EntryKindFilter, MatchKey, NameMatchMode, PatternSyntax, Result,
-    ResultSource, SearchBatch, SearchError, SearchEvent, SearchFinished, SearchGeneration,
-    SearchLimits, SearchMatch, SearchProgress, SearchRequest, SearchResult, SearchResultId,
-    SearchSession, SearchStats, SearchWarning, TextRange,
+    ResultSource, SearchError, SearchEvent, SearchFinished, SearchMatch, SearchProgress,
+    SearchRequest, SearchResult, SearchResultId, SearchSession, SearchStats, TextRange,
 };
 
 /// The always-available search path: a current filesystem walk with no index.
@@ -86,7 +85,7 @@ impl crate::SearchService for InProcessSearchService {
     }
 }
 
-fn validate_and_normalize(request: &mut SearchRequest) -> Result<()> {
+pub(crate) fn validate_and_normalize(request: &mut SearchRequest) -> Result<()> {
     if request.scope.roots.is_empty() {
         return Err(SearchError::EmptyScope);
     }
@@ -134,12 +133,12 @@ fn validate_and_normalize(request: &mut SearchRequest) -> Result<()> {
     Ok(())
 }
 
-struct NameMatcher {
+pub(crate) struct NameMatcher {
     regex: Regex,
 }
 
 impl NameMatcher {
-    fn compile(request: &SearchRequest) -> Result<Self> {
+    pub(crate) fn compile(request: &SearchRequest) -> Result<Self> {
         let pattern = match request.name.syntax {
             PatternSyntax::Literal => regex::escape(&request.name.pattern),
             PatternSyntax::Regex => request.name.pattern.clone(),
@@ -155,7 +154,7 @@ impl NameMatcher {
         Ok(Self { regex })
     }
 
-    fn find(&self, name: &str) -> Option<TextRange> {
+    pub(crate) fn find(&self, name: &str) -> Option<TextRange> {
         self.regex.find(name).map(|matched| TextRange {
             start: matched.start(),
             end: matched.end(),
@@ -164,12 +163,12 @@ impl NameMatcher {
 }
 
 #[derive(Clone)]
-struct ContentMatcher {
-    matcher: RegexMatcher,
+pub(crate) struct ContentMatcher {
+    pub(crate) matcher: RegexMatcher,
 }
 
 impl ContentMatcher {
-    fn compile(query: &ContentQuery) -> Result<Self> {
+    pub(crate) fn compile(query: &ContentQuery) -> Result<Self> {
         let mut builder = RegexMatcherBuilder::new();
         builder
             .fixed_strings(query.syntax == PatternSyntax::Literal)
@@ -442,6 +441,7 @@ impl WalkContext<'_> {
                 kind,
                 metadata,
                 source: ResultSource::Live,
+                rank: None,
                 matched: SearchMatch::Filename {
                     ranges: vec![range],
                 },
@@ -463,7 +463,7 @@ impl WalkContext<'_> {
     }
 }
 
-fn build_content_searcher() -> Searcher {
+pub(crate) fn build_content_searcher() -> Searcher {
     SearcherBuilder::new()
         .line_number(true)
         .bom_sniffing(true)
@@ -541,6 +541,7 @@ impl Sink for ContentFileSink<'_> {
             kind: self.template.kind,
             metadata: self.template.metadata,
             source: ResultSource::Live,
+            rank: None,
             matched: SearchMatch::Content {
                 line: line_number,
                 column: display_column(line, first),
@@ -560,7 +561,7 @@ impl Sink for ContentFileSink<'_> {
     }
 }
 
-fn preview(line: &[u8], matches: &[Match]) -> (SmolStr, Vec<TextRange>) {
+pub(crate) fn preview(line: &[u8], matches: &[Match]) -> (SmolStr, Vec<TextRange>) {
     let first = matches[0];
     let context_before = MAX_PREVIEW_BYTES / 3;
     let start = first.start().saturating_sub(context_before);
@@ -581,21 +582,21 @@ fn preview(line: &[u8], matches: &[Match]) -> (SmolStr, Vec<TextRange>) {
     (SmolStr::new(preview.as_ref()), ranges)
 }
 
-fn strip_line_ending(bytes: &[u8]) -> &[u8] {
+pub(crate) fn strip_line_ending(bytes: &[u8]) -> &[u8] {
     bytes
         .strip_suffix(b"\r\n")
         .or_else(|| bytes.strip_suffix(b"\n"))
         .unwrap_or(bytes)
 }
 
-fn display_column(line: &[u8], found: Match) -> u64 {
+pub(crate) fn display_column(line: &[u8], found: Match) -> u64 {
     String::from_utf8_lossy(&line[..found.start()])
         .chars()
         .count() as u64
         + 1
 }
 
-fn entry_kind(file_type: std::fs::FileType) -> EntryKind {
+pub(crate) fn entry_kind(file_type: std::fs::FileType) -> EntryKind {
     if file_type.is_dir() {
         EntryKind::Dir
     } else if file_type.is_file() {
@@ -607,7 +608,7 @@ fn entry_kind(file_type: std::fs::FileType) -> EntryKind {
     }
 }
 
-fn kind_matches(filter: EntryKindFilter, kind: EntryKind) -> bool {
+pub(crate) fn kind_matches(filter: EntryKindFilter, kind: EntryKind) -> bool {
     match filter {
         EntryKindFilter::All => true,
         EntryKindFilter::Files => !kind.is_dir_like(),
@@ -615,7 +616,7 @@ fn kind_matches(filter: EntryKindFilter, kind: EntryKind) -> bool {
     }
 }
 
-fn extension_matches(path: &Path, extensions: &[SmolStr]) -> bool {
+pub(crate) fn extension_matches(path: &Path, extensions: &[SmolStr]) -> bool {
     if extensions.is_empty() {
         return true;
     }
@@ -628,88 +629,11 @@ fn extension_matches(path: &Path, extensions: &[SmolStr]) -> bool {
         .is_ok()
 }
 
-fn metadata_for(path: &Path, name: &str) -> Option<Metadata> {
+pub(crate) fn metadata_for(path: &Path, name: &str) -> Option<Metadata> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     Some(Metadata {
         len: metadata.len(),
         modified: metadata.modified().ok(),
         hidden: name.starts_with('.'),
     })
-}
-
-struct EventSink {
-    generation: SearchGeneration,
-    events: Sender<SearchEvent>,
-    cancelled: Arc<AtomicBool>,
-    pending: Vec<SearchResult>,
-    limits: SearchLimits,
-    warnings_sent: usize,
-}
-
-impl EventSink {
-    fn new(
-        generation: SearchGeneration,
-        events: Sender<SearchEvent>,
-        cancelled: Arc<AtomicBool>,
-        limits: SearchLimits,
-    ) -> Self {
-        Self {
-            generation,
-            events,
-            cancelled,
-            pending: Vec::with_capacity(RESULT_BATCH_SIZE),
-            limits,
-            warnings_sent: 0,
-        }
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::Acquire) || self.events.is_closed()
-    }
-
-    fn send(&self, event: SearchEvent) -> bool {
-        !self.is_cancelled() && self.events.send_blocking(event).is_ok()
-    }
-
-    fn warning(&mut self, subject: VfsPath, message: impl Into<String>) -> bool {
-        if self.warnings_sent >= MAX_WARNINGS {
-            return !self.is_cancelled();
-        }
-        self.warnings_sent += 1;
-        self.send(SearchEvent::Warning(SearchWarning {
-            generation: self.generation,
-            subject,
-            message: message.into(),
-        }))
-    }
-
-    fn push(&mut self, result: SearchResult, stats: &mut SearchStats) -> bool {
-        let retained = stats.matches_sent as usize + self.pending.len();
-        if retained >= self.limits.max_results {
-            stats.truncated = true;
-            return false;
-        }
-        self.pending.push(result);
-        if self.pending.len() >= RESULT_BATCH_SIZE {
-            self.flush(stats)
-        } else {
-            true
-        }
-    }
-
-    fn flush(&mut self, stats: &mut SearchStats) -> bool {
-        if self.pending.is_empty() {
-            return !self.is_cancelled();
-        }
-        let results = std::mem::take(&mut self.pending);
-        stats.matches_sent += results.len() as u64;
-        self.send(SearchEvent::Batch(SearchBatch {
-            generation: self.generation,
-            results,
-        }))
-    }
-
-    fn finish(&self, finished: SearchFinished) -> bool {
-        self.send(SearchEvent::Finished(finished))
-    }
 }

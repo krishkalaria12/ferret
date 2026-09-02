@@ -3,10 +3,10 @@ use smol_str::SmolStr;
 
 use crate::config::DEFAULT_MAX_RESULTS;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SearchGeneration(pub u64);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SearchRequest {
     pub generation: SearchGeneration,
     pub scope: SearchScope,
@@ -16,14 +16,14 @@ pub struct SearchRequest {
     pub limits: SearchLimits,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SearchScope {
     pub kind: SearchScopeKind,
     /// Explicit even for Computer: Windows has volumes, not one `/` root.
     pub roots: Vec<VfsPath>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchScopeKind {
     CurrentFolder,
     Home,
@@ -31,7 +31,7 @@ pub enum SearchScopeKind {
     Custom,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NameQuery {
     pub pattern: String,
     pub syntax: PatternSyntax,
@@ -50,13 +50,13 @@ impl NameQuery {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PatternSyntax {
     Literal,
     Regex,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CaseMode {
     Smart,
     Sensitive,
@@ -73,13 +73,13 @@ impl CaseMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NameMatchMode {
     Substring,
     Fuzzy,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContentQuery {
     pub pattern: String,
     pub syntax: PatternSyntax,
@@ -87,7 +87,7 @@ pub struct ContentQuery {
     pub whole_word: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SearchFilters {
     pub kind: EntryKindFilter,
     pub extensions: Vec<SmolStr>,
@@ -112,7 +112,7 @@ impl Default for SearchFilters {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EntryKindFilter {
     #[default]
     All,
@@ -120,7 +120,7 @@ pub enum EntryKindFilter {
     Folders,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SearchLimits {
     pub max_results: usize,
 }
@@ -133,7 +133,7 @@ impl Default for SearchLimits {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchEvent {
     Started { generation: SearchGeneration },
     Batch(SearchBatch),
@@ -154,13 +154,13 @@ impl SearchEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchBatch {
     pub generation: SearchGeneration,
     pub results: Vec<SearchResult>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub id: SearchResultId,
     pub path: VfsPath,
@@ -168,16 +168,24 @@ pub struct SearchResult {
     pub kind: EntryKind,
     pub metadata: Option<Metadata>,
     pub source: ResultSource,
+    /// Zero-based position in the index's relevance ranking, or `None` for a
+    /// live result.
+    ///
+    /// Deliberately an ordinal rather than the raw BM25 score: the score is
+    /// only comparable within one query, it would make `SearchResult` carry a
+    /// float and lose `Eq`, and the position is the whole of what a ranked
+    /// list means to the person reading it.
+    pub rank: Option<u32>,
     pub matched: SearchMatch,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultId {
     pub path: VfsPath,
     pub match_key: MatchKey,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MatchKey {
     Path,
     Content {
@@ -187,7 +195,7 @@ pub enum MatchKey {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchMatch {
     Filename {
         ranges: Vec<TextRange>,
@@ -200,19 +208,78 @@ pub enum SearchMatch {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextRange {
     pub start: usize,
     pub end: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResultSource {
     Live,
     Index,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the persistent index currently knows.
+///
+/// Two consumers, and both matter: the settings surface shows it to a person,
+/// and the query planner reads [`IndexStatus::covers`] to decide whether a
+/// scope can be answered from the index alone or needs a live scan merged in.
+/// It is deliberately a snapshot — by the time it is read the crawler has
+/// moved on, so it may only be used to choose a *faster* path, never to
+/// suppress a correct one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexStatus {
+    /// `false` when the daemon is running but its stores could not be opened.
+    pub available: bool,
+    pub roots: Vec<IndexedRoot>,
+    pub files: u64,
+    pub content_documents: u64,
+    pub bytes_on_disk: u64,
+}
+
+impl IndexStatus {
+    /// Whether `path` lies inside a root that is crawled, reconciled and
+    /// currently believed to agree with the filesystem.
+    ///
+    /// A root that is still crawling deliberately does not count: its rows are
+    /// real, but its *absences* are not yet meaningful, and skipping the live
+    /// scan on the strength of a partial index is how an indexed search comes
+    /// to be quietly missing files.
+    pub fn covers(&self, path: &VfsPath) -> bool {
+        self.available
+            && self
+                .roots
+                .iter()
+                .any(|root| root.state == RootState::Ready && path.starts_with(&root.path))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexedRoot {
+    pub path: VfsPath,
+    pub state: RootState,
+    pub files: u64,
+    /// Seconds since the Unix epoch, not a `SystemTime`: this crosses a
+    /// process boundary and is shown as a relative age, so a fixed-width
+    /// integer is the honest representation.
+    pub last_reconciled_unix: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RootState {
+    /// The first full crawl has not finished, so absences mean nothing yet.
+    Crawling,
+    /// Crawled and being kept fresh by the watcher and reconciliation.
+    Ready,
+    /// Kept but not refreshed, at the user's request.
+    Paused,
+    /// The store could not be read or written for this root; it is being
+    /// rebuilt, and every query for it falls back to the live scan.
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchStats {
     pub roots_done: usize,
     pub roots_total: usize,
@@ -222,20 +289,20 @@ pub struct SearchStats {
     pub truncated: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchProgress {
     pub generation: SearchGeneration,
     pub stats: SearchStats,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchWarning {
     pub generation: SearchGeneration,
     pub subject: VfsPath,
     pub message: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchFinished {
     Complete {
         generation: SearchGeneration,

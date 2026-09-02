@@ -1,4 +1,6 @@
-//! Tunables for search traversal and result delivery.
+//! Tunables for search traversal, the persistent index, and the daemon.
+
+use std::time::Duration;
 
 /// Search events waiting for a consumer before the producer parks.
 ///
@@ -63,6 +65,113 @@ pub const MAX_RANGES_PER_PREVIEW: usize = 32;
 /// volume search. A small cap keeps the bounded event stream useful for
 /// results while the skipped counter still records every failure.
 pub const MAX_WARNINGS: usize = 8;
+
+/// Rows written to SQLite inside one crawl transaction.
+///
+/// One transaction per file makes the initial crawl fsync-bound and takes
+/// hours over a home directory; one transaction for the whole crawl loses
+/// everything if the daemon is killed halfway. A few thousand rows is roughly
+/// a millisecond of commit and bounds how much a crash can cost.
+pub const CRAWL_BATCH: usize = 2_048;
+
+/// Largest file whose contents enter the Tantivy index.
+///
+/// Above this the index would grow faster than it helps: multi-gigabyte logs
+/// and datasets dominate the segment size while almost never being the file a
+/// person is looking for. They stay findable by name, and by the live regex
+/// path, which reads them without retaining them.
+pub const MAX_INDEXED_CONTENT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Tantivy writer heap, in bytes.
+///
+/// The writer buffers postings here and flushes a segment when it fills, so
+/// this trades resident memory during indexing against segment count (and so
+/// against merge work and query fan-out). 64 MiB is Tantivy's own recommended
+/// floor for a multithreaded writer.
+pub const CONTENT_WRITER_HEAP: usize = 64 * 1024 * 1024;
+
+/// Documents Tantivy commits before the reader is reloaded during a crawl.
+///
+/// A commit is what makes documents searchable, and it is not free. Batching
+/// keeps the initial crawl from spending its time in fsync while still making
+/// an in-progress index progressively useful.
+pub const CONTENT_COMMIT_BATCH: usize = 4_096;
+
+/// Rows the path index will return for one filename query before stopping.
+///
+/// The index can answer "contains e" with millions of rows. The UI shows a
+/// bounded window, and the cap is what keeps an unselective query from turning
+/// into a full table materialisation on the daemon side.
+pub const INDEX_CANDIDATE_LIMIT: usize = 4_096;
+
+/// Top-ranked documents whose contents are re-read to build snippets.
+///
+/// Tantivy ranks the whole matching set cheaply; turning a document into a row
+/// costs one file open. Only the head of the ranking is worth that, and the
+/// tail is what the live scan would have found anyway.
+pub const CONTENT_CANDIDATE_LIMIT: usize = 256;
+
+/// Shortest query the trigram index can answer.
+///
+/// FTS5's trigram tokenizer indexes three-character windows, so a one- or
+/// two-character pattern has no token to look up. Shorter queries fall back to
+/// a bounded `LIKE` scan rather than silently returning nothing.
+pub const MIN_TRIGRAM_CHARS: usize = 3;
+
+/// How long the indexer waits for a filesystem event burst to settle.
+///
+/// Longer than the file pane's 150 ms debounce on purpose: a stale row in a
+/// search result is cheaper than a re-index storm, and a compile or a `git
+/// checkout` produces thousands of events over several hundred milliseconds.
+pub const INDEX_DEBOUNCE: Duration = Duration::from_millis(400);
+
+/// Paths held for re-indexing before the queue declares itself desynced.
+///
+/// Past this the individual paths have stopped being a complete account of
+/// what changed, and a reconciliation sweep is both cheaper and more correct
+/// than applying a partial list.
+pub const DIRTY_QUEUE_CAPACITY: usize = 16_384;
+
+/// How often each indexed root is reconciled against the filesystem.
+///
+/// Native watchers drop and coalesce events — FSEvents under load, and
+/// `ReadDirectoryChangesW` whenever its buffer overflows — so freshness cannot
+/// rest on them alone. This is the backstop that converges the index to disk
+/// truth; every root is also reconciled once at startup.
+pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How long the daemon stays alive with no client connected.
+///
+/// The index is only worth maintaining for a running Ferret. Exiting releases
+/// the watchers and the SQLite handle rather than leaving a process watching a
+/// home directory nobody is searching.
+pub const DAEMON_IDLE_SHUTDOWN: Duration = Duration::from_secs(30 * 60);
+
+/// Largest single IPC frame, in bytes.
+///
+/// A result batch is bounded by [`RESULT_BATCH_SIZE`] and previews by
+/// [`MAX_PREVIEW_BYTES`], so a legitimate frame is far below this. The limit
+/// exists so a corrupt length prefix cannot make the reader allocate a
+/// gigabyte before it discovers the connection is broken.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// How long a client waits for a freshly launched daemon to accept.
+///
+/// Cold start has to open SQLite and Tantivy before it binds. Past this the
+/// client stops waiting and searches live, which is a slower answer rather
+/// than no answer.
+pub const DAEMON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Interval between connection attempts while waiting for a launching daemon.
+pub const DAEMON_CONNECT_RETRY: Duration = Duration::from_millis(25);
+
+/// Consecutive daemon launches allowed before the client gives up for good.
+///
+/// A daemon that crashes on startup — an incompatible index it cannot
+/// quarantine, a missing binary — must not be relaunched once per keystroke.
+/// After this many failures the client stays on the live path for the rest of
+/// the session and says so.
+pub const DAEMON_LAUNCH_ATTEMPTS: u32 = 3;
 
 /// Worker count for one live parallel search.
 ///
