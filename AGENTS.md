@@ -23,6 +23,9 @@ product feature is implemented.
   directory sync.
 - [`docs/git.html`](docs/git.html) — Phase 5: the branch segment in the status
   bar, per-file status in the listing, the commit dialog, pull and push.
+- [`docs/ssh-scp-plan.html`](docs/ssh-scp-plan.html) — Phase 7: saved SSH
+  connections, SFTP mounts as browsable folders, "Send to" transfers, and the
+  SSH terminal that follows a mount.
 
 Phase 1 is the base and must be finished first; phases 2–9 are addons that plug into
 the completed shell. Read both documents before proposing structural work, and cite
