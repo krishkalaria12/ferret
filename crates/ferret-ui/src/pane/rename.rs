@@ -83,7 +83,7 @@ impl FilePane {
             .parent()
             .unwrap_or_else(|| renaming.path.clone());
         let dest = parent.join(&new_name);
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let src = renaming.path.clone();
         let window_handle = window.window_handle();
 

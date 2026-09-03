@@ -104,7 +104,7 @@ impl Browser {
             return;
         };
 
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         cx.spawn(async move |this, cx| {
             // Full, not NamesOnly: `matches_completion` hides entries the
             // pane would hide, and on Unix that flag rides the same `stat` as

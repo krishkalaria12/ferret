@@ -130,10 +130,10 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) where
-        F: FnOnce(ferret_vfs::LocalFs, VfsPath) -> Fut + Send + 'static,
+        F: FnOnce(ferret_vfs::Router, VfsPath) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ferret_vfs::Result<()>> + Send + 'static,
     {
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
         // Capture the initiating pane. If the user changes tabs while a slow
         // volume creates the item, the rename must not land in whichever tab
@@ -236,7 +236,7 @@ impl Browser {
         // filesystem mechanics with nothing OS-specific in it, and
         // `RemoveMode::Permanent` is where the parallel tree delete lives
         // (D-34).
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let mut failures = Vec::new();
@@ -268,7 +268,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
         // Names are settled here, so a copy beside its original gets "file 2"
         // rather than failing or overwriting.
@@ -382,7 +382,7 @@ impl Browser {
             .filter(|src| !(cut && src.parent().as_ref() == Some(&dest_dir)))
             .collect();
         let planned = self.plan_names(sources, &dest_dir, cx);
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
 
         cx.spawn(async move |_, cx| {

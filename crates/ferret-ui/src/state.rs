@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use ferret_platform::Platform;
 use ferret_settings::{FolderPrefs, FolderView, Settings};
-use ferret_vfs::{LocalFs, VfsPath};
+use ferret_vfs::{Router, VfsPath};
 
 use crate::icons::{FileIcons, RenderedIconCache};
 
@@ -19,7 +19,10 @@ use crate::icons::{FileIcons, RenderedIconCache};
 pub struct FerretState {
     pub settings: Settings,
     pub prefs: FolderPrefs,
-    pub fs: LocalFs,
+    /// Local disk plus whatever is mounted. Cloned into every task that lists,
+    /// watches, probes or mutates; the clone is a refcount bump, and local
+    /// paths still go straight to `LocalFs` inside it.
+    pub fs: Router,
     pub platform: Arc<dyn Platform>,
     /// The bundled fallback set: always answers, never blocks (D-18).
     pub icons: &'static FileIcons,
@@ -129,7 +132,7 @@ pub fn load_state() -> FerretState {
     FerretState {
         settings,
         prefs,
-        fs: LocalFs::new(),
+        fs: Router::new(),
         platform: ferret_platform::platform(),
         icons: FileIcons::embedded(),
         os_icons: ferret_platform::icon_provider(),

@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The router's mount table: read on every remote call, written only when a
+# mount appears or goes away. `ArcSwap` keeps the read side lock-free, and an
+# in-flight listing holds its own `Arc` to the backend, so unmounting mid-walk
+# cannot pull the ground out from under it.
+arc-swap.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 futures.workspace = true
