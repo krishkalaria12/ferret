@@ -60,8 +60,13 @@ impl Browser {
             ));
         }
 
+        let git = self.render_git_segment(cx);
+
         StatusBar::new()
-            .left(text)
+            // The item count truncates before the git segment does: a count is
+            // re-derivable by looking at the list, and a branch name is not.
+            .left(div().min_w_0().truncate().child(text))
+            .when_some(git, |bar, segment| bar.right(segment))
             // §4: h24, 11.5 px, muted. The library defaults to an auto height
             // and `text_xs`, so the row would drift a pixel or two off spec.
             .h(px(STATUS_BAR_HEIGHT))
@@ -231,6 +236,9 @@ impl Render for Browser {
             .on_action(
                 cx.listener(|this, _: &actions::NewFile, window, cx| this.new_file(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &actions::CommitChanges, window, cx| {
+                this.open_commit_dialog(window, cx)
+            }))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()

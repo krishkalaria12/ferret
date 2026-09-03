@@ -21,9 +21,9 @@ use ferret_terminal::{
 };
 use ferret_vfs::{Vfs as _, VfsPath};
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, Selectable as _, Sizable as _,
@@ -45,6 +45,16 @@ use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
 use crate::state::FerretState;
 
+use commit_dialog::CommitDialog;
+pub(crate) use git::GitHandle;
+use git::GitPanel;
+// Only the allocations-per-frame budget constructs one directly.
+#[cfg(all(test, feature = "dhat-heap"))]
+pub(crate) use git::GitSnapshot;
+
+mod commit_dialog;
+mod git;
+mod git_bar;
 mod mutations;
 mod path_bar;
 mod power_search;
@@ -229,6 +239,18 @@ pub struct Browser {
     /// Focus for the sidebar, so Tab can reach it and it can show that it has
     /// focus (§8: "Focus must be visible").
     sidebar_focus: gpui::FocusHandle,
+
+    /// Repository discovery, the status snapshot and the in-flight operation
+    /// (`docs/git.html`). One per window: only the active tab's pane is
+    /// rendered, so one snapshot is all that can be on screen at a time.
+    git: GitPanel,
+    /// The commit dialog's state, kept across opens so a message survives an
+    /// accidental Escape. `None` until the dialog is opened for the first time.
+    commit_dialog: Option<Entity<CommitDialog>>,
+    /// Re-reads git status when the window comes back to the front. Held here
+    /// so it lasts as long as the window does; see
+    /// [`Browser::observe_git_activation`] for why the feature needs it.
+    _git_activation: Subscription,
 }
 
 struct BrowserTab {
@@ -354,6 +376,9 @@ impl Browser {
             places: Vec::new(),
             place_refresh: None,
             sidebar_focus: cx.focus_handle(),
+            git: GitPanel::new(),
+            commit_dialog: None,
+            _git_activation: Self::observe_git_activation(window, cx),
         };
         this.push_tab(start_directory(), window, cx);
         if this.terminal_visible {

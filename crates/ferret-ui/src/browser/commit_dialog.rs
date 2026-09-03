@@ -1,0 +1,386 @@
+//! The commit dialog (F-52).
+//!
+//! Deliberately blunt: a message and a "stage everything first" checkbox. Per
+//! hunk staging is explicitly out of scope — that is a git client, not a file
+//! manager, and the terminal panel is docked under this window for the cases it
+//! does not cover.
+//!
+//! The dialog is a **view entity**, not a closure (D-46). `open_dialog` takes an
+//! `Fn` builder that runs on every frame the dialog is up, so holding the
+//! message or the checkbox in it would rebuild the input each frame and lose
+//! the caret. The builder here mounts this entity and nothing else.
+
+use super::*;
+
+use gpui_component::checkbox::Checkbox;
+use gpui_component::dialog::{Cancel, Confirm};
+use gpui_component::input::{Textarea, TextareaState};
+
+/// Height of the message field.
+///
+/// Five rows' worth: enough for a subject, a blank line and a short body, which
+/// is the shape of a good commit message. Set as a height rather than through
+/// `TextareaState::rows`, which only governs the auto-grow ceiling — the field
+/// renders one line tall without this.
+const MESSAGE_HEIGHT: f32 = 108.;
+/// Dialog width. Wider than the library's 448 default, because a commit message
+/// wrapped at 448 px reads as a chat box.
+const DIALOG_WIDTH: f32 = 460.;
+
+/// What `Dialog` draws around the body, in logical pixels.
+///
+/// Read off `Dialog::render`: the popup pads 16 above and below and draws a
+/// one-pixel border. There is no inter-child gap to account for because the body
+/// is its only child — which is the reason the action buttons live in this
+/// view's own content rather than in `Dialog::footer`. With them inside, one
+/// measurement covers the whole dialog and the centring below is exact.
+const DIALOG_CHROME: f32 = 34.;
+
+/// Where the dialog is assumed to sit until its first frame has been measured.
+///
+/// Only ever used for one frame, and only the first time a window opens the
+/// dialog; the height is content-driven but fixed, so every later open is
+/// already exact. Measured at the default text size, so that first frame is
+/// within a pixel or two rather than visibly settling.
+const ESTIMATED_HEIGHT: f32 = 240.;
+
+/// Never nearer the top of the window than this.
+///
+/// A window shorter than the dialog would otherwise centre it off the top edge,
+/// taking the title and the message field with it. Below this the dialog stops
+/// centring and simply starts at the top; the body scrolls.
+const MIN_MARGIN_TOP: f32 = 24.;
+
+pub(super) struct CommitDialog {
+    message: Entity<TextareaState>,
+    /// `git add -A` before committing. Checked by default: it is what the
+    /// common case wants, and the alternative — a Commit button that succeeds
+    /// and commits nothing — is the worst outcome available here.
+    stage_all: bool,
+    /// The repository name, shown under the title so a commit cannot be made
+    /// into the wrong repository without the chance to notice.
+    repository: SharedString,
+    /// The work tree the draft above belongs to.
+    ///
+    /// The name is for the *reader*; this is for the code, and they are not
+    /// interchangeable — two checkouts of the same project are both called
+    /// `ferret`. See [`Browser::open_commit_dialog`], which resets the draft
+    /// when this changes.
+    worktree: PathBuf,
+    /// True from the moment Commit is pressed until git has answered.
+    ///
+    /// The dialog stays up for that whole window, so this is what stops a
+    /// second press queueing a second commit and what tells the user which
+    /// state they are in.
+    committing: bool,
+    /// The body's painted height, written on prepaint and read by the builder
+    /// that positions the dialog.
+    ///
+    /// Measured rather than assumed: the height depends on
+    /// `appearance.ui_font_size`, so a constant would centre correctly at one
+    /// text size and be visibly wrong at every other.
+    height: Arc<Mutex<f32>>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl CommitDialog {
+    fn new(
+        repository: SharedString,
+        worktree: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let message =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder("Describe what changed"));
+        // Typing has to repaint the dialog, because the Commit button is
+        // disabled while the message is blank and would otherwise stay
+        // disabled until something else happened to cause a frame.
+        let subscription = cx.subscribe(&message, |_, _, _: &InputEvent, cx| cx.notify());
+        Self {
+            message,
+            stage_all: true,
+            repository,
+            worktree,
+            committing: false,
+            height: Arc::new(Mutex::new(ESTIMATED_HEIGHT)),
+            _subscriptions: vec![subscription],
+        }
+    }
+
+    fn text(&self, cx: &App) -> String {
+        self.message.read(cx).value().trim().to_string()
+    }
+
+    fn can_commit(&self, cx: &App) -> bool {
+        !self.text(cx).is_empty()
+    }
+
+    /// Point the dialog at a repository, discarding the draft if it is a
+    /// different one.
+    ///
+    /// A draft is only ever meaningful for the tree it was written about, and
+    /// the checkbox goes back to its default with it: "stage all" turned off
+    /// deliberately in one repository is not a decision about another.
+    fn follow(
+        &mut self,
+        repository: SharedString,
+        worktree: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.repository = repository;
+        if self.worktree != worktree {
+            self.worktree = worktree.to_path_buf();
+            self.stage_all = true;
+            self.message.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+        }
+        cx.notify();
+    }
+}
+
+impl Render for CommitDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let committing = self.committing;
+        let ready = self.can_commit(cx) && !committing;
+        let measured = self.height.clone();
+
+        v_flex()
+            .id("commit-dialog-body")
+            .gap_3()
+            // What the dialog's vertical position is computed from. The open
+            // animation moves the popup's `top` and never its height, so this
+            // is stable from the first frame.
+            .on_prepaint(move |bounds, _, _| {
+                *measured.lock() = f32::from(bounds.size.height);
+            })
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .child(
+                        Icon::new(gpui_component::IconName::CircleCheck)
+                            .size_6()
+                            .text_color(theme.primary),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_0()
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Commit Changes"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(self.repository.clone()),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("Message"),
+                    )
+                    .child(Textarea::new(&self.message).h(px(MESSAGE_HEIGHT))),
+            )
+            .child(
+                Checkbox::new("git-stage-all")
+                    .label("Stage all changes first (git add -A)")
+                    .checked(self.stage_all)
+                    // Changing what is about to be staged, after it has been
+                    // staged, would describe a commit that is not the one
+                    // running.
+                    .disabled(committing)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.stage_all = *checked;
+                        cx.notify();
+                    })),
+            )
+            // The actions live here rather than in `Dialog::footer` for two
+            // reasons. They are inside the one element that is measured, which
+            // is what makes `DIALOG_CHROME` a constant instead of a guess; and
+            // `DialogClose`/`DialogAction` each wrap their child in a
+            // `size_full` div, which stretches every button to half the footer.
+            // The actions dispatched are the same ones those wrappers dispatch.
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("commit-cancel")
+                            .outline()
+                            .label("Cancel")
+                            // Dismissing mid-commit would leave git running
+                            // behind a dialog that claimed to have cancelled it.
+                            .disabled(committing)
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
+                    )
+                    .child(
+                        Button::new("commit-ok")
+                            .primary()
+                            // Named for what is happening, not spun: the dialog
+                            // now outlives the operation, so this label is the
+                            // only thing saying why it is still on screen.
+                            .label(if committing {
+                                "Committing…"
+                            } else {
+                                "Commit"
+                            })
+                            .disabled(!ready)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(Confirm { secondary: false }), cx)
+                            }),
+                    ),
+            )
+    }
+}
+
+/// Where the dialog's top edge goes so that it sits in the middle of the window.
+///
+/// `body` is the measured height of the mounted view; the dialog's own padding
+/// and border are the only things around it (see [`DIALOG_CHROME`]).
+fn centred_top(body: f32, window: &Window) -> f32 {
+    let viewport = f32::from(window.viewport_size().height);
+    ((viewport - (body + DIALOG_CHROME)) / 2.).max(MIN_MARGIN_TOP)
+}
+
+impl Browser {
+    /// Open the dialog, creating it the first time.
+    ///
+    /// The entity outlives each open so a message survives an accidental
+    /// Escape — losing a half-written commit message to a stray keystroke is a
+    /// small disaster with no undo.
+    pub(super) fn open_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.git.repo() else {
+            return;
+        };
+        // ⌘⇧C is a shortcut people repeat. `open_dialog` pushes onto a stack,
+        // so without this a second press mounts a second copy of the same
+        // dialog over the first and Cancel only dismisses one of them.
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let name = SharedString::from(repo.name().to_string());
+        let worktree = repo.workdir().to_path_buf();
+
+        let dialog = match &self.commit_dialog {
+            Some(existing) => {
+                // The entity outlives each open, and so would its draft: the
+                // repository can have changed since the last one, and a message
+                // written about repository A must not be presented as the
+                // message for repository B. `follow` keeps the draft only if
+                // the work tree is the same one.
+                existing.update(cx, |dialog, cx| {
+                    dialog.follow(name.clone(), &worktree, window, cx);
+                });
+                existing.clone()
+            }
+            None => {
+                let created = cx.new(|cx| CommitDialog::new(name, worktree, window, cx));
+                self.commit_dialog = Some(created.clone());
+                created
+            }
+        };
+
+        // The message field takes focus on open: this dialog exists to be
+        // typed into, and a modal that needs a click before it accepts a
+        // keystroke is a modal that gets closed again.
+        use gpui::Focusable as _;
+        let focus = dialog.read(cx).message.read(cx).focus_handle(cx).clone();
+        window.focus(&focus, cx);
+
+        let browser = cx.weak_entity();
+        let measured = dialog.read(cx).height.clone();
+        window.open_dialog(cx, move |modal, window, cx| {
+            let dialog = dialog.clone();
+            let browser = browser.clone();
+            let committing = dialog.read(cx).committing;
+            modal
+                .w(px(DIALOG_WIDTH))
+                .close_button(false)
+                // While git is running there is no way out of the dialog that
+                // would stop it, so neither Escape nor the backdrop offers one.
+                // Both come back the instant it settles.
+                .keyboard(!committing)
+                .overlay_closable(!committing)
+                // `Dialog` centres itself horizontally and then puts its top at
+                // a tenth of the viewport, because it cannot know how tall it
+                // is going to be. This view does know — it measured itself last
+                // frame — so it finishes the job.
+                .margin_top(px(centred_top(*measured.lock(), window)))
+                .child(dialog.clone())
+                // Always `false`: the dialog is never closed by confirming it.
+                //
+                // Closing here would be closing on "the commit has been
+                // *started*", and git has not answered yet. A `pre-commit` hook
+                // that rejects, an unset `user.email`, a lock held by the
+                // terminal panel below — each of those arrives after this
+                // returns, and with the modal already gone the user gets a
+                // toast and an empty screen, and has to reopen the dialog to
+                // act on a message that was only preserved by a separate rule
+                // elsewhere. `settle_commit_dialog` dismisses it on success
+                // instead, which is the only outcome that means "done".
+                .on_ok(move |_, window, cx| {
+                    let Some(browser) = browser.upgrade() else {
+                        return true;
+                    };
+                    let (message, stage_all, committing) = dialog.read_with(cx, |dialog, cx| {
+                        (dialog.text(cx), dialog.stage_all, dialog.committing)
+                    });
+                    // An empty message commits nothing; a second Confirm while
+                    // one is in flight would queue a duplicate.
+                    if message.is_empty() || committing {
+                        return false;
+                    }
+                    dialog.update(cx, |dialog, cx| {
+                        dialog.committing = true;
+                        cx.notify();
+                    });
+                    browser.update(cx, |browser, cx| {
+                        browser.git_commit(message, stage_all, window, cx);
+                    });
+                    false
+                })
+        });
+        cx.notify();
+    }
+
+    /// git has answered. Take the dialog out of its in-flight state, and — only
+    /// if the commit landed — clear the message and dismiss it.
+    ///
+    /// A refused commit keeps both the dialog and the message, which is the
+    /// whole point: the fix is usually a word in the message or the checkbox
+    /// beneath it, and the user is already looking at both.
+    pub(super) fn settle_commit_dialog(
+        &mut self,
+        committed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.commit_dialog.clone() else {
+            return;
+        };
+        dialog.update(cx, |dialog, cx| {
+            dialog.committing = false;
+            if committed {
+                dialog.message.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                });
+            }
+            cx.notify();
+        });
+        if committed {
+            window.close_dialog(cx);
+        }
+    }
+}

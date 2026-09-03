@@ -1,0 +1,1397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferret — Phase 5: Git</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens copied from docs/plan.html so the three documents read as one set.
+   Do not diverge: if a colour changes here it changes there.
+   --------------------------------------------------------------------------- */
+:root {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+
+  /* The terminal's own colours, from crates/ferret-ui/themes/groknight.json.
+     Used by the mockup in §3 so the page shows the real palette, not a guess. */
+  --t-bg:   #141414;
+  --t-fg:   #e1e1e1;
+  --t-dim:  #787878;
+  --t-red:  #f7768e;
+  --t-grn:  #9ece6a;
+  --t-yel:  #e0af68;
+  --t-blu:  #7aa2f7;
+  --t-mag:  #bb9af7;
+  --t-cyn:  #7dcfff;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+
+  --measure: 68ch;
+  --rail: 16.5rem;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --accent:      #7aa2f7;
+    --accent-soft: #18202f;
+    --accent-line: #2c405f;
+
+    --ok:   #9ece6a;
+    --warn: #e0af68;
+    --risk: #f7768e;
+    --violet: #bb9af7;
+
+    --ground:  #101116;
+    --panel:   #16181e;
+    --sunken:  #1b1e25;
+    --rule:    #2a2e38;
+    --rule-soft: #22252d;
+
+    --ink:     #e3e5ea;
+    --ink-mid: #a3a8b5;
+    --ink-dim: #767c8b;
+  }
+}
+
+:root[data-theme="dark"] {
+  --accent:      #7aa2f7;
+  --accent-soft: #18202f;
+  --accent-line: #2c405f;
+
+  --ok:   #9ece6a;
+  --warn: #e0af68;
+  --risk: #f7768e;
+  --violet: #bb9af7;
+
+  --ground:  #101116;
+  --panel:   #16181e;
+  --sunken:  #1b1e25;
+  --rule:    #2a2e38;
+  --rule-soft: #22252d;
+
+  --ink:     #e3e5ea;
+  --ink-mid: #a3a8b5;
+  --ink-dim: #767c8b;
+}
+
+:root[data-theme="light"] {
+  --accent:      #3b6fd4;
+  --accent-soft: #e8eefb;
+  --accent-line: #b9cdf2;
+
+  --ok:   #4a7a22;
+  --warn: #8a6410;
+  --risk: #b8384f;
+  --violet: #6f4bbf;
+
+  --ground:  #fbfbfd;
+  --panel:   #ffffff;
+  --sunken:  #f2f3f7;
+  --rule:    #dfe1e9;
+  --rule-soft: #ebedf2;
+
+  --ink:     #16181d;
+  --ink-mid: #4c515e;
+  --ink-dim: #767c8b;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Type scale ---------------------------------------------------------- */
+h1, h2, h3, h4 {
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  margin: 0;
+}
+h1 { font-size: clamp(1.9rem, 4.4vw, 2.9rem); line-height: 1.1; letter-spacing: -0.035em; }
+h2 { font-size: clamp(1.3rem, 2.6vw, 1.6rem); line-height: 1.2; }
+h3 { font-size: 1.06rem; letter-spacing: -0.005em; }
+h4 { font-size: .94rem; letter-spacing: 0; }
+
+p, li { max-width: var(--measure); }
+p { margin: 0 0 .9rem; }
+ul, ol { margin: 0 0 1rem; padding-left: 1.2rem; }
+li { margin-bottom: .35rem; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+code, kbd, .mono { font-family: var(--mono); }
+code {
+  font-size: .875em;
+  background: var(--sunken);
+  border: 1px solid var(--rule-soft);
+  padding: .05em .34em;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+kbd {
+  font-size: .8em;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  padding: .1em .4em;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* --- Shell --------------------------------------------------------------- */
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: var(--gutter);
+  max-width: 78rem;
+  margin: 0 auto;
+  padding: 0 var(--gutter) 6rem;
+}
+
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 2.25rem 0 2rem;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.5;
+}
+.rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .5rem;
+  padding-bottom: .75rem;
+  margin-bottom: .75rem;
+  border-bottom: 1px solid var(--rule);
+}
+.rail-head b { font-size: .95rem; letter-spacing: -.02em; }
+.rail nav ol { list-style: none; margin: 0; padding: 0; }
+.rail nav li { margin: 0; max-width: none; }
+.rail nav a {
+  display: block;
+  padding: .28rem .5rem .28rem 1.35rem;
+  color: var(--ink-mid);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  position: relative;
+  overflow-wrap: anywhere;
+}
+.rail nav a::before {
+  content: "├─";
+  position: absolute;
+  left: .18rem;
+  color: var(--ink-dim);
+  opacity: .55;
+}
+.rail nav li:last-child a::before { content: "└─"; }
+.rail nav a:hover { color: var(--ink); background: var(--sunken); }
+.rail nav a.is-current {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+.rail .siblings {
+  margin-top: 1.1rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--rule);
+  font-size: .76rem;
+  color: var(--ink-dim);
+}
+.rail .siblings a { display: block; padding: .15rem 0; text-decoration: none; color: var(--ink-mid); }
+.rail .siblings a:hover { color: var(--accent); }
+
+.doc { padding-top: 2.25rem; min-width: 0; }
+
+/* --- Masthead ------------------------------------------------------------ */
+.masthead { padding: 1.5rem 0 2.25rem; border-bottom: 1px solid var(--rule); margin-bottom: 2.5rem; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin: 0 0 .85rem;
+}
+.masthead .lede {
+  font-size: 1.12rem;
+  color: var(--ink-mid);
+  margin: 1rem 0 0;
+  max-width: 58ch;
+}
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 2rem;
+}
+@media (min-width: 46rem) {
+  .facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.facts div { background: var(--panel); padding: .8rem .95rem; }
+.facts dt {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: .3rem;
+}
+.facts dd { margin: 0; font-size: .9rem; font-weight: 500; }
+
+/* --- Sections ------------------------------------------------------------ */
+section { padding-top: 3.25rem; }
+section > h2 { margin-bottom: .3rem; }
+.sec-tag {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .08em;
+  color: var(--ink-dim);
+  display: block;
+  margin-bottom: .45rem;
+}
+.sec-intro { color: var(--ink-mid); margin-top: .85rem; }
+h3 { margin-top: 2rem; margin-bottom: .5rem; }
+h4 { margin-top: 1.4rem; margin-bottom: .35rem; }
+
+/* --- Tables -------------------------------------------------------------- */
+.scroller { overflow-x: auto; margin: 1.1rem 0 1.4rem; border: 1px solid var(--rule); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: .875rem; min-width: 34rem; }
+table.wide { min-width: 54rem; }
+caption {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  padding: .7rem .85rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunken);
+}
+th, td { text-align: left; padding: .55rem .85rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+thead th {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-weight: 600;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--sunken); }
+td.num, th.num { font-variant-numeric: tabular-nums; }
+td.id { font-family: var(--mono); font-size: .8rem; color: var(--ink-dim); white-space: nowrap; }
+td.crate, th.crate { font-family: var(--mono); font-size: .8rem; }
+td.key { font-family: var(--mono); font-size: .8rem; white-space: nowrap; }
+
+/* --- Pills --------------------------------------------------------------- */
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  padding: .12rem .45rem;
+  border-radius: 3px;
+  border: 1px solid;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.p-core   { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.p-done   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, transparent);   background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.p-later  { color: var(--ink-dim); border-color: var(--rule); background: var(--sunken); }
+.p-risky  { color: var(--risk); border-color: color-mix(in srgb, var(--risk) 40%, transparent); background: color-mix(in srgb, var(--risk) 10%, transparent); }
+.p-warn   { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+.yes { color: var(--ok); font-weight: 600; }
+.no  { color: var(--risk); font-weight: 600; }
+.part { color: var(--warn); }
+
+/* --- Callouts ------------------------------------------------------------ */
+.note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: .85rem 1rem;
+  border-radius: 0 5px 5px 0;
+  margin: 1.2rem 0;
+  font-size: .92rem;
+}
+.note.risk { border-left-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, transparent); }
+.note.warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.note.ok   { border-left-color: var(--ok);   background: color-mix(in srgb, var(--ok) 9%, transparent); }
+.note > :last-child { margin-bottom: 0; }
+.note strong { font-family: var(--mono); font-size: .82rem; letter-spacing: .05em; text-transform: uppercase; display: block; margin-bottom: .3rem; }
+
+/* --- Decision blocks ------------------------------------------------------ */
+.dec {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--violet);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+  padding: .9rem 1.05rem;
+  margin: 1rem 0;
+}
+.dec h4 { margin: 0 0 .35rem; font-size: .98rem; }
+.dec h4 .did { color: var(--violet); margin-right: .5rem; }
+.dec p:last-child { margin-bottom: 0; }
+.dec .because {
+  font-size: .88rem;
+  color: var(--ink-mid);
+  border-top: 1px dashed var(--rule);
+  margin-top: .7rem;
+  padding-top: .6rem;
+}
+.dec .because b {
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Window anatomy ------------------------------------------------------- */
+.anatomy {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+  margin: 1.3rem 0 .5rem;
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.an-row { display: flex; }
+.an-cell {
+  padding: .55rem .7rem;
+  border-right: 1px solid var(--rule-soft);
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-mid);
+  min-width: 0;
+}
+.an-cell:last-child { border-right: 0; }
+.an-cell b { display: block; color: var(--ink); font-weight: 600; letter-spacing: -.01em; }
+.an-cell span { color: var(--ink-dim); }
+.an-title { background: var(--sunken); }
+.an-new { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.an-new b { color: var(--accent); }
+
+/* --- Terminal mockup ------------------------------------------------------ */
+.term {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.3rem 0 .6rem;
+  background: var(--t-bg);
+}
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .4rem .65rem;
+  background: color-mix(in srgb, var(--t-bg) 70%, #ffffff 8%);
+  border-bottom: 1px solid #2a2a2a;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--t-dim);
+  flex-wrap: wrap;
+}
+.term-head .cwd { color: var(--t-fg); }
+.term-head .spacer { margin-left: auto; }
+.term-head .tbtn {
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: .08rem .4rem;
+  color: var(--t-dim);
+}
+.term-head .tbtn.on { color: var(--t-grn); border-color: color-mix(in srgb, var(--t-grn) 45%, transparent); }
+.term-body {
+  padding: .7rem .8rem;
+  font-family: var(--mono);
+  font-size: .76rem;
+  line-height: 1.5;
+  color: var(--t-fg);
+  overflow-x: auto;
+  white-space: pre;
+}
+.term-body .p1 { color: var(--t-grn); }
+.term-body .p2 { color: var(--t-blu); }
+.term-body .dim { color: var(--t-dim); }
+.term-body .yel { color: var(--t-yel); }
+.term-body .mag { color: var(--t-mag); }
+.term-body .cyn { color: var(--t-cyn); }
+.term-body .cur { background: var(--t-fg); color: var(--t-bg); }
+.cap {
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-dim);
+  margin: 0 0 1.4rem;
+  max-width: none;
+}
+
+/* --- Pipeline / lanes ----------------------------------------------------- */
+.pipe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: .4rem;
+  margin: 1.2rem 0 .4rem;
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.pipe .st {
+  flex: 1 1 8.5rem;
+  min-width: 8.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: .55rem .65rem;
+}
+.pipe .st b { display: block; color: var(--ink); font-size: .78rem; }
+.pipe .st span { color: var(--ink-dim); }
+.pipe .ar { align-self: center; color: var(--ink-dim); flex: 0 0 auto; }
+.pipe .st.eng { border-color: var(--accent-line); background: var(--accent-soft); }
+.pipe .st.eng b { color: var(--accent); }
+
+.lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: .6rem;
+  margin: 1.2rem 0;
+}
+.lane {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: .7rem .8rem;
+}
+.lane h4 {
+  margin: 0 0 .4rem;
+  font-size: .8rem;
+  color: var(--accent);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.lane ul { margin: 0; padding-left: 1.05rem; font-size: .85rem; }
+.lane li { margin-bottom: .25rem; max-width: none; }
+.lane .own {
+  font-family: var(--mono);
+  font-size: .68rem;
+  color: var(--ink-dim);
+  display: block;
+  margin-top: .5rem;
+  padding-top: .45rem;
+  border-top: 1px dashed var(--rule);
+}
+
+/* --- Code blocks ---------------------------------------------------------- */
+pre {
+  background: var(--sunken);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: .8rem .9rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.55;
+  margin: 1rem 0;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+pre .c { color: var(--ink-dim); }
+
+/* --- Steps ---------------------------------------------------------------- */
+.step {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  margin: .8rem 0;
+  background: var(--panel);
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0 1rem;
+}
+.step .pn {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--violet);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.step h3 { margin: 0 0 .15rem; }
+.step .dep {
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-dim);
+  margin-bottom: .6rem;
+}
+.step ul { margin-bottom: .6rem; }
+.step .accept {
+  font-size: .86rem;
+  border-top: 1px dashed var(--rule);
+  padding-top: .6rem;
+  color: var(--ink-mid);
+  max-width: 62ch;
+}
+.step .accept b {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: block;
+}
+
+/* --- Theme toggle --------------------------------------------------------- */
+#theme {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  background: var(--panel);
+  color: var(--ink-mid);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: .2rem .45rem;
+  cursor: pointer;
+  flex: none;
+}
+#theme:hover { color: var(--ink); border-color: var(--accent-line); }
+
+footer {
+  margin-top: 4rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--ink-dim);
+}
+
+/* --- Narrow --------------------------------------------------------------- */
+@media (max-width: 62rem) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .rail {
+    position: static;
+    max-height: none;
+    padding: 1.5rem 0 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .rail nav ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .2rem;
+    padding-bottom: 1rem;
+  }
+  .rail nav a { padding: .2rem .5rem; border-left: 0; border-radius: 4px; }
+  .rail nav a::before, .rail nav li:last-child a::before { content: none; }
+  .rail .siblings { display: flex; gap: 1rem; padding-bottom: 1rem; }
+  .doc { padding-top: 1.5rem; }
+  .an-row { flex-wrap: wrap; }
+  .pipe .ar { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-head">
+    <b>ferret/git</b>
+    <button id="theme" type="button" aria-label="Switch colour theme">theme</button>
+  </div>
+  <nav aria-label="Sections">
+    <ol>
+      <li><a href="#what">what this is</a></li>
+      <li><a href="#engine">the engine decision</a></li>
+      <li><a href="#anatomy">panel anatomy</a></li>
+      <li><a href="#architecture">crate architecture</a></li>
+      <li><a href="#datapath">the data path</a></li>
+      <li><a href="#porcelain">reading porcelain v2</a></li>
+      <li><a href="#listing">status in the listing</a></li>
+      <li><a href="#actions">commit, pull, push</a></li>
+      <li><a href="#theming">theme tokens</a></li>
+      <li><a href="#interaction">interaction contract</a></li>
+      <li><a href="#buildorder">build order</a></li>
+      <li><a href="#measuring">gates &amp; budgets</a></li>
+      <li><a href="#risks">risks &amp; questions</a></li>
+    </ol>
+  </nav>
+  <div class="siblings">
+    companion documents
+    <a href="plan.html">plan.html — whole product</a>
+    <a href="ui-base.html">ui-base.html — phase 1</a>
+    <a href="terminal.html">terminal.html — phase 2</a>
+  </div>
+</aside>
+
+<main class="doc">
+
+<header class="masthead">
+  <p class="eyebrow">Phase 5 reference · rev 1 · 30 Aug 2026</p>
+  <h1>Git</h1>
+  <p class="lede">The branch you are on, what has changed, and the four buttons that move it — in the status bar of the folder you are already looking at, without opening a terminal or a second application.</p>
+  <dl class="facts">
+    <div><dt>Delivers</dt><dd>F-50 · F-51 · F-52 · F-53</dd></div>
+    <div><dt>Depends on</dt><dd>Phase 1 (complete)</dd></div>
+    <div><dt>New crate</dt><dd class="mono">ferret-git</dd></div>
+    <div><dt>Engine</dt><dd class="mono">the git binary (D-04)</dd></div>
+    <div><dt>Wire format</dt><dd class="mono">status --porcelain=v2 -z</dd></div>
+    <div><dt>New decisions</dt><dd>D-43 … D-53</dd></div>
+  </dl>
+</header>
+
+<!-- ==================================================================== -->
+<section id="what">
+  <span class="sec-tag">§1</span>
+  <h2>What this is</h2>
+  <p class="sec-intro">The build document for §4.6 of <a href="plan.html">plan.html</a>, in the same relationship to it that <a href="terminal.html">terminal.html</a> has to §4.2.</p>
+
+  <p>The plan catalogues git as four feature entries and eleven lines of behaviour. That was
+  enough to schedule the work. It does not say which of git's twelve status formats to parse,
+  what happens to a badge when a directory is untracked and collapsed, what a push does when
+  the credential helper wants a passphrase and there is no terminal attached, or how a status
+  map for a hundred thousand changed files avoids becoming a per-frame scan. This document is
+  that half.</p>
+
+  <p><strong>In scope:</strong> F-50 (branch, counts and ahead/behind in the status bar),
+  F-51 (per-file status in the listing, including a rolled-up indicator on directories),
+  F-52 (the commit dialog), F-53 (pull and push, with git's own errors surfaced unedited).</p>
+
+  <p><strong>Not in scope, deliberately:</strong> per-hunk staging, a diff viewer, a log or
+  history browser, branch creation, merge conflict resolution, rebase, stash management,
+  submodule recursion, and anything else that would make Ferret a git client rather than a
+  file manager that knows about git. The line is the one <a href="plan.html">plan.html</a>
+  draws at F-52: the commit dialog is deliberately blunt, and everything past it belongs in
+  the terminal panel that is already docked six pixels below it.</p>
+
+  <div class="note">
+    <strong>The feature is the status bar, not a panel</strong>
+    <p>"Git panel" is a convenient name and a misleading one. Nothing new docks, nothing new
+    resizes, and no region of <a href="ui-base.html">ui-base.html</a> §4 changes size. What
+    ships is a segment at the right of the existing 24&nbsp;px status bar, a modal dialog, and
+    a badge inside the Name cell the listing already draws. If any part of this design starts
+    asking for its own dock, it has left the scope above.</p>
+  </div>
+
+  <h3>What Phase 1 and 2 already give us</h3>
+  <ul>
+    <li>A status bar (<code>browser/render.rs</code>) with a left slot in use and a right
+    slot empty.</li>
+    <li>A per-directory <code>notify</code> watcher with a 150&nbsp;ms debounce and a
+    <code>Desynced</code> recovery contract (<code>ferret_vfs::watch</code>) — which is the
+    refresh trigger this feature needs and does not have to invent.</li>
+    <li>A background executor, and the discipline that nothing filesystem-shaped runs on the
+    window thread.</li>
+    <li><code>Arc&lt;ArcSwap&lt;T&gt;&gt;</code> as the established shape for
+    read-every-row-every-frame state, from <code>ColumnLayout</code>.</li>
+    <li>A docked terminal in the same directory, which is the escape hatch for everything
+    this feature deliberately cannot do.</li>
+  </ul>
+</section>
+
+<!-- ==================================================================== -->
+<section id="engine">
+  <span class="sec-tag">§2</span>
+  <h2>The engine decision</h2>
+  <p class="sec-intro"><a href="plan.html">plan.html</a> settled this as D-04. This section is why it survives contact with the implementation, and what it costs.</p>
+
+  <table class="wide">
+    <thead><tr><th>Option</th><th>What it gives</th><th>Why not</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="mono">git2 <span class="dim">(libgit2)</span></td>
+        <td>In-process status, no subprocess, structured errors.</td>
+        <td>A C toolchain and a vendored build on both targets. And the decisive one: it
+        does not speak to the user's credential helper, SSH agent, 2FA or signing config.
+        A push that works in their terminal and fails in Ferret is worse than no push.</td>
+      </tr>
+      <tr>
+        <td class="mono">gix <span class="dim">(gitoxide)</span></td>
+        <td>Pure Rust, no C toolchain, genuinely fast status.</td>
+        <td>Same credential problem, plus an API still moving under us. It would also mean
+        Ferret's idea of "changed" could drift from what <code>git status</code> prints in
+        the panel below — two sources of truth, six pixels apart.</td>
+      </tr>
+      <tr>
+        <td class="mono">the git binary</td>
+        <td>Credential helpers, SSH agents, 2FA, signing, hooks, <code>includeIf</code>,
+        <code>core.fsmonitor</code>, the untracked cache and every future git feature, all
+        for free and all identical to what the terminal panel shows.</td>
+        <td>A runtime dependency on git being installed, a process spawn per query, and a
+        wire format to parse. All three are addressed below.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="dec">
+    <span class="id">D-43</span>
+    <b>git is optional at runtime, and its absence is silent.</b>
+    <p>A missing <code>git</code> is not an error condition — most folders are not
+    repositories and most users of a file manager are not developers. The probe runs once per
+    process, is cached, and on failure the entire feature simply never renders. No banner, no
+    toast, no settings key that has to be turned off. The one place it is mentioned is the
+    tooltip on a repository whose status could not be read.</p>
+  </div>
+
+  <div class="dec">
+    <span class="id">D-44</span>
+    <b>Every invocation is non-interactive, and says so to git.</b>
+    <p>Ferret spawns git with no controlling terminal. Left alone, a credential prompt or an
+    SSH passphrase request would block the child forever and the operation would hang with no
+    output. Every spawn therefore sets <code>GIT_TERMINAL_PROMPT=0</code>,
+    <code>GIT_OPTIONAL_LOCKS=0</code> for read-only queries, <code>GIT_EDITOR=true</code> and
+    <code>GIT_PAGER=cat</code>, and carries a timeout. When git needs a human, it fails fast
+    and Ferret shows its message unedited — which is honest, and which points at the terminal
+    panel where the human can answer.</p>
+  </div>
+
+  <div class="dec">
+    <span class="id">D-45</span>
+    <b>One query, one process. Never a process per row, per file or per frame.</b>
+    <p><code>--porcelain=v2 --branch</code> answers branch, upstream, ahead, behind, staged,
+    unstaged, untracked and conflicted in a single invocation. This is the rule that keeps
+    the feature from becoming the "easiest place in the whole app to destroy scrolling
+    performance" that <a href="plan.html">plan.html</a> warns about under F-51.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="anatomy">
+  <span class="sec-tag">§3</span>
+  <h2>Panel anatomy</h2>
+  <p class="sec-intro">Two surfaces: a segment in the status bar, and one modal dialog.</p>
+
+  <h3>The status bar segment</h3>
+  <p>It occupies the right end of the existing <span class="mono">h24</span> status bar, is
+  absent entirely outside a repository, and never changes the bar's height. Left to right:</p>
+
+  <div class="anatomy">
+    <div class="an-row"><div class="an-cell an-title">branch chip</div><div class="an-cell">Branch glyph plus the branch name, or the short OID in a detached HEAD. Truncates at 160&nbsp;px. Tooltip carries the full name, the upstream, and the repository root.</div><div class="an-cell an-new">new</div></div>
+    <div class="an-row"><div class="an-cell an-title">change count</div><div class="an-cell">A filled dot and a number: how many files differ from HEAD, staged and unstaged together, plus untracked roots. Absent when the tree is clean.</div><div class="an-cell an-new">new</div></div>
+    <div class="an-row"><div class="an-cell an-title">ahead / behind</div><div class="an-cell"><span class="mono">↑n</span> and <span class="mono">↓n</span>, each shown only when non-zero, and neither shown at all without an upstream.</div><div class="an-cell an-new">new</div></div>
+    <div class="an-row"><div class="an-cell an-title">Pull</div><div class="an-cell">Ghost button. Disabled while any git action is in flight.</div><div class="an-cell an-new">new</div></div>
+    <div class="an-row"><div class="an-cell an-title">Push</div><div class="an-cell">Ghost button. Present when there is something to push — commits ahead of an upstream, or a branch with commits and no upstream at all, where pushing is how it gets one.</div><div class="an-cell an-new">new</div></div>
+    <div class="an-row"><div class="an-cell an-title">Commit…</div><div class="an-cell">Ghost button, ellipsis because it opens a dialog. Disabled when there is nothing to commit.</div><div class="an-cell an-new">new</div></div>
+  </div>
+
+  <p>Every number in the segment uses <code>theme::tabular_numerals()</code>, for the same
+  reason §7 of <a href="ui-base.html">ui-base.html</a> gives for the Size column: these
+  counts change under a watcher without the user doing anything, and proportional figures
+  make the buttons beside them jump sideways when 9 becomes 10.</p>
+
+  <div class="note warn">
+    <strong>The segment must never be the reason the status bar reflows</strong>
+    <p>The left slot holds "<span class="mono">7 items · 1 selected — 22 KB</span>" and the
+    two share one row. The git segment is <code>flex_shrink_0</code> and the item count
+    truncates before it does, because the item count is re-derivable by looking at the list
+    and the branch name is not.</p>
+  </div>
+
+  <h3>The commit dialog</h3>
+  <p>A 460&nbsp;px modal on the window's <code>Root</code> layer, which is the only place a
+  dialog renders (the bootstrap contract in <code>AGENTS.md</code>). Content, top to bottom:</p>
+  <ul>
+    <li>A title row: a filled circular check glyph in the accent, <b>Commit Changes</b>, and
+    the repository's directory name beneath it in muted text.</li>
+    <li><b>Message</b> — a <code>Textarea</code> five rows tall, autofocused, with the
+    library's focus ring. Empty by default; Ferret does not pre-fill commit messages.
+    Sized with <code>Textarea::h</code> rather than <code>TextareaState::rows</code>,
+    which governs the auto-grow ceiling and leaves the field one line tall.</li>
+    <li>A checkbox: <b>Stage all changes first (git add -A)</b>, checked by default, and
+    disabled with an explanatory tooltip when everything is already staged.</li>
+    <li>A footer: <b>Cancel</b> (outline) and <b>Commit</b> (primary). Commit is disabled
+    while the message is blank or a commit is in flight.</li>
+  </ul>
+  <p><kbd>⌘↵</kbd> / <kbd>Ctrl↵</kbd> commits from inside the message field; <kbd>Esc</kbd>
+  cancels. Plain <kbd>↵</kbd> inserts a newline — this is a commit message, and the body
+  matters.</p>
+
+  <div class="dec">
+    <span class="id">D-46</span>
+    <b>The dialog is a view entity, not a closure.</b>
+    <p><code>window.open_dialog</code> takes an <code>Fn</code> builder that runs on every
+    frame the dialog is up. Holding the message text or the checkbox state in that closure
+    would mean rebuilding the input every frame and losing the caret. The dialog therefore
+    owns an <code>Entity&lt;CommitDialog&gt;</code> created before it opens; the builder's
+    only job is to mount that entity as a child.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="architecture">
+  <span class="sec-tag">§4</span>
+  <h2>Crate architecture</h2>
+  <p class="sec-intro">One new service crate, GPUI-free and testable without a window.</p>
+
+<pre><code>crates/ferret-git/
+├── src/lib.rs        <span class="c">// public surface: Repository, RepoStatus, FileStatus, ops</span>
+├── src/errors.rs     <span class="c">// GitError + Result&lt;T, E = GitError&gt; (AGENTS.md)</span>
+├── src/config.rs     <span class="c">// timeouts, output caps, the badge cut-off</span>
+├── src/command.rs    <span class="c">// the ONLY module that spawns a process. D-44 lives here.</span>
+├── src/discover.rs   <span class="c">// rev-parse --show-toplevel --absolute-git-dir</span>
+├── src/status.rs     <span class="c">// RepoStatus + the porcelain v2 parser (pure, over bytes)</span>
+└── src/ops.rs        <span class="c">// stage_all, commit, pull, push — each returns git's own text</span>
+
+crates/ferret-ui/src/browser/
+├── git.rs            <span class="c">// GitPanel: discovery, refresh scheduling, the snapshot handle</span>
+├── git_status_bar.rs <span class="c">// the status-bar segment (F-50) and its buttons (F-53)</span>
+└── commit_dialog.rs  <span class="c">// CommitDialog entity (F-52)</span></code></pre>
+
+  <h3>The layering rule, applied</h3>
+  <ul>
+    <li><code>ferret-git</code> depends on <code>ferret-vfs</code> (for <code>VfsPath</code>,
+    because "is this a local path?" is exactly the question discovery has to ask first) and
+    on <code>thiserror</code>, <code>smol_str</code> and <code>foldhash</code>. It does not
+    depend on <code>gpui</code>, <code>gpui-component</code> or <code>ferret-ui</code>.</li>
+    <li>Its parser is a pure function from <code>&amp;[u8]</code> to <code>RepoStatus</code>.
+    That is what makes the format's sharp edges — renames, quoted paths, missing
+    <code>branch.ab</code>, detached HEAD, an unborn branch — testable from a byte literal
+    with no repository and no window, which is where nearly all of this crate's tests live.</li>
+    <li>Anything that spawns a process goes through <code>command.rs</code>. One module owns
+    the environment scrubbing in D-44, so a future operation cannot forget it.</li>
+  </ul>
+
+  <div class="dec">
+    <span class="id">D-47</span>
+    <b>Absolute paths cross the crate boundary; repo-relative paths never leave the parser.</b>
+    <p>git speaks in slash-separated paths relative to the work tree. The listing speaks in
+    <code>VfsPath</code>. Converting per row per frame would be an allocation and a join in
+    the hot path; converting once, off-thread, while the status is being built, is free. The
+    snapshot that reaches the UI is keyed by <code>PathBuf</code> so a row can be looked up
+    with <code>&amp;Path</code> and no allocation at all.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="datapath">
+  <span class="sec-tag">§5</span>
+  <h2>The data path</h2>
+  <p class="sec-intro">Where the work happens, what crosses to the window thread, and what wakes it up.</p>
+
+  <div class="lanes">
+    <div class="lane">
+      <h4>Window thread</h4>
+      <ul>
+        <li>Owns <code>GitPanel</code>: the current repository, the in-flight generation, and the snapshot handle.</li>
+        <li>Reads the snapshot with one atomic load per cell. Never spawns git.</li>
+        <li>Renders the segment, opens the dialog, shows notifications.</li>
+      </ul>
+      <span class="own">ferret-ui::browser::git</span>
+    </div>
+    <div class="lane">
+      <h4>Background executor</h4>
+      <ul>
+        <li>Discovery: one <code>git rev-parse</code> per navigation into an unknown tree.</li>
+        <li>Status: one <code>git status</code> per refresh, parsed to a <code>RepoStatus</code>.</li>
+        <li>Builds the absolute-path map and the dirty-directory set (D-47) before handing anything over.</li>
+      </ul>
+      <span class="own">ferret-git</span>
+    </div>
+    <div class="lane">
+      <h4>The <code>.git</code> watcher</h4>
+      <ul>
+        <li>One non-recursive <code>ferret_vfs::Watch</code> on the resolved git directory.</li>
+        <li><code>index</code>, <code>HEAD</code>, <code>FETCH_HEAD</code>, <code>MERGE_HEAD</code> and <code>packed-refs</code> are all direct children — so commit, checkout, fetch and pull all land here.</li>
+        <li>Costs one subscription, and no polling at all.</li>
+      </ul>
+      <span class="own">ferret-vfs::watch</span>
+    </div>
+  </div>
+
+  <h3>The refresh triggers, and only these</h3>
+  <ol class="steps">
+    <li><span class="step">1</span> <b>Navigation.</b> The active tab changed folder. If the new folder is inside the same work tree, the snapshot is kept and a refresh is queued; if not, the snapshot is cleared first so a stale branch name cannot be shown for a folder it does not describe.</li>
+    <li><span class="step">2</span> <b>The folder watcher fired.</b> The user, or anything else, wrote a file in the directory on screen.</li>
+    <li><span class="step">3</span> <b>The <code>.git</code> watcher fired.</b> Somebody committed, checked out, fetched or staged — from Ferret, from the terminal panel, or from another application.</li>
+    <li><span class="step">4</span> <b>An action finished.</b> Commit, pull and push each refresh on completion regardless of outcome; a failed pull may still have moved refs.</li>
+    <li><span class="step">5</span> <b>The window regained focus.</b> Not a nicety — it is what covers the hole the two watchers leave. Both are <code>NonRecursive</code>, so an edit to <code>src/main.rs</code> made by another program while Ferret is showing the repository <em>root</em> changes neither watched directory: the root watcher does not see a write nested below it, and <code>.git</code> is untouched until something stages or commits. Trigger 2 only ever fires for the one directory on screen.</li>
+  </ol>
+  <p>There is no timer. A poll is the thing that makes a git integration a background CPU
+  cost on an idle machine, and every event above is either free or already being delivered.</p>
+  <p><b>Why not watch the work tree recursively instead.</b> It is the obvious repair for
+  trigger 5's hole and it is the wrong one: a descriptor per directory across
+  <code>node_modules</code>, <code>target</code> and everything else git is going to ignore
+  anyway — on a feature whose whole design is that an idle window costs nothing. Activation
+  is the cheap answer because it is exactly the moment staleness starts to matter: editing
+  elsewhere and coming back <em>is</em> the scenario, and a badge nobody is looking at is not
+  yet wrong. One debounced read per return to the window, and nothing at all while it sits
+  unfocused.</p>
+  <p><b>What this still does not cover</b>, stated rather than glossed: a nested file changed
+  by a background process — a build, a formatter — while Ferret is already focused and
+  showing an ancestor of it. The count stays stale until the next trigger. Revisit with real
+  use; the fix, if it is needed, is a targeted recursive watch bounded by
+  <code>.gitignore</code>, not a timer.</p>
+
+  <div class="dec">
+    <span class="id">D-48</span>
+    <b>Refreshes are debounced, coalesced and generation-guarded.</b>
+    <p>A <code>git add -A</code> in the terminal can produce a dozen watcher events in
+    200&nbsp;ms, and <code>git status</code> on a large repository is not free. Requests
+    coalesce into one pending refresh behind a 220&nbsp;ms debounce; at most one status
+    process exists at a time, and a request arriving while one is running sets a
+    <em>re-run</em> flag rather than starting a second. Every result carries the generation
+    it was requested at and is dropped if the browser has navigated since — the same rule
+    <code>Folder</code> already uses for listings.</p>
+  </div>
+
+  <h3>Handing the snapshot over</h3>
+  <p><code>GitSnapshot</code> is immutable and shared as
+  <code>Arc&lt;ArcSwap&lt;GitSnapshot&gt;&gt;</code>, cloned into every <code>FilePane</code>
+  the browser builds. A read is an atomic load; a write is one pointer swap on the window
+  thread. This is the same mechanism <code>ColumnLayout</code> uses and for the same reason:
+  it is read once per cell per frame and written rarely.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="porcelain">
+  <span class="sec-tag">§6</span>
+  <h2>Reading porcelain v2</h2>
+  <p class="sec-intro">The exact command, the grammar, and the five things that make a naïve parser wrong.</p>
+
+<pre><code>git --no-optional-locks status --porcelain=v2 --branch -z \
+    --untracked-files=normal --ignored=no</code></pre>
+
+  <table class="wide">
+    <thead><tr><th>Flag</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">--no-optional-locks</td><td><code>git status</code> refreshes and rewrites the index by default, taking <code>index.lock</code>. Ferret polls on a watcher event; taking that lock from a background thread can lose a race with the user's own terminal in the panel below. This makes the read genuinely read-only.</td></tr>
+      <tr><td class="mono">--porcelain=v2</td><td>Stable across versions and independent of user config, and it carries branch, upstream and ahead/behind in the same output — D-45's single invocation.</td></tr>
+      <tr><td class="mono">--branch</td><td>Emits the <code>branch.*</code> headers. Without it there is no branch name and no ahead/behind.</td></tr>
+      <tr><td class="mono">-z</td><td>NUL-terminated records. Without it, paths containing a space, a tab, a newline or a non-UTF-8 byte are C-quoted and have to be unescaped — a parser bug waiting to happen, on exactly the filenames a file manager must handle.</td></tr>
+      <tr><td class="mono">--untracked-files=normal</td><td>Collapses a wholly-untracked directory to a single entry with a trailing slash. On a fresh clone with a <code>node_modules</code> this is the difference between five entries and fifty thousand.</td></tr>
+      <tr><td class="mono">--ignored=no</td><td>The default, stated. Ignored files get no badge: the plan lists them, but a listing where every build artefact is greyed is noise, and the cost of enumerating them is unbounded.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The grammar, as actually emitted</h3>
+<pre><code><span class="c"># headers, each NUL-terminated</span>
+# branch.oid &lt;sha&gt; | (initial)
+# branch.head &lt;branch&gt; | (detached)
+# branch.upstream &lt;upstream&gt;      <span class="c">// absent when there is no upstream</span>
+# branch.ab +&lt;ahead&gt; -&lt;behind&gt;    <span class="c">// absent when there is no upstream</span>
+
+<span class="c">// entries, each NUL-terminated</span>
+1 &lt;XY&gt; &lt;sub&gt; &lt;mH&gt; &lt;mI&gt; &lt;mW&gt; &lt;hH&gt; &lt;hI&gt; &lt;path&gt;
+2 &lt;XY&gt; &lt;sub&gt; &lt;mH&gt; &lt;mI&gt; &lt;mW&gt; &lt;hH&gt; &lt;hI&gt; &lt;X&gt;&lt;score&gt; &lt;path&gt;<span class="cur">NUL</span>&lt;origPath&gt;
+u &lt;XY&gt; &lt;sub&gt; &lt;m1&gt; &lt;m2&gt; &lt;m3&gt; &lt;mW&gt; &lt;h1&gt; &lt;h2&gt; &lt;h3&gt; &lt;path&gt;
+? &lt;path&gt;</code></pre>
+
+  <p>Real output, from a tree with a staged rename, an unstaged edit, an untracked file with
+  a space in its name and an untracked directory (NUL shown as <span class="mono">@</span>):</p>
+<pre><code># branch.oid 585a06d2…@# branch.head main@2 R. N... 100644 100644 100644 6178079… 6178079… R100 renamed name.txt@b.txt@1 .M N... 100644 100644 100644 7898192… 7898192… sub/deep/a.txt@? space file.txt@? untracked_dir/@</code></pre>
+
+  <h3>The five things that make a naïve parser wrong</h3>
+  <ol class="steps">
+    <li><span class="step">1</span> <b>A <code>2</code> record consumes two NUL fields.</b> The rename's original path is a separate record, not a tab-separated suffix as it is without <code>-z</code>. A parser that splits on NUL and treats every field as a record reads <code>b.txt</code> as a status line and desynchronises for the rest of the output.</li>
+    <li><span class="step">2</span> <b><code>branch.ab</code> is optional.</b> No upstream, no header. Ahead/behind must be <code>Option</code>-shaped, not zero-shaped, or a branch with no upstream claims to be perfectly in sync.</li>
+    <li><span class="step">3</span> <b><code>(detached)</code> and <code>(initial)</code> are literal values</b> in the <code>branch.head</code> and <code>branch.oid</code> fields. A detached HEAD shows the short OID; an unborn branch on a fresh <code>git init</code> shows the branch name with no ahead/behind and no OID.</li>
+    <li><span class="step">4</span> <b>An untracked directory ends in <code>/</code>.</b> It is one entry standing for an unbounded number of files. §7 says what the listing does about it.</li>
+    <li><span class="step">5</span> <b>Paths are bytes, not <code>str</code>.</b> On Unix a filename is arbitrary non-NUL bytes. The parser works in <code>&amp;[u8]</code> and builds a <code>PathBuf</code> through <code>OsStr::from_bytes</code> on Unix; on Windows git emits UTF-8 and the lossy conversion is correct there.</li>
+  </ol>
+
+  <h3>XY, reduced to what the listing draws</h3>
+  <p><code>X</code> is the index against HEAD, <code>Y</code> is the work tree against the
+  index, and <code>.</code> means unmodified. Ferret keeps both — the badge shows the more
+  urgent of the two, and the tooltip explains both — collapsed into:</p>
+
+  <table class="wide">
+    <thead><tr><th>FileStatus</th><th>From</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">Conflicted</td><td><code>u</code> records</td><td>Unmerged. Outranks everything.</td></tr>
+      <tr><td class="mono">Staged</td><td><code>X</code> ≠ <code>.</code>, <code>Y</code> = <code>.</code></td><td>Ready to commit.</td></tr>
+      <tr><td class="mono">StagedAndModified</td><td>both ≠ <code>.</code></td><td>Staged, then edited again — the state people lose work in.</td></tr>
+      <tr><td class="mono">Modified</td><td><code>Y</code> ≠ <code>.</code></td><td>Changed, not staged. Includes deletions and type changes.</td></tr>
+      <tr><td class="mono">Untracked</td><td><code>?</code> records</td><td>Not in the index.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ==================================================================== -->
+<section id="listing">
+  <span class="sec-tag">§7</span>
+  <h2>Status in the listing (F-51)</h2>
+  <p class="sec-intro">The part of this feature that can ruin the application, and the four rules that stop it.</p>
+
+  <p>Gate 7 in <code>AGENTS.md</code> is absolute: no per-frame work may be O(the directory).
+  A git badge is drawn in a cell that renders forty times a frame while scrolling, in a
+  listing that may hold two hundred thousand rows. The design below is shaped entirely by
+  that.</p>
+
+  <ol class="steps">
+    <li><span class="step">1</span> <b>The snapshot holds only what changed.</b> A clean repository's map is empty; a busy one holds hundreds of entries. Nothing proportional to the directory is ever stored, iterated or hashed.</li>
+    <li><span class="step">2</span> <b>Lookup is one hash of a borrowed path.</b> <code>FastMap&lt;PathBuf, FileStatus&gt;</code> is queried with <code>&amp;Path</code> through <code>Borrow</code> — no join, no format, no allocation, and nothing added to the <code>just budget</code> count.</li>
+    <li><span class="step">3</span> <b>The directory roll-up is precomputed.</b> While the snapshot is being built, every ancestor of every changed file, up to the work tree root, is inserted into a <code>FastSet&lt;PathBuf&gt;</code>. A directory row is one set lookup. The set is bounded by changed files × depth, off-thread, once per refresh.</li>
+    <li><span class="step">4</span> <b>The collapsed-untracked case is answered once, not per row.</b> When the browsed directory is itself inside an untracked directory git reported with a trailing slash, git says nothing about its children — correctly, and uselessly for the listing. The snapshot therefore carries a single <code>browsed_dir_untracked</code> flag, resolved against the browsed directory when the snapshot is built. Every row in that folder is untracked; no per-row ancestor walk happens.</li>
+  </ol>
+
+  <div class="dec">
+    <span class="id">D-49</span>
+    <b>Past a cut-off, the counts survive and the badges stop.</b>
+    <p>A repository with a hundred thousand changed files — a first <code>git add</code> on a
+    huge import, a botched line-ending conversion — would otherwise build a map of a hundred
+    thousand <code>PathBuf</code>s on every refresh. Past <code>MAX_BADGED_FILES</code> the
+    map and the roll-up set are left empty and a flag records why: the status bar still shows
+    the true count and the buttons still work, the listing simply draws no badges. The
+    tooltip says so. This is a bounded, explained degradation rather than a stall.</p>
+  </div>
+
+  <h3>What a badge looks like</h3>
+  <p>A 6&nbsp;px filled dot in the Name cell, at the right of the row's icon-and-name group,
+  before the symlink target if there is one. Not a letter and not a coloured filename:
+  colour on the name would fight the folder tint that already carries meaning (§7 of
+  <a href="ui-base.html">ui-base.html</a>), and a letter at 11&nbsp;px in a 30&nbsp;px row is
+  a smudge. A directory carries the same dot at 5&nbsp;px and 70% opacity — present enough to
+  follow down a tree, quiet enough not to compete with its children.</p>
+
+  <div class="note">
+    <strong>The Name column is the only column that changes</strong>
+    <p>A separate Git column was considered and rejected. It would be a fourth sortable column
+    for a value four of five rows do not have, it would take width from the name in the view
+    where width is already contested, and hiding it would put the feature behind a menu most
+    people never open.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="actions">
+  <span class="sec-tag">§8</span>
+  <h2>Commit, pull, push (F-52, F-53)</h2>
+  <p class="sec-intro">Four operations, one queue, and a rule about what the user is told.</p>
+
+  <table class="wide">
+    <thead><tr><th>Action</th><th>Command</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Stage all</td><td class="mono">git add -A --</td><td>Scoped to the work tree root, never to the browsed folder — "stage all" that staged some would be a trap.</td></tr>
+      <tr><td>Commit</td><td class="mono">git commit -F - </td><td>The message arrives on stdin, so a message containing quotes, newlines or a leading <code>-</code> cannot be misread as arguments. Hooks run; <code>GIT_EDITOR=true</code> stops a hook that wants an editor from hanging.</td></tr>
+      <tr><td>Pull</td><td class="mono">git pull --ff-only</td><td>Fast-forward only, on purpose. A pull that starts a merge — or worse, leaves conflict markers — in a file manager with no conflict UI is a trap. When it refuses, git's own message says exactly why, and the terminal is right there.</td></tr>
+      <tr><td>Push</td><td class="mono">git push</td><td>No <code>--force</code>, ever, from any surface in this feature. Sets upstream on a branch that has none only via git's own <code>push.autoSetupRemote</code>, never by Ferret adding <code>-u</code> behind the user's back.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="dec">
+    <span class="id">D-50</span>
+    <b>One git mutation at a time, per window.</b>
+    <p>Two concurrent operations on one index is how a repository ends up with a stale
+    <code>index.lock</code> and a user who has to delete a file to get their tool working
+    again. <code>GitPanel</code> holds at most one in-flight action; while it runs, every
+    action button is disabled and the branch chip shows a spinner. Status reads are
+    unaffected — they take no locks (§6).</p>
+  </div>
+
+  <div class="dec">
+    <span class="id">D-51</span>
+    <b>git's output is shown unedited, and failure is never silent.</b>
+    <p><a href="plan.html">plan.html</a> is explicit about this under F-53: the reference
+    product shows a real <code>fatal: unable to access …</code> when a pull fails, and Ferret
+    should be equally honest. Success produces a short toast built from git's own summary
+    line ("Fast-forwarded to <code>a1b2c3d</code>"). Failure produces a warning notification
+    carrying git's stderr verbatim, trimmed only of trailing whitespace and capped at
+    <code>MAX_MESSAGE_CHARS</code>. Ferret never invents a friendlier message for a git
+    error, because the friendly version is the one that cannot be searched for.</p>
+    <p><b>One refinement, added after seeing it.</b> A refused
+    <code>pull --ff-only</code> prints eight <code>hint:</code> lines of advice and
+    <em>then</em> the <code>fatal:</code> line that says what happened — correct for
+    a terminal read top to bottom, and wrong in a toast, where it buries the answer.
+    The first <code>fatal:</code> or <code>error:</code> line is therefore lifted to
+    the front and every other line follows in its original order. That is a
+    reordering, not an edit: nothing is dropped, reworded or summarised.</p>
+  </div>
+
+  <div class="dec">
+    <span class="id">D-52</span>
+    <b>The commit dialog outlives the commit, and closes only on success.</b>
+    <p>Confirming the dialog starts an asynchronous operation; it does not finish one.
+    Closing on the button press therefore closes on <em>"git has been asked"</em>, and
+    everything interesting arrives afterwards — a <code>pre-commit</code> hook that
+    rejects, an unset <code>user.email</code>, an <code>index.lock</code> held by the
+    terminal panel below. With the modal already gone the user gets a toast and an empty
+    screen, and has to reopen the dialog to act on it.</p>
+    <p>So <code>on_ok</code> always returns <code>false</code>. The dialog stays up in an
+    explicit in-flight state — the button reads <em>Committing…</em>, and it, the checkbox
+    and Cancel are all disabled, as are Escape and the backdrop, because none of them
+    would stop the git that is already running. When git answers, success clears the
+    message and dismisses the dialog; failure leaves both, with the notification layer
+    drawing over the modal. The fix for a refused commit is nearly always a word in the
+    message or the checkbox beneath it, and the user is already looking at both.</p>
+  </div>
+
+  <h3>Timeouts</h3>
+  <p>A status read is capped at <code>STATUS_TIMEOUT</code> (5&nbsp;s) — long enough for a
+  cold cache on a large repository over a network mount, short enough that a wedged git does
+  not leave the segment permanently spinning. Network operations are capped at
+  <code>NETWORK_TIMEOUT</code> (120&nbsp;s), because a real push of a real repository over a
+  real connection takes minutes and killing it at thirty seconds would be worse than useless.</p>
+
+  <div class="dec">
+    <span class="id">D-53</span>
+    <b>A timeout kills the process <em>tree</em>, and never waits on a pipe forever.</b>
+    <p>Killing the child git is not enough to make a timeout return, and this is the
+    subtle half of it. git delegates the slow work to other programs — <code>ssh</code>
+    for a push, a credential helper for a fetch, an arbitrary script for a hook — and
+    every one of them inherits the stdout and stderr handles Ferret is reading. Kill git
+    alone and those handles stay open in a process that is still running, so the reads
+    never reach EOF; joining the reader threads then blocks past the deadline the timeout
+    just promised, with the action stuck as busy behind it.</p>
+    <p>Two changes, and both are needed. Each invocation is spawned into its own process
+    group (<code>process_group(0)</code>; <code>taskkill /T</code> on Windows, which has no
+    equivalent), so the whole tree can be signalled at once. And the readers report over a
+    channel rather than a join handle, so the drain is bounded by the same deadline as the
+    wait — including on the path where <em>git exited normally</em> and something it
+    started is still holding the pipe, which an SSH <code>ControlMaster</code> does
+    routinely. Nothing is signalled on that path: git has been reaped, its pid was the
+    group id, and signalling a group id the system has since reissued is worse than the
+    two threads left to end on their own.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== -->
+<section id="theming">
+  <span class="sec-tag">§9</span>
+  <h2>Theme tokens</h2>
+  <p class="sec-intro">Five colours, both themes, none of them a literal at a call site.</p>
+
+  <p><code>theme.rs</code> already exists for exactly this: "the colours that encode file and
+  git state in the browser". The tokens join <code>BrowserPalette</code>, which resolves
+  against the active mode, so light and dark are one code path and Gate 3 cannot be failed by
+  forgetting one.</p>
+
+  <table class="wide">
+    <thead><tr><th>Token</th><th>Light</th><th>Dark</th><th>Draws</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">git_modified</td><td class="mono">#b8860b</td><td class="mono">#e0af68</td><td>Changed, not staged. Amber.</td></tr>
+      <tr><td class="mono">git_staged</td><td class="mono">#2e7d32</td><td class="mono">#9ece6a</td><td>Staged. Green.</td></tr>
+      <tr><td class="mono">git_untracked</td><td class="mono">#6b7280</td><td class="mono">#8b93a3</td><td>Not in the index. Grey — new is not an alarm.</td></tr>
+      <tr><td class="mono">git_conflicted</td><td class="mono">#c62828</td><td class="mono">#f7768e</td><td>Unmerged. Red, and the only red in the listing.</td></tr>
+      <tr><td class="mono">git_branch</td><td class="mono">#4a5568</td><td class="mono">#a0aec0</td><td>The branch chip's glyph and text.</td></tr>
+    </tbody>
+  </table>
+
+  <p>Both dark values for modified and staged are the Groknight terminal palette's yellow and
+  green, deliberately: the terminal panel six pixels below is printing <code>git status</code>
+  in those exact colours, and two different greens for one meaning in one window is the kind
+  of detail that reads as sloppiness without being consciously noticed.</p>
+
+  <p><code>StagedAndModified</code> gets no sixth colour. It draws the staged green with the
+  modified amber as a ring, which is the one state where both facts matter.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="interaction">
+  <span class="sec-tag">§10</span>
+  <h2>Interaction contract</h2>
+
+  <table class="wide">
+    <thead><tr><th>Input</th><th>macOS</th><th>Windows</th><th>Does</th></tr></thead>
+    <tbody>
+      <tr><td>Commit</td><td class="mono">⌘⇧C</td><td class="mono">Ctrl+Shift+C</td><td>Opens the commit dialog. No-op outside a repository.</td></tr>
+      <tr><td>Confirm commit</td><td class="mono">⌘↵</td><td class="mono">Ctrl+Enter</td><td>Commits from inside the message field.</td></tr>
+      <tr><td>Cancel</td><td class="mono">Esc</td><td class="mono">Esc</td><td>Closes the dialog, keeping the typed message for the next open.</td></tr>
+      <tr><td>Refresh</td><td class="mono">⌘R</td><td class="mono">F5</td><td>The existing refresh action also refreshes git status.</td></tr>
+    </tbody>
+  </table>
+
+  <ul>
+    <li>The segment's buttons are ordinary focusable buttons and sit in the Tab order after
+    the file pane — they are chrome, and the pane is the point of the window.</li>
+    <li>The branch chip is not a button. It has a tooltip and no click behaviour; a branch
+    switcher is out of scope (§1) and a chip that looks clickable and is not is worse than one
+    that does not.</li>
+    <li>A row's tooltip gains one line when it has a status: "Modified · not staged".</li>
+  </ul>
+</section>
+
+<!-- ==================================================================== -->
+<section id="buildorder">
+  <span class="sec-tag">§11</span>
+  <h2>Build order</h2>
+  <p class="sec-intro">Each step leaves the application runnable, which is what makes a long run recoverable.</p>
+
+  <ol class="steps">
+    <li><span class="step">1</span> <b><code>ferret-git</code>, parser first.</b> <code>errors.rs</code>, <code>config.rs</code>, <code>status.rs</code> with the porcelain v2 parser and its tests over byte literals. No process spawning yet, no UI. The whole of §6's sharp edges are covered here, where they are cheap to cover.</li>
+    <li><span class="step">2</span> <b><code>command.rs</code> and <code>discover.rs</code>.</b> D-44's environment, the timeout, the output cap. Discovery against a temp repository built by the test itself.</li>
+    <li><span class="step">3</span> <b><code>GitPanel</code> and the status-bar segment (F-50).</b> Discovery on navigation, one refresh, the branch chip and the counts. The app now shows a branch. No actions, no badges.</li>
+    <li><span class="step">4</span> <b>The refresh triggers (D-48).</b> Watchers, debounce, generations. Verified by editing a file in the terminal panel and watching the count change without touching Ferret.</li>
+    <li><span class="step">5</span> <b>Badges in the listing (F-51).</b> The snapshot handle into <code>FilePane</code>, the Name cell's dot, the directory roll-up. <code>just budget</code> immediately afterwards — this is the step that can fail Gate 7.</li>
+    <li><span class="step">6</span> <b>Mount the dialog and notification layers.</b>
+    <code>Root::new</code> as the window's first entity is necessary and not
+    sufficient: <code>Root::render</code> draws the mounted view and the tooltip and
+    native-menu overlays only, so <code>RootView::render</code> has to mount
+    <code>Root::render_dialog_layer</code>, <code>render_sheet_layer</code> and
+    <code>render_notification_layer</code> itself. Without them
+    <code>open_dialog</code> stores a builder nothing calls and
+    <code>push_notification</code> queues a toast nobody sees — both silent at
+    compile time <em>and</em> at runtime. Phase 1 shipped without them, so every
+    error toast its file operations pushed was invisible. This is a fifth part of
+    <code>AGENTS.md</code>'s bootstrap contract, and it has to land before the two
+    features below can be seen at all.</li>
+    <li><span class="step">7</span> <b><code>ops.rs</code>, then the commit dialog (F-52).</b> Stage-all and commit, with the dialog as its own entity (D-46).</li>
+    <li><span class="step">8</span> <b>Pull and push (F-53).</b> The single-flight guard (D-50), the notifications (D-51), the timeouts.</li>
+    <li><span class="step">9</span> <b>Windows pass.</b> Path separators through the parser, <code>git.exe</code> discovery, the <code>CREATE_NO_WINDOW</code> flag so no console flashes on every status read.</li>
+  </ol>
+</section>
+
+<!-- ==================================================================== -->
+<section id="measuring">
+  <span class="sec-tag">§12</span>
+  <h2>Gates &amp; budgets</h2>
+
+  <h3>Gates</h3>
+  <ul>
+    <li><b>Gate 7 (no per-frame O(directory) work).</b> <code>just budget</code> must
+    be <em>unchanged</em> by this feature, and it has to run against a
+    <em>populated</em> index to mean anything: an empty snapshot returns on its
+    first <code>?</code> before it ever hashes a path, so a version of the lookup
+    that allocated per row would sail through. The budget therefore builds its own
+    status by parsing synthetic porcelain over every third row of the 20,000-row
+    fixture. Measured: 2.02 allocations per visible row per frame against a limit of
+    3 — the same figure as before the feature existed.</li>
+    <li><b>Gate 3 (both themes).</b> Five new tokens, each defined for light and dark, in one
+    resolve function so there is no path that defines one and not the other.</li>
+    <li><b>Gate 4 (both platforms).</b> Two keybindings, both bound. No console window on
+    Windows. Paths through the parser tested for both separators.</li>
+    <li><b>Gate 6 (run it).</b> Every visible state — clean, dirty, detached, unborn, no
+    upstream, conflicted, not a repository, git missing — checked in the running app.</li>
+  </ul>
+
+  <h3>Budgets</h3>
+  <table class="wide">
+    <thead><tr><th>Measure</th><th>Budget</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Badge lookup, per row per frame</td><td>0 allocations</td><td>Gate 7. Enforced by <code>just budget</code>.</td></tr>
+      <tr><td>Status refreshes for one <code>git add -A</code></td><td>1</td><td>D-48's debounce. A dozen watcher events, one process.</td></tr>
+      <tr><td>Concurrent git processes per window</td><td>1 read + 1 write</td><td>D-50.</td></tr>
+      <tr><td>Idle CPU in a repository</td><td>0</td><td>No timer. Watchers only.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Acceptance</h3>
+  <p><a href="plan.html">plan.html</a>'s phase 5 line: <em>browsing a large repository shows
+  correct per-file status with no measurable scroll cost, and a failed push surfaces git's
+  actual message.</em> Both halves are checkable, and the second one is the one that is
+  usually quietly dropped.</p>
+</section>
+
+<!-- ==================================================================== -->
+<section id="risks">
+  <span class="sec-tag">§13</span>
+  <h2>Risks &amp; questions</h2>
+
+  <table class="wide">
+    <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr><td><code>git status</code> is slow on a very large repository, so the badges lag the listing by a second.</td><td>The listing never waits for it. Badges appear when they appear, exactly as size and date already do. The user's own <code>core.fsmonitor</code> and untracked cache — which an embedded library could not use — make this fast for the people it would otherwise be slowest for.</td></tr>
+      <tr><td>A submodule or a linked worktree makes <code>.git</code> a file, not a directory, and the watcher watches nothing.</td><td>Discovery uses <code>rev-parse --absolute-git-dir</code>, which resolves the indirection. The watch is on the resolved directory.</td></tr>
+      <tr><td>The <code>.git</code> watcher on a busy repository (a rebase, a large fetch) produces a burst.</td><td>Same debounce and single-flight as everything else. The worst case is one extra status read after the burst settles.</td></tr>
+      <tr><td>A user has a <code>pre-commit</code> hook that takes thirty seconds.</td><td>The commit runs on the background executor with the network timeout, not the status timeout, and the dialog stays up with its button disabled. Hooks are a feature of using the real binary, not a bug.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Questions</h3>
+  <ul>
+    <li><b>Q-09.</b> Should the change count include untracked files? The reference product's
+    number appears to. Ferret's does, because "41 changed" that ignores forty new files is a
+    number that has to be explained. Revisit if it proves noisy on repositories with weak
+    <code>.gitignore</code> files.</li>
+    <li><b>Q-10.</b> Should a directory's roll-up dot distinguish <em>which</em> status it is
+    rolling up when its children disagree? Currently it shows the most urgent. The alternative
+    — a neutral "has changes" tint — is calmer and less informative. Decide with real use.</li>
+  </ul>
+</section>
+
+</main>
+</div>
+
+<script>
+(function () {
+  // Theme toggle: attribute beats media query in both directions.
+  var root = document.documentElement;
+  var btn = document.getElementById('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('ferret-plan-theme'); } catch (e) {}
+  if (saved === 'dark' || saved === 'light') root.setAttribute('data-theme', saved);
+
+  btn.addEventListener('click', function () {
+    var explicit = root.getAttribute('data-theme');
+    var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var current = explicit || (systemDark ? 'dark' : 'light');
+    var next = current === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('ferret-plan-theme', next); } catch (e) {}
+  });
+
+  // Mark the section currently in view in the rail. Same rule as plan.html:
+  // the last section whose top has passed the line is the one being read.
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail nav a'));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+
+  var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
+  var ticking = false;
+
+  function mark() {
+    ticking = false;
+    var line = window.scrollY + 120;
+    var active = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].offsetTop <= line) active = sections[i]; else break;
+    }
+    links.forEach(function (a) { a.classList.remove('is-current'); });
+    if (active && byId[active.id]) byId[active.id].classList.add('is-current');
+  }
+
+  window.addEventListener('scroll', function () {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(mark); }
+  }, { passive: true });
+  window.addEventListener('resize', mark, { passive: true });
+  mark();
+})();
+</script>
+
+</body>
+</html>

@@ -312,6 +312,10 @@ impl FilePane {
                     .when(broken, |label| label.line_through())
                     .child(gpui::SharedString::new(entry.name())),
             )
+            .children(
+                self.git_status(entry)
+                    .map(|status| super::git_badge(status, entry.is_dir_like(), &palette)),
+            )
             .when(entry.is_dir_like(), |row| {
                 row.child(
                     gpui_component::Icon::new(gpui_component::IconName::ChevronRight)

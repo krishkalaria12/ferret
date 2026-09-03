@@ -56,7 +56,11 @@ actions!(
         CompletionPrev,
         AcceptCompletion,
         FocusNextRegion,
-        FocusPrevRegion
+        FocusPrevRegion,
+        /// Open the commit dialog (F-52). A no-op outside a repository, rather
+        /// than an error: the shortcut is global and most folders are not
+        /// repositories.
+        CommitChanges
     ]
 );
 

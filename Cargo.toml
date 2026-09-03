@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ferret", "crates/ferret-platform",
+    "crates/ferret",
+    "crates/ferret-git",
+    "crates/ferret-platform",
     "crates/ferret-search",
     "crates/ferret-searchd",
     "crates/ferret-settings",
@@ -55,6 +57,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 # source, every gpui-component icon renders empty.
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 
+ferret-git = { path = "crates/ferret-git" }
 ferret-platform = { path = "crates/ferret-platform" }
 ferret-search = { path = "crates/ferret-search" }
 ferret-searchd = { path = "crates/ferret-searchd" }
@@ -105,6 +108,12 @@ jiff = "0.2"
 # `ignore` will own because honouring .gitignore is that feature. One walker
 # per job, never both for the same job.
 jwalk = "0.9"
+# One call: `kill(-pid, SIGKILL)`, to end a timed-out git *and the ssh,
+# credential helper or hook it started* — each of which inherited the pipes
+# Ferret is reading, so killing git alone leaves the read with no EOF and the
+# timeout with nothing to return. `std` can put the child in its own process
+# group but gives no way to signal one.
+libc = "0.2"
 # D-34 / F-40. Search needs ignore-file semantics, which bulk-operation walker
 # `jwalk` deliberately does not provide. The first live-search engine uses the
 # serial iterator on Ferret's shared worker pool; no second implicit pool.

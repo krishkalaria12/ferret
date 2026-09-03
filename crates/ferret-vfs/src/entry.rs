@@ -28,6 +28,11 @@ pub enum SymlinkTarget {
 
 impl EntryKind {
     /// Whether double-clicking navigates into this rather than opening it.
+    ///
+    /// A **navigation** question, and only that. It is true of a symlink
+    /// pointing at a directory, which is right for opening it and wrong for
+    /// anything that treats the entry as a container of other entries — see
+    /// [`Self::is_directory`].
     pub fn is_dir_like(self) -> bool {
         matches!(
             self,
@@ -36,6 +41,17 @@ impl EntryKind {
                     target_kind: Some(SymlinkTarget::Dir)
                 }
         )
+    }
+
+    /// Whether this entry *is* a directory, rather than merely leading to one.
+    ///
+    /// The distinction that [`Self::is_dir_like`] deliberately drops. A symlink
+    /// to a directory navigates like a directory but is its own object on disk:
+    /// it has a size, it is copied as a link, and git records it as a blob under
+    /// its own path rather than as a tree — so asking a per-directory index
+    /// about one finds nothing, every time.
+    pub fn is_directory(self) -> bool {
+        matches!(self, EntryKind::Dir)
     }
 
     pub fn is_broken_symlink(self) -> bool {
@@ -153,6 +169,11 @@ impl Entry {
         self.kind.is_dir_like()
     }
 
+    /// See [`EntryKind::is_directory`] — an actual directory, not a link to one.
+    pub fn is_directory(&self) -> bool {
+        self.kind.is_directory()
+    }
+
     /// Size for the Size column. Directories deliberately have none rather than
     /// a number that would require walking them.
     pub fn display_len(&self) -> Option<u64> {
@@ -194,6 +215,30 @@ mod tests {
         };
         assert!(link.is_dir_like());
         assert_eq!(entry("l", link, 0).display_len(), None);
+    }
+
+    #[test]
+    fn a_symlink_to_a_dir_navigates_like_one_without_being_one() {
+        // The two questions the callers must not confuse. Anything asking
+        // "where does a double-click go" wants the first; anything treating the
+        // entry as a container — git's per-directory roll-up above all, which
+        // records a symlink under its own path whatever it points at — wants
+        // the second.
+        let link = EntryKind::Symlink {
+            target_kind: Some(SymlinkTarget::Dir),
+        };
+        assert!(link.is_dir_like());
+        assert!(!link.is_directory());
+        assert!(!entry("l", link, 0).is_directory());
+
+        // A real directory answers both, and a file neither.
+        assert!(EntryKind::Dir.is_dir_like() && EntryKind::Dir.is_directory());
+        assert!(!EntryKind::File.is_dir_like() && !EntryKind::File.is_directory());
+        // Including a symlink to a *file*, which was never dir-like anyway.
+        let to_file = EntryKind::Symlink {
+            target_kind: Some(SymlinkTarget::File),
+        };
+        assert!(!to_file.is_dir_like() && !to_file.is_directory());
     }
 
     #[test]
