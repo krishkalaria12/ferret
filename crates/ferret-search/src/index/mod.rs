@@ -68,6 +68,7 @@ pub(crate) fn policy_matches(filters: &SearchFilters) -> bool {
     filters.include_hidden == policy.include_hidden
         && filters.respect_ignore == policy.respect_ignore
         && filters.follow_symlinks == policy.follow_symlinks
+        && filters.same_filesystem == policy.same_filesystem
 }
 
 /// The read side of the stores.
@@ -307,11 +308,13 @@ fn maintain(index: &Index, roots: Vec<PathBuf>, stop: &AtomicBool) -> Result<()>
     let db = Db::open_writer(&index.db_path)?;
     let mut content = index.content().writer()?;
     let registered = register(&db, &roots)?;
+    // Register before walking so a change made after its directory was swept
+    // is queued and applied before the index settles into maintenance mode.
+    let watchers = RootWatchers::start(&roots);
     initial_pass(&db, &mut content, &registered, stop)?;
     content.commit()?;
     index.content().reload();
 
-    let watchers = RootWatchers::start(&roots)?;
     let mut queue = DirtyQueue::default();
     let mut last_reconcile = Instant::now();
 
@@ -321,10 +324,14 @@ fn maintain(index: &Index, roots: Vec<PathBuf>, stop: &AtomicBool) -> Result<()>
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        if watchers.take_desynced() {
+            queue.absorb(watch::Signal::Desynced);
+        }
 
         if !queue.is_empty() && queue.is_due() {
             let (paths, desynced) = queue.take();
             if desynced {
+                watchers.discard_pending();
                 reconcile(&db, &mut content, &registered, stop)?;
                 last_reconcile = Instant::now();
             } else {
@@ -351,7 +358,7 @@ fn apply(
     paths: &[PathBuf],
     stop: &AtomicBool,
 ) -> Result<()> {
-    let mut touched: Vec<&db::RootRow> = Vec::new();
+    let mut touched: Vec<(&db::RootRow, Vec<PathBuf>)> = Vec::new();
     for path in paths {
         if stop.load(Ordering::Acquire) {
             return Ok(());
@@ -365,12 +372,14 @@ fn apply(
         else {
             continue;
         };
-        crawl::apply_change(db, content, root, path, stop)?;
-        if !touched.iter().any(|seen| seen.id == root.id) {
-            touched.push(root);
+        if let Some((_, paths)) = touched.iter_mut().find(|(seen, _)| seen.id == root.id) {
+            paths.push(path.clone());
+        } else {
+            touched.push((root, vec![path.clone()]));
         }
     }
-    for root in touched {
+    for (root, paths) in touched {
+        crawl::apply_changes(db, content, root, &paths, stop)?;
         crawl::backfill_content(db, content, root, stop)?;
     }
     Ok(())

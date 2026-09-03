@@ -1,4 +1,4 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 use async_channel::Receiver;
 
@@ -13,6 +13,43 @@ pub struct SearchSession {
     generation: SearchGeneration,
     events: Receiver<SearchEvent>,
     cancelled: Arc<AtomicBool>,
+    dependents: Arc<Mutex<Vec<CancellationHandle>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CancellationHandle {
+    cancelled: Arc<AtomicBool>,
+    events: Receiver<SearchEvent>,
+}
+
+impl CancellationHandle {
+    fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.events.close();
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct DependencyRegistrar {
+    parent_cancelled: Arc<AtomicBool>,
+    dependents: Arc<Mutex<Vec<CancellationHandle>>>,
+}
+
+impl DependencyRegistrar {
+    pub(crate) fn add(&self, dependent: CancellationHandle) {
+        let mut dependents = self
+            .dependents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        dependents.push(dependent);
+        if self
+            .parent_cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            dependents.last().expect("just pushed").cancel();
+        }
+    }
 }
 
 impl SearchSession {
@@ -25,7 +62,27 @@ impl SearchSession {
             generation,
             events,
             cancelled,
+            dependents: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub(crate) fn cancellation_handle(&self) -> CancellationHandle {
+        CancellationHandle {
+            cancelled: Arc::clone(&self.cancelled),
+            events: self.events.clone(),
+        }
+    }
+
+    pub(crate) fn dependency_registrar(&self) -> DependencyRegistrar {
+        DependencyRegistrar {
+            parent_cancelled: Arc::clone(&self.cancelled),
+            dependents: Arc::clone(&self.dependents),
+        }
+    }
+
+    pub(crate) fn add_dependent(&self, dependent: &SearchSession) {
+        self.dependency_registrar()
+            .add(dependent.cancellation_handle());
     }
 
     pub fn generation(&self) -> SearchGeneration {
@@ -49,6 +106,13 @@ impl SearchSession {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Release);
         self.events.close();
+        let dependents = self
+            .dependents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for dependent in dependents.iter() {
+            dependent.cancel();
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {

@@ -12,13 +12,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::Instant;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::config::{DIRTY_QUEUE_CAPACITY, INDEX_DEBOUNCE};
-use crate::{Result, SearchError};
 
 pub(crate) enum Signal {
     Changed(PathBuf),
@@ -35,11 +35,17 @@ pub(crate) enum Signal {
 pub(crate) struct RootWatchers {
     /// Held for their `Drop`, which unregisters the native streams.
     _watchers: Vec<RecommendedWatcher>,
+    /// Keeps the receiver connected when this platform cannot construct any
+    /// native watcher, so periodic reconciliation still runs.
+    _sender: SyncSender<Signal>,
     pub(crate) events: Receiver<Signal>,
+    /// Set outside the bounded event channel so overflow cannot discard the
+    /// notification that a full reconciliation is required.
+    desynced: Arc<AtomicBool>,
 }
 
 impl RootWatchers {
-    pub(crate) fn start(roots: &[PathBuf]) -> Result<Self> {
+    pub(crate) fn start(roots: &[PathBuf]) -> Self {
         let (sender, events) = sync_channel(DIRTY_QUEUE_CAPACITY);
         let aliases = Arc::new(
             roots
@@ -47,24 +53,46 @@ impl RootWatchers {
                 .map(|root| RootAlias::for_root(root))
                 .collect::<Vec<_>>(),
         );
+        let desynced = Arc::new(AtomicBool::new(false));
         let mut watchers = Vec::with_capacity(roots.len());
         for root in roots {
             let sender = sender.clone();
             let aliases = Arc::clone(&aliases);
-            let mut watcher =
-                notify::recommended_watcher(move |event| forward(&sender, &aliases, event))
-                    .map_err(|error| SearchError::IndexWrite {
-                        message: format!("couldn't start a filesystem watcher: {error}"),
-                    })?;
+            let callback_desynced = Arc::clone(&desynced);
+            let Ok(mut watcher) = notify::recommended_watcher(move |event| {
+                forward(&sender, &aliases, &callback_desynced, event)
+            }) else {
+                // Reconciliation is the correctness fallback on platforms or
+                // environments where native notification setup is unavailable.
+                continue;
+            };
             // A failed registration is not fatal: that root simply relies on
             // reconciliation for freshness, which is slower but correct.
             let _ = watcher.watch(root, RecursiveMode::Recursive);
             watchers.push(watcher);
         }
-        Ok(Self {
+        Self {
             _watchers: watchers,
+            _sender: sender,
             events,
-        })
+            desynced,
+        }
+    }
+
+    /// Returns and clears the sticky overflow/error state.
+    ///
+    /// A callback may set it again immediately after the swap; that newer
+    /// desync is then observed on the next indexer iteration.
+    pub(crate) fn take_desynced(&self) -> bool {
+        self.desynced.swap(false, Ordering::AcqRel)
+    }
+
+    /// Drops hints that a pending full reconciliation is about to supersede.
+    ///
+    /// Called before the sweep starts. Events produced after this drain remain
+    /// queued and are therefore applied after the sweep rather than lost.
+    pub(crate) fn discard_pending(&self) {
+        while self.events.try_recv().is_ok() {}
     }
 }
 
@@ -108,10 +136,11 @@ impl RootAlias {
 fn forward(
     sender: &SyncSender<Signal>,
     aliases: &[RootAlias],
+    desynced: &AtomicBool,
     event: notify::Result<notify::Event>,
 ) {
     let Ok(event) = event else {
-        let _ = sender.try_send(Signal::Desynced);
+        desynced.store(true, Ordering::Release);
         return;
     };
     for path in event.paths {
@@ -123,7 +152,7 @@ fn forward(
         // individual paths can express. Saying so once is both cheaper and
         // more correct than blocking a native callback thread.
         if let Err(TrySendError::Full(_)) = sender.try_send(Signal::Changed(path)) {
-            let _ = sender.try_send(Signal::Desynced);
+            desynced.store(true, Ordering::Release);
             return;
         }
     }
@@ -231,5 +260,23 @@ mod tests {
         assert_eq!(paths.len(), 1);
         assert!(desynced, "a lost event must still force a full sweep");
         assert!(queue.is_empty(), "and must not repeat on the next batch");
+    }
+
+    #[test]
+    fn channel_overflow_sets_a_sticky_desync() {
+        let (sender, _receiver) = sync_channel(1);
+        sender
+            .try_send(Signal::Changed(PathBuf::from("/already/full")))
+            .unwrap();
+        let desynced = AtomicBool::new(false);
+        let event =
+            notify::Event::new(notify::EventKind::Any).add_path(PathBuf::from("/lost/change"));
+
+        forward(&sender, &[], &desynced, Ok(event));
+
+        assert!(
+            desynced.load(Ordering::Acquire),
+            "the reconciliation request must not share the full channel"
+        );
     }
 }

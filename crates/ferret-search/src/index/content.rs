@@ -21,9 +21,11 @@
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{Query, QueryParser};
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value as _};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
+use tantivy::{
+    Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term, doc,
+};
 
 use crate::config::{CONTENT_COMMIT_BATCH, CONTENT_WRITER_HEAP};
 use crate::{Result, SearchError};
@@ -117,7 +119,17 @@ impl ContentIndex {
         self.reader.searcher().num_docs()
     }
 
-    /// Ranked paths whose contents match `literal`.
+    /// Whether the tokenizer can represent this literal without losing it.
+    ///
+    /// Punctuation-only literals parse to an empty Tantivy query. They still
+    /// have perfectly useful live-search semantics, so the planner must not
+    /// classify them as fully covered by the index.
+    pub(crate) fn supports_literal(&self, literal: &str) -> bool {
+        self.parse_literal(literal)
+            .is_ok_and(|query| query.is_some())
+    }
+
+    /// Prepares a stable ranked search snapshot.
     ///
     /// The query is always a phrase: quoting it means a single word becomes a
     /// term query and a multi-word literal becomes a phrase query, which is
@@ -125,8 +137,18 @@ impl ContentIndex {
     /// that is not a plain literal — a regex, a whole-word toggle the
     /// tokenizer cannot express — is not sent here at all; the planner routes
     /// it to the live scan.
-    pub(crate) fn search(&self, literal: &str, limit: usize) -> Result<Vec<RankedPath>> {
-        let searcher = self.reader.searcher();
+    pub(crate) fn prepare_search(&self, literal: &str) -> Result<Option<ContentSearch>> {
+        let Some(query) = self.parse_literal(literal)? else {
+            return Ok(None);
+        };
+        Ok(Some(ContentSearch {
+            searcher: self.reader.searcher(),
+            query,
+            path_field: self.fields.path,
+        }))
+    }
+
+    fn parse_literal(&self, literal: &str) -> Result<Option<Box<dyn Query>>> {
         let parser = QueryParser::for_index(&self.index, vec![self.fields.body, self.fields.name]);
         let escaped = literal.replace('\\', "\\\\").replace('"', "\\\"");
         let query = parser
@@ -134,29 +156,62 @@ impl ContentIndex {
             .map_err(|error| SearchError::IndexQuery {
                 message: error.to_string(),
             })?;
-        let hits = searcher
-            .search(&query, &TopDocs::with_limit(limit).order_by_score())
+        let mut has_terms = false;
+        query.query_terms(&mut |_term, _position_needed| has_terms = true);
+        Ok(has_terms.then_some(query))
+    }
+}
+
+/// One immutable reader snapshot and parsed query, paged in rank order.
+pub(crate) struct ContentSearch {
+    searcher: Searcher,
+    query: Box<dyn Query>,
+    path_field: Field,
+}
+
+impl ContentSearch {
+    pub(crate) fn page(&self, offset: usize, limit: usize) -> Result<RankedPage> {
+        debug_assert!(limit > 0);
+        let hits = self
+            .searcher
+            .search(
+                &self.query,
+                &TopDocs::with_limit(limit)
+                    .and_offset(offset)
+                    .order_by_score(),
+            )
             .map_err(|error| SearchError::IndexQuery {
                 message: error.to_string(),
             })?;
-        let mut ranked = Vec::with_capacity(hits.len());
+        let hit_count = hits.len();
+        let mut paths = Vec::with_capacity(hit_count);
         for (rank, (_score, address)) in hits.into_iter().enumerate() {
-            let Ok(document) = searcher.doc::<TantivyDocument>(address) else {
+            let Ok(document) = self.searcher.doc::<TantivyDocument>(address) else {
                 continue;
             };
             let Some(path) = document
-                .get_first(self.fields.path)
+                .get_first(self.path_field)
                 .and_then(|value| value.as_str())
             else {
                 continue;
             };
-            ranked.push(RankedPath {
+            paths.push(RankedPath {
                 path: path.to_owned(),
-                rank: rank as u32,
+                rank: offset.saturating_add(rank).min(u32::MAX as usize) as u32,
             });
         }
-        Ok(ranked)
+        Ok(RankedPage {
+            paths,
+            next_offset: offset.saturating_add(hit_count),
+            exhausted: hit_count < limit,
+        })
     }
+}
+
+pub(crate) struct RankedPage {
+    pub paths: Vec<RankedPath>,
+    pub next_offset: usize,
+    pub exhausted: bool,
 }
 
 pub(crate) struct ContentWriter {
@@ -233,4 +288,79 @@ pub(crate) fn indexable_text(bytes: &[u8]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("ferret-content-test-{}-{id}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn punctuation_only_literals_require_live_search() {
+        let dir = TestDir::new();
+        let index = ContentIndex::open(&dir.0).unwrap();
+
+        assert!(index.supports_literal("searchable words"));
+        assert!(!index.supports_literal("... ??? :::"));
+    }
+
+    #[test]
+    fn ranked_pages_continue_with_global_ordinals() {
+        let dir = TestDir::new();
+        let index = ContentIndex::open(&dir.0).unwrap();
+        let mut writer = index.writer().unwrap();
+        for ordinal in 0..5 {
+            writer
+                .add(
+                    &format!("/tmp/document-{ordinal}"),
+                    &format!("document-{ordinal}"),
+                    "common search term",
+                )
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        index.reload();
+
+        let search = index.prepare_search("common").unwrap().unwrap();
+        let first = search.page(0, 2).unwrap();
+        let second = search.page(first.next_offset, 2).unwrap();
+        let third = search.page(second.next_offset, 2).unwrap();
+
+        assert_eq!(
+            first.paths.iter().map(|hit| hit.rank).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            second.paths.iter().map(|hit| hit.rank).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(
+            third.paths.iter().map(|hit| hit.rank).collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert!(!first.exhausted);
+        assert!(!second.exhausted);
+        assert!(third.exhausted);
+    }
 }

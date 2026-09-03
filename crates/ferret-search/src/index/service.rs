@@ -24,7 +24,7 @@ use smol_str::SmolStr;
 use super::db::{Db, FileRow, kind};
 use super::{Index, policy_matches};
 use crate::config::{
-    CONTENT_CANDIDATE_LIMIT, EVENT_BUFFER, INDEX_CANDIDATE_LIMIT, MAX_RANGES_PER_PREVIEW,
+    CONTENT_CANDIDATE_PAGE_SIZE, EVENT_BUFFER, INDEX_CANDIDATE_PAGE_SIZE, MAX_RANGES_PER_PREVIEW,
 };
 use crate::live::{
     ContentMatcher, NameMatcher, build_content_searcher, display_column, extension_matches,
@@ -80,7 +80,11 @@ impl IndexSearchService {
             // Regex and whole-word are matcher semantics a tokenized index
             // cannot express. The index can still narrow by *name*, so this is
             // partial rather than nothing.
-            Some(query) => query.syntax == PatternSyntax::Literal && !query.whole_word,
+            Some(query) => {
+                query.syntax == PatternSyntax::Literal
+                    && !query.whole_word
+                    && self.index.content().supports_literal(&query.pattern)
+            }
             None => true,
         };
         let all_roots_ready = request.scope.roots.iter().all(|root| status.covers(root));
@@ -233,45 +237,61 @@ fn name_results(
             stats.roots_done += 1;
             continue;
         };
-        let candidates =
-            db.candidates(scope, query.trigram_pattern(), false, INDEX_CANDIDATE_LIMIT)?;
-        for row in candidates {
+        let mut after_path: Option<String> = None;
+        loop {
             if sink.is_cancelled() {
                 return Ok(());
             }
-            stats.entries_seen += 1;
-            if !query.row_matches(&row) {
-                continue;
+            let candidates = db.candidate_page(
+                scope,
+                query.trigram_pattern(),
+                false,
+                after_path.as_deref(),
+                INDEX_CANDIDATE_PAGE_SIZE,
+            )?;
+            let page_len = candidates.len();
+            for row in candidates {
+                after_path = Some(row.path.clone());
+                if sink.is_cancelled() {
+                    return Ok(());
+                }
+                stats.entries_seen += 1;
+                if !query.row_matches(&row) {
+                    continue;
+                }
+                let Some(ranges) = query
+                    .name_matcher
+                    .map(|matcher| matcher.find(&row.name).map(|range| vec![range]))
+                    .unwrap_or_else(|| Some(Vec::new()))
+                else {
+                    continue;
+                };
+                // The row said this path existed when it was crawled. Only the
+                // filesystem can say whether it still does, and a result the user
+                // cannot open is worse than a slower search.
+                let Some(metadata) = current_metadata(&row) else {
+                    continue;
+                };
+                let path = VfsPath::local(&row.path);
+                let result = SearchResult {
+                    id: SearchResultId {
+                        path: path.clone(),
+                        match_key: MatchKey::Path,
+                    },
+                    path,
+                    name: SmolStr::new(&row.name),
+                    kind: entry_kind_of(&row),
+                    metadata: Some(metadata),
+                    source: ResultSource::Index,
+                    rank: None,
+                    matched: SearchMatch::Filename { ranges },
+                };
+                if !sink.push(result, stats) {
+                    return Ok(());
+                }
             }
-            let Some(ranges) = query
-                .name_matcher
-                .map(|matcher| matcher.find(&row.name).map(|range| vec![range]))
-                .unwrap_or_else(|| Some(Vec::new()))
-            else {
-                continue;
-            };
-            // The row said this path existed when it was crawled. Only the
-            // filesystem can say whether it still does, and a result the user
-            // cannot open is worse than a slower search.
-            let Some(metadata) = current_metadata(&row) else {
-                continue;
-            };
-            let path = VfsPath::local(&row.path);
-            let result = SearchResult {
-                id: SearchResultId {
-                    path: path.clone(),
-                    match_key: MatchKey::Path,
-                },
-                path,
-                name: SmolStr::new(&row.name),
-                kind: entry_kind_of(&row),
-                metadata: Some(metadata),
-                source: ResultSource::Index,
-                rank: None,
-                matched: SearchMatch::Filename { ranges },
-            };
-            if !sink.push(result, stats) {
-                return Ok(());
+            if page_len < INDEX_CANDIDATE_PAGE_SIZE {
+                break;
             }
         }
         stats.roots_done += 1;
@@ -299,50 +319,63 @@ fn content_results(
         .as_ref()
         .map(|content| content.pattern.clone())
         .unwrap_or_default();
-    let ranked = index.content().search(&literal, CONTENT_CANDIDATE_LIMIT)?;
+    let Some(search) = index.content().prepare_search(&literal)? else {
+        // The planner classifies this as partial so the live engine supplies
+        // the matches the tokenizer cannot represent.
+        stats.roots_done = stats.roots_total;
+        return Ok(());
+    };
     let matcher = query
         .content_matcher
         .expect("content_results is only reached with a compiled content matcher");
     let mut searcher = build_content_searcher();
 
-    for hit in ranked {
+    let mut offset = 0;
+    loop {
         if sink.is_cancelled() {
             return Ok(());
         }
-        stats.entries_seen += 1;
-        let path = VfsPath::local(&hit.path);
-        if !query
-            .request
-            .scope
-            .roots
-            .iter()
-            .any(|root| path.starts_with(root))
-        {
-            continue;
-        }
-        let Some(row) = db.file(&hit.path)? else {
-            continue;
-        };
-        if !query.row_matches(&row) {
-            continue;
-        }
-        if let Some(name_matcher) = query.name_matcher
-            && name_matcher.find(&row.name).is_none()
-        {
-            continue;
-        }
-        let Some(metadata) = current_metadata(&row) else {
-            continue;
-        };
-        // The snippet comes from the file as it is now, through the same
-        // searcher the live path uses. A document that has since changed
-        // simply yields no matches here and drops out — which is the index
-        // correcting itself at the only moment it matters.
-        let collected = collect_matches(&mut searcher, matcher, &row, &hit, metadata);
-        for result in collected {
-            if !sink.push(result, stats) {
+        let page = search.page(offset, CONTENT_CANDIDATE_PAGE_SIZE)?;
+        for hit in page.paths {
+            if sink.is_cancelled() {
                 return Ok(());
             }
+            stats.entries_seen += 1;
+            let path = VfsPath::local(&hit.path);
+            if !query
+                .request
+                .scope
+                .roots
+                .iter()
+                .any(|root| path.starts_with(root))
+            {
+                continue;
+            }
+            let Some(row) = db.file(&hit.path)? else {
+                continue;
+            };
+            if !query.row_matches(&row) {
+                continue;
+            }
+            if let Some(name_matcher) = query.name_matcher
+                && name_matcher.find(&row.name).is_none()
+            {
+                continue;
+            }
+            let Some(metadata) = current_metadata(&row) else {
+                continue;
+            };
+            // The snippet comes from the file as it is now, through the same
+            // searcher the live path uses. A document that has since changed
+            // simply yields no matches here and drops out — which is the index
+            // correcting itself at the only moment it matters.
+            if !send_matches(&mut searcher, matcher, &row, &hit, metadata, sink, stats) {
+                return Ok(());
+            }
+        }
+        offset = page.next_offset;
+        if page.exhausted {
+            break;
         }
     }
     stats.roots_done = stats.roots_total;
@@ -351,34 +384,40 @@ fn content_results(
 
 /// Runs the content matcher over one candidate file and turns every hit into a
 /// row identical in shape to the live path's.
-fn collect_matches(
+fn send_matches(
     searcher: &mut Searcher,
     matcher: &ContentMatcher,
     row: &FileRow,
     hit: &super::content::RankedPath,
     metadata: Metadata,
-) -> Vec<SearchResult> {
-    let mut collected = Vec::new();
-    let sink = CollectingSink {
+    event_sink: &mut EventSink,
+    stats: &mut SearchStats,
+) -> bool {
+    let mut keep_searching = true;
+    let result_sink = ResultSink {
         matcher: &matcher.matcher,
         row,
         rank: hit.rank,
         metadata,
-        collected: &mut collected,
+        event_sink,
+        stats,
+        keep_searching: &mut keep_searching,
     };
-    let _ = searcher.search_path(&matcher.matcher, &row.path, sink);
-    collected
+    let _ = searcher.search_path(&matcher.matcher, &row.path, result_sink);
+    keep_searching
 }
 
-struct CollectingSink<'a> {
+struct ResultSink<'a> {
     matcher: &'a grep_regex::RegexMatcher,
     row: &'a FileRow,
     rank: u32,
     metadata: Metadata,
-    collected: &'a mut Vec<SearchResult>,
+    event_sink: &'a mut EventSink,
+    stats: &'a mut SearchStats,
+    keep_searching: &'a mut bool,
 }
 
-impl Sink for CollectingSink<'_> {
+impl Sink for ResultSink<'_> {
     type Error = std::io::Error;
 
     fn matched(
@@ -401,7 +440,7 @@ impl Sink for CollectingSink<'_> {
         let line_start = matched.absolute_byte_offset();
         let (preview_text, ranges) = preview(line, &matches);
         let path = VfsPath::local(&self.row.path);
-        self.collected.push(SearchResult {
+        let result = SearchResult {
             id: SearchResultId {
                 path: path.clone(),
                 match_key: MatchKey::Content {
@@ -422,8 +461,9 @@ impl Sink for CollectingSink<'_> {
                 preview: preview_text,
                 ranges,
             },
-        });
-        Ok(true)
+        };
+        *self.keep_searching = self.event_sink.push(result, self.stats);
+        Ok(*self.keep_searching)
     }
 }
 

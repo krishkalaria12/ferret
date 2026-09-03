@@ -12,7 +12,7 @@
 //! set of paths the filesystem no longer has. That is why a dropped watcher
 //! event is a latency problem rather than a correctness one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
@@ -93,7 +93,8 @@ pub(crate) fn sweep_root(
         if entry.depth() == 0 {
             continue;
         }
-        let Some(row) = row_for(entry.path(), entry.depth()) else {
+        let depth = subtree_depth(Path::new(&root.path), entry.path());
+        let Some(row) = row_for(entry.path(), depth) else {
             outcome.skipped += 1;
             continue;
         };
@@ -157,7 +158,11 @@ pub(crate) fn reindex_subtree(
             outcome.skipped += 1;
             continue;
         };
-        let Some(row) = row_for(entry.path(), entry.depth()) else {
+        if entry.path() == Path::new(&root.path) {
+            continue;
+        }
+        let depth = subtree_depth(Path::new(&root.path), entry.path());
+        let Some(row) = row_for(entry.path(), depth) else {
             outcome.skipped += 1;
             continue;
         };
@@ -188,6 +193,7 @@ pub(crate) fn reindex_subtree(
 /// The event kind is deliberately ignored — by the time it arrives the truth
 /// is on disk, not in the event, and a create followed by a delete inside one
 /// debounce window would otherwise be applied in the wrong order.
+#[cfg(test)]
 pub(crate) fn apply_change(
     db: &Db,
     content: &mut ContentWriter,
@@ -195,34 +201,137 @@ pub(crate) fn apply_change(
     path: &Path,
     stop: &AtomicBool,
 ) -> Result<()> {
-    let Some(text) = path.to_str() else {
-        return Ok(());
-    };
-    let metadata = std::fs::symlink_metadata(path);
-    match metadata {
-        Err(_) => {
-            // Gone, or unreadable — which for index purposes is the same
-            // thing, because a path Ferret cannot stat is one it cannot open
-            // for the user either.
-            for removed in db.delete_subtree(text)? {
-                content.delete(&removed);
-            }
-        }
-        Ok(metadata) if metadata.is_dir() => {
-            reindex_subtree(db, content, root, path, stop)?;
-        }
-        Ok(_) => {
-            let depth = subtree_depth(&root.path, text);
-            let Some(row) = row_for(path, depth) else {
-                return Ok(());
-            };
-            let generation = db.current_generation(root.id)?;
-            if db.upsert_file(root.id, generation, &row)? == ContentWork::Replace {
-                content.delete(&row.path);
-            }
+    apply_changes(
+        db,
+        content,
+        root,
+        std::slice::from_ref(&path.to_path_buf()),
+        stop,
+    )?;
+    Ok(())
+}
+
+/// Applies a settled watcher batch while walking each affected subtree once.
+pub(crate) fn apply_changes(
+    db: &Db,
+    content: &mut ContentWriter,
+    root: &RootRow,
+    paths: &[PathBuf],
+    stop: &AtomicBool,
+) -> Result<()> {
+    let root_path = Path::new(&root.path);
+    let mut reindex = Vec::new();
+    let mut deleted = Vec::new();
+    for path in paths {
+        if let Some(scope) = reindex_scope(root_path, path) {
+            reindex.push(scope);
+        } else {
+            deleted.push(path.as_path());
         }
     }
+    reindex.sort();
+    reindex.dedup();
+    let mut scopes: Vec<PathBuf> = Vec::with_capacity(reindex.len());
+    for scope in reindex {
+        if scopes.iter().any(|ancestor| scope.starts_with(ancestor)) {
+            continue;
+        }
+        scopes.push(scope);
+    }
+
+    for path in deleted {
+        if scopes.iter().any(|scope| path.starts_with(scope)) {
+            continue;
+        }
+        let Some(text) = path.to_str() else {
+            continue;
+        };
+        for removed in db.delete_subtree(text)? {
+            content.delete(&removed);
+        }
+    }
+    for dir in scopes {
+        if !crawl_policy_reaches(root_path, &dir) {
+            if let Some(text) = dir.to_str() {
+                for removed in db.delete_subtree(text)? {
+                    content.delete(&removed);
+                }
+            }
+            continue;
+        }
+        reindex_subtree(db, content, root, &dir, stop)?;
+    }
     Ok(())
+}
+
+pub(crate) fn reindex_scope(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Some(scope) = ignore_policy_scope(path) {
+        // A repository-level exclude file can govern an ancestor of an
+        // unusually narrow indexed root. Never let a watcher event turn into
+        // a database operation outside the root it was assigned to.
+        return Some(if scope.starts_with(root) {
+            scope
+        } else {
+            root.to_path_buf()
+        });
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Some(path.to_path_buf()),
+        Ok(_) => Some(path.parent().unwrap_or(root).to_path_buf()),
+        Err(_) => None,
+    }
+}
+
+fn ignore_policy_scope(path: &Path) -> Option<PathBuf> {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(".gitignore" | ".ignore") => path.parent().map(Path::to_path_buf),
+        Some("exclude")
+            if path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("info")
+                && path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    == Some(".git") =>
+        {
+            path.parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        }
+        _ => None,
+    }
+}
+
+/// Whether every component leading to `path` survives the crawl policy.
+///
+/// An `ignore` walk always yields its starting directory, even when an
+/// ancestor's rule excludes it. Incremental walks therefore validate the
+/// route from the indexed root one component at a time before treating a
+/// subtree as an independent walk root.
+fn crawl_policy_reaches(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut parent = root.to_path_buf();
+    for component in relative.components() {
+        let candidate = parent.join(component);
+        let mut builder = crawl_walker(&parent);
+        builder.max_depth(Some(1));
+        let included = builder
+            .build()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry.path() == candidate);
+        if !included {
+            return false;
+        }
+        parent = candidate;
+    }
+    true
 }
 
 /// Reads bodies for rows whose contents are not in the index yet.
@@ -326,12 +435,8 @@ fn row_for(path: &Path, depth: usize) -> Option<FileRow> {
     })
 }
 
-fn subtree_depth(root: &str, path: &str) -> usize {
+fn subtree_depth(root: &Path, path: &Path) -> usize {
     path.strip_prefix(root)
-        .map(|rest| {
-            rest.split(std::path::MAIN_SEPARATOR)
-                .filter(|part| !part.is_empty())
-                .count()
-        })
+        .map(|relative| relative.components().count())
         .unwrap_or(1)
 }

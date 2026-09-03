@@ -112,6 +112,16 @@ fn names(results: &[SearchResult]) -> Vec<String> {
     names
 }
 
+fn apply_change(index: &Index, root_path: &Path, changed_path: &Path) {
+    let db = Db::open_writer(&index.db_path).unwrap();
+    let root = register(&db, &[root_path.to_path_buf()]).unwrap().remove(0);
+    let mut content = index.content().writer().unwrap();
+    let stop = AtomicBool::new(false);
+    crawl::apply_change(&db, &mut content, &root, changed_path, &stop).unwrap();
+    content.commit().unwrap();
+    index.content().reload();
+}
+
 #[test]
 fn a_crawl_makes_names_findable_without_touching_the_tree() {
     let fixture = Fixture::new("names");
@@ -257,6 +267,152 @@ fn the_index_declines_a_query_its_crawl_policy_cannot_answer() {
         IndexPlan::None,
         "a corpus that excluded hidden entries cannot be asked about them"
     );
+
+    let mut same_filesystem = request(&fixture.root, "txt");
+    same_filesystem.filters.same_filesystem = true;
+    assert_eq!(
+        service.plan(&same_filesystem),
+        IndexPlan::None,
+        "the index does not record filesystem traversal boundaries"
+    );
+}
+
+#[test]
+fn watcher_updates_do_not_insert_hidden_files() {
+    let fixture = Fixture::new("watch-hidden");
+    let index = fixture.crawled();
+    let hidden = fixture.write(".secret.txt", "not searchable");
+
+    apply_change(&index, &fixture.root, &hidden);
+
+    assert!(
+        index
+            .reader()
+            .unwrap()
+            .file(hidden.to_str().unwrap())
+            .unwrap()
+            .is_none(),
+        "incremental updates must use the crawl's hidden-file policy"
+    );
+}
+
+#[test]
+fn changing_gitignore_reapplies_policy_to_the_governed_subtree() {
+    let fixture = Fixture::new("watch-ignore");
+    let ignored = fixture.write("build/output.txt", "was initially visible");
+    let index = fixture.crawled();
+    assert!(
+        index
+            .reader()
+            .unwrap()
+            .file(ignored.to_str().unwrap())
+            .unwrap()
+            .is_some()
+    );
+
+    let ignore_file = fixture.write(".gitignore", "build/\n");
+    apply_change(&index, &fixture.root, &ignore_file);
+
+    assert!(
+        index
+            .reader()
+            .unwrap()
+            .file(ignored.to_str().unwrap())
+            .unwrap()
+            .is_none(),
+        "a changed ignore file must evict rows it now excludes"
+    );
+}
+
+#[test]
+fn deleting_gitignore_reincludes_the_governed_subtree() {
+    let fixture = Fixture::new("watch-ignore-delete");
+    let ignore_file = fixture.write(".gitignore", "build/\n");
+    let previously_ignored = fixture.write("build/output.txt", "searchable again");
+    let index = fixture.crawled();
+    assert!(
+        index
+            .reader()
+            .unwrap()
+            .file(previously_ignored.to_str().unwrap())
+            .unwrap()
+            .is_none()
+    );
+
+    std::fs::remove_file(&ignore_file).unwrap();
+    apply_change(&index, &fixture.root, &ignore_file);
+
+    assert!(
+        index
+            .reader()
+            .unwrap()
+            .file(previously_ignored.to_str().unwrap())
+            .unwrap()
+            .is_some(),
+        "removing an ignore file must immediately restore newly visible rows"
+    );
+}
+
+#[test]
+fn sibling_watcher_changes_share_one_reindex_scope() {
+    let fixture = Fixture::new("watch-sibling-batch");
+    let first = fixture.write("src/first.txt", "first");
+    let second = fixture.write("src/second.txt", "second");
+    let root = fixture.root.clone();
+
+    let mut scopes = [first, second]
+        .iter()
+        .filter_map(|path| crawl::reindex_scope(&root, path))
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+
+    assert_eq!(scopes, vec![root.join("src")]);
+}
+
+#[test]
+fn watcher_updates_inside_an_ignored_directory_stay_excluded() {
+    let fixture = Fixture::new("watch-ignored-child");
+    fixture.write(".gitignore", "ignored/\n");
+    let index = fixture.crawled();
+    let ignored = fixture.write("ignored/new.txt", "not searchable");
+
+    apply_change(&index, &fixture.root, &ignored);
+
+    assert!(
+        index
+            .reader()
+            .unwrap()
+            .file(ignored.to_str().unwrap())
+            .unwrap()
+            .is_none(),
+        "starting an incremental walk inside an ignored tree must not bypass ancestor rules"
+    );
+}
+
+#[test]
+fn subtree_reindex_keeps_depth_relative_to_the_indexed_root() {
+    let fixture = Fixture::new("subtree-depth");
+    let nested = fixture.write("one/two/three.txt", "x");
+    let index = fixture.crawled();
+    let db = Db::open_writer(&index.db_path).unwrap();
+    let root = register(&db, std::slice::from_ref(&fixture.root))
+        .unwrap()
+        .remove(0);
+    let mut content = index.content().writer().unwrap();
+    let stop = AtomicBool::new(false);
+
+    crawl::reindex_subtree(
+        &db,
+        &mut content,
+        &root,
+        &fixture.root.join("one/two"),
+        &stop,
+    )
+    .unwrap();
+
+    let row = db.file(nested.to_str().unwrap()).unwrap().unwrap();
+    assert_eq!(row.depth, 3, "depth is measured from the indexed root");
 }
 
 #[test]

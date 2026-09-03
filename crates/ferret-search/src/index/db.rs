@@ -469,23 +469,28 @@ impl Db {
     /// case rule and every metadata filter. The index's job is to turn tens of
     /// millions of paths into a few thousand, not to be right about all of
     /// them.
-    pub(crate) fn candidates(
+    pub(crate) fn candidate_page(
         &self,
         scope: &str,
         pattern: Option<&str>,
         match_path: bool,
+        after_path: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FileRow>> {
         let (lower, upper) = subtree_range(scope);
+        // No descendant can equal `lower` (it ends in the separator), so it is
+        // also the correct exclusive cursor for the first page.
+        let cursor = after_path.unwrap_or(&lower);
         let Some(pattern) = pattern.filter(|pattern| !pattern.is_empty()) else {
             let mut statement = self
                 .conn
                 .prepare(&format!(
-                    "{FILE_SELECT} WHERE path >= ?1 AND path < ?2 LIMIT ?3"
+                    "{FILE_SELECT} WHERE path >= ?1 AND path < ?2 AND path > ?3
+                     ORDER BY path LIMIT ?4"
                 ))
                 .map_err(query_error)?;
             let rows = statement
-                .query_map(params![lower, upper, limit as i64], file_row)
+                .query_map(params![lower, upper, cursor, limit as i64], file_row)
                 .map_err(query_error)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(query_error)?;
@@ -501,12 +506,12 @@ impl Db {
                     "SELECT {FILE_COLUMNS} FROM files_fts
                      JOIN files ON files.id = files_fts.rowid
                      WHERE files_fts MATCH ?1 AND files.path >= ?2 AND files.path < ?3
-                     LIMIT ?4"
+                     AND files.path > ?4 ORDER BY files.path LIMIT ?5"
                 ))
                 .map_err(query_error)?;
             let rows = statement
                 .query_map(
-                    params![match_expression, lower, upper, limit as i64],
+                    params![match_expression, lower, upper, cursor, limit as i64],
                     file_row,
                 )
                 .map_err(query_error)?
@@ -524,11 +529,15 @@ impl Db {
             .conn
             .prepare(&format!(
                 "{FILE_SELECT} WHERE path >= ?1 AND path < ?2
-                 AND {column} LIKE ?3 ESCAPE '\\' LIMIT ?4"
+                 AND path > ?3 AND {column} LIKE ?4 ESCAPE '\\'
+                 ORDER BY path LIMIT ?5"
             ))
             .map_err(query_error)?;
         let rows = statement
-            .query_map(params![lower, upper, needle, limit as i64], file_row)
+            .query_map(
+                params![lower, upper, cursor, needle, limit as i64],
+                file_row,
+            )
             .map_err(query_error)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(query_error)?;
@@ -715,3 +724,97 @@ CREATE TRIGGER IF NOT EXISTS files_fts_update AFTER UPDATE ON files BEGIN
     INSERT INTO files_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
 END;
 "#;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDb(std::path::PathBuf);
+
+    impl TestDb {
+        fn open() -> (Self, Db) {
+            let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "ferret-search-db-test-{}-{id}.sqlite3",
+                std::process::id()
+            ));
+            let db = Db::open_writer(&path).unwrap();
+            (Self(path), db)
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("sqlite3-shm"));
+            let _ = std::fs::remove_file(self.0.with_extension("sqlite3-wal"));
+        }
+    }
+
+    fn row(path: &Path, name: &str) -> FileRow {
+        FileRow {
+            path: path.to_string_lossy().into_owned(),
+            name: name.to_owned(),
+            ext: None,
+            kind: kind::FILE,
+            size: 0,
+            mtime: None,
+            hidden: false,
+            depth: 1,
+            fingerprint: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn candidate_pages_are_complete_and_path_ordered() {
+        let (_temp, db) = TestDb::open();
+        let scope_path = std::env::temp_dir().join(format!(
+            "ferret-candidate-scope-{}",
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let scope = scope_path.to_string_lossy();
+        let root = db.upsert_root(&scope).unwrap();
+        let generation = db.begin_sweep(root.id).unwrap();
+        for name in ["match-e", "match-c", "match-a", "match-d", "match-b"] {
+            db.upsert_file(root.id, generation, &row(&scope_path.join(name), name))
+                .unwrap();
+        }
+
+        let first = db
+            .candidate_page(&scope, Some("match"), false, None, 2)
+            .unwrap();
+        let second = db
+            .candidate_page(
+                &scope,
+                Some("match"),
+                false,
+                first.last().map(|row| row.path.as_str()),
+                2,
+            )
+            .unwrap();
+        let third = db
+            .candidate_page(
+                &scope,
+                Some("match"),
+                false,
+                second.last().map(|row| row.path.as_str()),
+                2,
+            )
+            .unwrap();
+        let names = first
+            .into_iter()
+            .chain(second)
+            .chain(third)
+            .map(|row| row.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec!["match-a", "match-b", "match-c", "match-d", "match-e"]
+        );
+    }
+}

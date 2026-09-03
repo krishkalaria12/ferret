@@ -97,19 +97,18 @@ pub const CONTENT_WRITER_HEAP: usize = 64 * 1024 * 1024;
 /// an in-progress index progressively useful.
 pub const CONTENT_COMMIT_BATCH: usize = 4_096;
 
-/// Rows the path index will return for one filename query before stopping.
+/// Filename candidates fetched from SQLite at a time.
 ///
-/// The index can answer "contains e" with millions of rows. The UI shows a
-/// bounded window, and the cap is what keeps an unselective query from turning
-/// into a full table materialisation on the daemon side.
-pub const INDEX_CANDIDATE_LIMIT: usize = 4_096;
+/// A page bounds query-side materialisation without limiting the complete
+/// result set. Unselective queries fetch subsequent pages until the user's
+/// result cap is reached or the scope is exhausted.
+pub const INDEX_CANDIDATE_PAGE_SIZE: usize = 4_096;
 
-/// Top-ranked documents whose contents are re-read to build snippets.
+/// Ranked content candidates fetched from Tantivy at a time.
 ///
-/// Tantivy ranks the whole matching set cheaply; turning a document into a row
-/// costs one file open. Only the head of the ranking is worth that, and the
-/// tail is what the live scan would have found anyway.
-pub const CONTENT_CANDIDATE_LIMIT: usize = 256;
+/// Re-reading candidates to build current snippets is deliberately incremental
+/// so cancellation can interrupt a broad query between bounded batches.
+pub const CONTENT_CANDIDATE_PAGE_SIZE: usize = 256;
 
 /// Shortest query the trigram index can answer.
 ///

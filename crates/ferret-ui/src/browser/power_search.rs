@@ -28,6 +28,7 @@ const ROW_HEIGHT: f32 = 34.;
 /// Dialog padding plus its two one-pixel borders.
 const DIALOG_CHROME: f32 = 34.;
 const MIN_MARGIN_TOP: f32 = 24.;
+const MIN_MARGIN_HORIZONTAL: f32 = 16.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SearchKind {
@@ -63,6 +64,7 @@ pub(super) struct PowerSearch {
     searching: bool,
     truncated: bool,
     warning: Option<String>,
+    failure: Option<String>,
     /// What the index helper had to say, refreshed when the dialog opens.
     ///
     /// Kept here rather than asked for during render: reading it talks to
@@ -116,6 +118,7 @@ impl PowerSearch {
             searching: false,
             truncated: false,
             warning: None,
+            failure: None,
             index_note: None,
             search_task: None,
             index_task: None,
@@ -169,6 +172,7 @@ impl PowerSearch {
         self.selected = None;
         self.truncated = false;
         self.warning = None;
+        self.failure = None;
 
         let name_pattern = self.name_input.read(cx).value().trim().to_string();
         let content_pattern = self.content_input.read(cx).value().trim().to_string();
@@ -236,7 +240,7 @@ impl PowerSearch {
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
                         this.searching = false;
-                        this.warning = Some(error.to_string());
+                        this.failure = Some(error.to_string());
                         cx.notify();
                     });
                     return;
@@ -256,7 +260,13 @@ impl PowerSearch {
                                 this.searching = false;
                                 this.truncated = stats.truncated;
                             }
-                            SearchEvent::Finished(_) => this.searching = false,
+                            SearchEvent::Finished(SearchFinished::Failed { message, .. }) => {
+                                this.searching = false;
+                                this.failure = Some(message);
+                            }
+                            SearchEvent::Finished(SearchFinished::Cancelled { .. }) => {
+                                this.searching = false;
+                            }
                             _ => {}
                         }
                         cx.notify();
@@ -284,11 +294,33 @@ impl PowerSearch {
         }
     }
 
+    fn cancel_search(&mut self, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.search_task.take();
+        self.searching = false;
+        cx.notify();
+    }
+
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(result) = self.selected.and_then(|row| self.results.get(row)).cloned() else {
             return;
         };
-        open_result(&self.browser, result, window, cx);
+        self.open_result(result, window, cx);
+    }
+
+    fn open_result(&mut self, result: SearchResult, window: &mut Window, cx: &mut Context<Self>) {
+        let browser = self.browser.clone();
+        let is_dir = result.kind.is_dir_like();
+        let path = result.path;
+        self.cancel_search(cx);
+        let _ = browser.update(cx, |browser, cx| {
+            if is_dir {
+                browser.navigate(path, window, cx);
+            } else {
+                browser.open_with_default(path, window, cx);
+            }
+        });
+        window.close_dialog(cx);
     }
 
     fn segment(id: &'static str, label: &'static str, active: bool) -> Button {
@@ -301,22 +333,8 @@ impl PowerSearch {
     }
 }
 
-fn open_result(
-    browser: &WeakEntity<Browser>,
-    result: SearchResult,
-    window: &mut Window,
-    cx: &mut Context<PowerSearch>,
-) {
-    let is_dir = result.kind.is_dir_like();
-    let path = result.path;
-    let _ = browser.update(cx, |browser, cx| {
-        if is_dir {
-            browser.navigate(path, window, cx);
-        } else {
-            browser.open_with_default(path, window, cx);
-        }
-    });
-    window.close_dialog(cx);
+fn dialog_width(viewport_width: f32) -> f32 {
+    DIALOG_WIDTH.min((viewport_width - MIN_MARGIN_HORIZONTAL * 2.).max(0.))
 }
 
 impl Render for PowerSearch {
@@ -394,7 +412,7 @@ impl Render for PowerSearch {
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 this.selected = Some(index);
                                 if event.click_count() >= 2 {
-                                    open_result(&this.browser, open_target.clone(), window, cx);
+                                    this.open_result(open_target.clone(), window, cx);
                                 }
                                 cx.notify();
                             }))
@@ -428,7 +446,10 @@ impl Render for PowerSearch {
                         Button::new("power-search-done")
                             .ghost()
                             .label("Done")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.cancel_search(cx);
+                                window.close_dialog(cx);
+                            })),
                     ),
             )
             .child(
@@ -602,11 +623,13 @@ impl Render for PowerSearch {
                         if self.name_input.read(cx).value().trim().is_empty()
                             && self.content_input.read(cx).value().trim().is_empty()
                         {
-                            "Type a filename or content pattern to search"
+                            SharedString::from("Type a filename or content pattern to search")
                         } else if self.searching {
-                            "Searching the filesystem…"
+                            SharedString::from("Searching the filesystem…")
+                        } else if let Some(failure) = &self.failure {
+                            SharedString::from(failure.clone())
                         } else {
-                            "No matching files"
+                            SharedString::from("No matching files")
                         },
                     )
                     .into_any_element()
@@ -621,7 +644,9 @@ impl Render for PowerSearch {
                     .border_color(theme.border)
                     .text_size(px(11.))
                     .text_color(theme.muted_foreground)
-                    .child(if self.truncated {
+                    .child(if let Some(failure) = &self.failure {
+                        SharedString::from(failure.clone())
+                    } else if self.truncated {
                         SharedString::from(format!("Showing first {count} results"))
                     } else if let Some(warning) = &self.warning {
                         SharedString::from(warning.clone())
@@ -640,6 +665,9 @@ impl Render for PowerSearch {
 impl Browser {
     pub(super) fn toggle_power_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
+            if let Some(search) = &self.power_search {
+                search.update(cx, |search, cx| search.cancel_search(cx));
+            }
             window.close_dialog(cx);
             return;
         }
@@ -664,15 +692,32 @@ impl Browser {
         let focus = search.read(cx).name_input.read(cx).focus_handle(cx).clone();
         window.focus(&focus, cx);
         window.open_dialog(cx, move |dialog, window, _cx| {
-            let viewport = f32::from(window.viewport_size().height);
-            let top = ((viewport - (DIALOG_HEIGHT + DIALOG_CHROME)) / 2.).max(MIN_MARGIN_TOP);
+            let viewport = window.viewport_size();
+            let top = ((f32::from(viewport.height) - (DIALOG_HEIGHT + DIALOG_CHROME)) / 2.)
+                .max(MIN_MARGIN_TOP);
+            let width = dialog_width(f32::from(viewport.width));
+            let search_on_close = search.clone();
             dialog
-                .w(px(DIALOG_WIDTH))
+                .w(px(width))
                 .margin_top(px(top))
                 .p_0()
                 .close_button(false)
+                .on_close(move |_, _, cx| {
+                    search_on_close.update(cx, |search, cx| search.cancel_search(cx));
+                })
                 .child(search.clone())
         });
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dialog_width_preserves_horizontal_margins_in_narrow_windows() {
+        assert_eq!(dialog_width(760.), 728.);
+        assert_eq!(dialog_width(1180.), DIALOG_WIDTH);
     }
 }
