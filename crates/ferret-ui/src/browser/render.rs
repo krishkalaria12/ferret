@@ -116,6 +116,11 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::Refresh, _, cx| this.refresh(cx)))
             .on_action(cx.listener(|this, _: &actions::ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(
+                cx.listener(|this, _: &actions::TogglePowerSearch, window, cx| {
+                    this.toggle_power_search(window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &actions::ToggleSidebar, _, cx| this.toggle_sidebar(cx)),
             )
             .on_action(

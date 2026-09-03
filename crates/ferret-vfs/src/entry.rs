@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 /// What a directory entry is, as far as the file list needs to care.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EntryKind {
     File,
     Dir,
@@ -20,7 +20,7 @@ pub enum EntryKind {
     Other,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymlinkTarget {
     File,
     Dir,
@@ -53,7 +53,7 @@ impl EntryKind {
 /// times nobody displayed (A-34). Both come back from the same `stat` that is
 /// already being made, so re-adding one when a column wants it costs a line
 /// and no syscalls; carrying them until then cost 16 bytes a row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Metadata {
     pub len: u64,
     pub modified: Option<SystemTime>,

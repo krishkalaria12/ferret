@@ -1,0 +1,55 @@
+use ferret_vfs::VfsPath;
+
+pub type Result<T, E = SearchError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SearchError {
+    #[error("Ferret can't search without a filename or content query.")]
+    EmptyQuery,
+    #[error("Ferret can't search without at least one folder.")]
+    EmptyScope,
+    #[error(
+        "Ferret can't search for a filename longer than {max_bytes} bytes (got {actual_bytes})."
+    )]
+    PatternTooLong {
+        max_bytes: usize,
+        actual_bytes: usize,
+    },
+    #[error("Ferret can't run a search whose result limit is zero.")]
+    ZeroResultLimit,
+    #[error("Ferret can't use {mode} filename matching yet; choose substring matching.")]
+    UnsupportedNameMode { mode: &'static str },
+    #[error(
+        "Ferret can't search for content with a pattern longer than {max_bytes} bytes (got {actual_bytes})."
+    )]
+    ContentPatternTooLong {
+        max_bytes: usize,
+        actual_bytes: usize,
+    },
+    #[error("Ferret couldn't compile the filename query {pattern:?}: {message}")]
+    InvalidNamePattern { pattern: String, message: String },
+    #[error("Ferret couldn't compile the content query {pattern:?}: {message}")]
+    InvalidContentPattern { pattern: String, message: String },
+    #[error("Ferret couldn't walk {path}: {message}")]
+    Walk { path: VfsPath, message: String },
+    #[error("Ferret couldn't open its search index at {path}: {message}")]
+    IndexOpen { path: VfsPath, message: String },
+    #[error("Ferret's search index couldn't answer that query: {message}")]
+    IndexQuery { message: String },
+    #[error("Ferret couldn't write to its search index: {message}")]
+    IndexWrite { message: String },
+    #[error(
+        "Ferret's search index is version {found} but this build understands {expected}; it will be rebuilt."
+    )]
+    IndexVersion { expected: u32, found: u32 },
+    #[error("Ferret couldn't start its search index helper at {path}: {message}")]
+    DaemonLaunch { path: VfsPath, message: String },
+    #[error("Ferret couldn't talk to its search index helper: {message}")]
+    DaemonTransport { message: String },
+    #[error(
+        "Ferret's search index helper speaks protocol {found}, but this build speaks {expected}."
+    )]
+    ProtocolMismatch { expected: u32, found: u32 },
+    #[error("Ferret's search index helper rejected the connection: {message}")]
+    DaemonRejected { message: String },
+}

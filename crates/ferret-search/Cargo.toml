@@ -1,0 +1,31 @@
+[package]
+name = "ferret-search"
+description = "Ferret's GPUI-free filename and content search service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-channel.workspace = true
+dirs.workspace = true
+ferret-vfs.workspace = true
+grep-matcher.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+interprocess.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+smol_str.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+smol.workspace = true

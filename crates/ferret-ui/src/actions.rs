@@ -46,6 +46,7 @@ actions!(
         ViewAsColumns,
         ViewAsIcons,
         ToggleTheme,
+        TogglePowerSearch,
         OpenInTerminal,
         AddToFavorites,
         FocusFilter,
