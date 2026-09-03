@@ -10,6 +10,7 @@ use grep_matcher::{Match, Matcher};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::{WalkBuilder, WalkState};
+use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 use smol_str::SmolStr;
 
@@ -240,7 +241,6 @@ fn run(
 
         let mut builder = WalkBuilder::new(local_root);
         builder
-            .threads(walker_threads.max(1))
             .hidden(!request.filters.include_hidden)
             .ignore(request.filters.respect_ignore)
             .git_ignore(request.filters.respect_ignore)
@@ -257,37 +257,35 @@ fn run(
 
         let entries_seen = AtomicU64::new(0);
         let skipped = AtomicU64::new(0);
-        // `ignore` owns traversal for search (D-34). Its callback factory
-        // gives each bounded worker a private Searcher, while the mutex below
-        // covers only result batching and counters—not filesystem I/O.
-        builder.build_parallel().run(|| {
-            let mut searcher = content_matcher.as_ref().map(|_| build_content_searcher());
-            let shared = &shared;
-            let stop = &stop;
-            let entries_seen = &entries_seen;
-            let skipped = &skipped;
-            let worker_cancelled = &worker_cancelled;
-            let worker_events = &worker_events;
-            let request = &request;
-            let name_matcher = &name_matcher;
-            let content_matcher = &content_matcher;
-            let context = WalkContext {
-                root: root.clone(),
-                request,
-                name_matcher: name_matcher.as_ref(),
-                content_matcher: content_matcher.as_ref(),
-                shared,
-                stop,
-                entries_seen,
-                skipped,
-            };
-            Box::new(move |walked| {
-                if stop_requested(stop, worker_cancelled, worker_events) {
-                    return WalkState::Quit;
-                }
-                context.process(walked, searcher.as_mut())
-            })
-        });
+        // `ignore` owns traversal and ignore-file interpretation (D-34), but
+        // its parallel walker creates a private thread group. Keep traversal
+        // serial and hand bounded batches to Ferret's one filesystem pool so
+        // concurrent searches share the repository-wide concurrency limit.
+        let context = WalkContext {
+            root: root.clone(),
+            request: &request,
+            name_matcher: name_matcher.as_ref(),
+            content_matcher: content_matcher.as_ref(),
+            shared: &shared,
+            stop: &stop,
+            entries_seen: &entries_seen,
+            skipped: &skipped,
+        };
+        let batch_capacity = walker_threads.max(1);
+        let mut batch = Vec::with_capacity(batch_capacity);
+        for walked in builder.build() {
+            if stop_requested(&stop, &worker_cancelled, &worker_events) {
+                break;
+            }
+            batch.push(walked);
+            if batch.len() == batch_capacity {
+                process_walk_batch(&context, std::mem::take(&mut batch));
+                batch = Vec::with_capacity(batch_capacity);
+            }
+        }
+        if !batch.is_empty() && !stop_requested(&stop, &worker_cancelled, &worker_events) {
+            process_walk_batch(&context, batch);
+        }
 
         let mut state = shared.lock().unwrap_or_else(|error| error.into_inner());
         state.stats.entries_seen += entries_seen.load(Ordering::Relaxed);
@@ -349,6 +347,27 @@ struct WalkContext<'a> {
     skipped: &'a AtomicU64,
 }
 
+fn process_walk_batch(
+    context: &WalkContext<'_>,
+    batch: Vec<std::result::Result<ignore::DirEntry, ignore::Error>>,
+) {
+    ferret_vfs::pool::install(|| {
+        batch.into_par_iter().for_each_init(
+            || {
+                context
+                    .content_matcher
+                    .as_ref()
+                    .map(|_| build_content_searcher())
+            },
+            |searcher, walked| {
+                if !context.stop.load(Ordering::Acquire) {
+                    let _ = context.process(walked, searcher.as_mut());
+                }
+            },
+        );
+    });
+}
+
 impl WalkContext<'_> {
     fn process(
         &self,
@@ -383,21 +402,25 @@ impl WalkContext<'_> {
             return WalkState::Continue;
         }
         let entry_path = entry.path().to_path_buf();
-        let Some(name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+        let Some(native_name) = entry_path.file_name() else {
             self.skipped.fetch_add(1, Ordering::Relaxed);
             return WalkState::Continue;
         };
+        // Local paths are platform units, not necessarily UTF-8. Matching and
+        // display need text, but the result path below must retain the native
+        // representation so opening a content match still addresses the file.
+        let name = native_name.to_string_lossy();
         let name_range = match self.name_matcher {
             Some(matcher) => {
-                let Some(range) = matcher.find(name) else {
+                let Some(range) = matcher.find(&name) else {
                     return WalkState::Continue;
                 };
                 Some(range)
             }
             None => None,
         };
-        let metadata = metadata_for(&entry_path, name);
-        let name = SmolStr::new(name);
+        let metadata = metadata_for(&entry_path, &name);
+        let name = SmolStr::new(name.as_ref());
         let path = VfsPath::from(entry_path.clone());
 
         if let Some(content_matcher) = self.content_matcher {

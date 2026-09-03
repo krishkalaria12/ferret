@@ -327,6 +327,31 @@ fn skips_binary_files_and_bounds_long_previews() {
     fs::remove_dir_all(root).ok();
 }
 
+// Linux filesystems accept arbitrary non-NUL filename bytes. macOS rejects
+// this fixture with EILSEQ before Ferret can search it.
+#[cfg(target_os = "linux")]
+#[test]
+fn content_search_preserves_non_utf8_local_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let root = tempdir("content-non-utf8");
+    let path = root.join(OsString::from_vec(b"native-\xff.txt".to_vec()));
+    fs::write(&path, b"find this needle\n").unwrap();
+
+    let events = collect(
+        &InProcessSearchService
+            .start(content_request(&root, "needle"))
+            .unwrap(),
+    );
+    let found = results(&events);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path.as_local(), Some(path.as_path()));
+    assert!(matches!(found[0].matched, SearchMatch::Content { .. }));
+
+    fs::remove_dir_all(root).ok();
+}
+
 #[test]
 #[ignore = "measurement; creates a temporary broad content-search corpus"]
 fn parallel_content_search_cost() {

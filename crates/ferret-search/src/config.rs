@@ -172,12 +172,12 @@ pub const DAEMON_CONNECT_RETRY: Duration = Duration::from_millis(25);
 /// the session and says so.
 pub const DAEMON_LAUNCH_ATTEMPTS: u32 = 3;
 
-/// Worker count for one live parallel search.
+/// Entries one live search submits to the shared filesystem pool per batch.
 ///
 /// Leave one logical CPU for GPUI and cap the fan-out because broad content
-/// search is usually storage-bound before it is CPU-bound. `ignore` owns both
-/// traversal and its worker threads, so this is a single bounded pool per
-/// active live query rather than an unbounded task per path.
+/// search is usually storage-bound before it is CPU-bound. `ignore` walks the
+/// tree serially for its ignore semantics; each bounded batch then runs on
+/// `ferret_vfs::pool`, so concurrent queries share the same global limit.
 pub fn live_search_threads() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)

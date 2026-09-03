@@ -25,9 +25,9 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(140);
 const DIALOG_WIDTH: f32 = 860.;
 const DIALOG_HEIGHT: f32 = 610.;
 const ROW_HEIGHT: f32 = 34.;
-/// Dialog padding plus its two one-pixel borders.
-const DIALOG_CHROME: f32 = 34.;
-const MIN_MARGIN_TOP: f32 = 24.;
+/// The dialog has no padding, but its one-pixel border sits outside the body.
+const DIALOG_BORDER: f32 = 2.;
+const MIN_MARGIN_VERTICAL: f32 = 24.;
 const MIN_MARGIN_HORIZONTAL: f32 = 16.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -333,8 +333,25 @@ impl PowerSearch {
     }
 }
 
-fn dialog_width(viewport_width: f32) -> f32 {
-    DIALOG_WIDTH.min((viewport_width - MIN_MARGIN_HORIZONTAL * 2.).max(0.))
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DialogGeometry {
+    body_width: f32,
+    body_height: f32,
+    margin_top: f32,
+}
+
+fn dialog_geometry(viewport_width: f32, viewport_height: f32) -> DialogGeometry {
+    let body_width =
+        DIALOG_WIDTH.min((viewport_width - MIN_MARGIN_HORIZONTAL * 2. - DIALOG_BORDER).max(0.));
+    let body_height =
+        DIALOG_HEIGHT.min((viewport_height - MIN_MARGIN_VERTICAL * 2. - DIALOG_BORDER).max(0.));
+    let margin_top = ((viewport_height - body_height - DIALOG_BORDER) / 2.).max(0.);
+
+    DialogGeometry {
+        body_width,
+        body_height,
+        margin_top,
+    }
 }
 
 impl Render for PowerSearch {
@@ -425,7 +442,9 @@ impl Render for PowerSearch {
 
         v_flex()
             .w_full()
-            .h(px(DIALOG_HEIGHT))
+            .h_full()
+            .min_h_0()
+            .overflow_hidden()
             .text_size(px(13.))
             .child(
                 h_flex()
@@ -693,19 +712,23 @@ impl Browser {
         window.focus(&focus, cx);
         window.open_dialog(cx, move |dialog, window, _cx| {
             let viewport = window.viewport_size();
-            let top = ((f32::from(viewport.height) - (DIALOG_HEIGHT + DIALOG_CHROME)) / 2.)
-                .max(MIN_MARGIN_TOP);
-            let width = dialog_width(f32::from(viewport.width));
+            let geometry = dialog_geometry(f32::from(viewport.width), f32::from(viewport.height));
             let search_on_close = search.clone();
             dialog
-                .w(px(width))
-                .margin_top(px(top))
+                .w(px(geometry.body_width))
+                .margin_top(px(geometry.margin_top))
                 .p_0()
                 .close_button(false)
                 .on_close(move |_, _, cx| {
                     search_on_close.update(cx, |search, cx| search.cancel_search(cx));
                 })
-                .child(search.clone())
+                .child(
+                    div()
+                        .h(px(geometry.body_height))
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(search.clone()),
+                )
         });
         cx.notify();
     }
@@ -716,8 +739,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dialog_width_preserves_horizontal_margins_in_narrow_windows() {
-        assert_eq!(dialog_width(760.), 728.);
-        assert_eq!(dialog_width(1180.), DIALOG_WIDTH);
+    fn dialog_geometry_fits_inside_minimum_window() {
+        let geometry = dialog_geometry(760., 480.);
+
+        assert_eq!(geometry.body_width, 726.);
+        assert_eq!(geometry.body_height, 430.);
+        assert_eq!(geometry.margin_top, MIN_MARGIN_VERTICAL);
+        assert!(geometry.body_width + DIALOG_BORDER + MIN_MARGIN_HORIZONTAL * 2. <= 760.);
+        assert!(geometry.body_height + DIALOG_BORDER + MIN_MARGIN_VERTICAL * 2. <= 480.);
+    }
+
+    #[test]
+    fn dialog_geometry_retains_preferred_size_in_large_windows() {
+        let geometry = dialog_geometry(1180., 760.);
+
+        assert_eq!(geometry.body_width, DIALOG_WIDTH);
+        assert_eq!(geometry.body_height, DIALOG_HEIGHT);
+        assert_eq!(geometry.margin_top, 74.);
     }
 }
