@@ -92,6 +92,14 @@ fn bind_keys(cx: &mut App) {
         // Refresh. Ctrl-R is reverse history search in a shell.
         KeyBinding::new("cmd-r", browser_actions::Refresh, None),
         KeyBinding::new("f5", browser_actions::Refresh, None),
+        // Power Search. Cmd/Ctrl-Shift-F mirrors editors without stealing the
+        // file pane's lightweight in-folder filter.
+        KeyBinding::new("cmd-shift-f", browser_actions::TogglePowerSearch, None),
+        KeyBinding::new(
+            "ctrl-shift-f",
+            browser_actions::TogglePowerSearch,
+            OUTSIDE_TERMINAL,
+        ),
         // Hidden files.
         // The action was declared and handled but never bound, so the sidebar
         // could only be toggled from the toolbar button.

@@ -129,6 +129,13 @@ base shippable.
 │   │   ├── src/discover.rs # rev-parse --show-cdup --absolute-git-dir
 │   │   ├── src/status.rs   # porcelain v2 parser + the per-path status index
 │   │   └── src/ops.rs      # status, stage_all, commit, pull, push
+│   ├── ferret-search/    # Filename and content search (GPUI-free)
+│   │   ├── src/live.rs   # The always-available filesystem walk
+│   │   ├── src/index/    # SQLite path index + Tantivy content index
+│   │   ├── src/ipc/       # Versioned local protocol, client and server
+│   │   ├── src/merge.rs  # Planner: indexed, live, or both deduplicated
+│   │   └── src/service.rs # What Ferret holds: supervised daemon + fallback
+│   ├── ferret-searchd/   # The per-user search index daemon (bin `ferret-searchd`)
 │   ├── ferret-settings/  # Settings schema and per-folder view preferences
 │   │   ├── src/schema.rs # The settings file's shape (D-21)
 │   │   ├── src/folder_prefs.rs  # Per-folder views, bounded LRU (D-16)
@@ -155,6 +162,8 @@ base shippable.
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
 | `crates/ferret-git` | `ferret-git` | Repository discovery, `git status` parsing and the four operations the status bar offers. Reaches git through the **git binary** (D-04), so the user's credential helper, SSH agent, hooks and config all keep working. Knows nothing about GPUI. See `docs/git.html`. |
+| `crates/ferret-search` | `ferret-search` | Filename and content search: the live walk, the persistent index, the local protocol, and the planner that merges them. GPUI-free. |
+| `crates/ferret-searchd` | `ferret-searchd` | The unprivileged per-user daemon that owns the index's lifecycle. Optional at runtime — Ferret searches live without it. |
 | `crates/ferret-settings` | `ferret-settings` | The settings schema and per-folder view preferences. Knows nothing about GPUI or the filesystem layer. Every key it ships is read by something, and a test enforces that (D-41). |
 | `crates/ferret-vfs` | `ferret-vfs` | The `Vfs` trait, the local backend, path handling. Knows nothing about GPUI. |
 | `xtask` | `xtask` | Development tasks: the performance fixture and the listing benchmark. |
@@ -210,6 +219,7 @@ Windows.
 | `just test` | Run workspace tests. | When behavior changes or tests are added. |
 | `cargo xtask fixture` | Build the performance fixture. | Once, before benchmarking or testing the file pane. |
 | `cargo xtask bench` | Measure listing performance against budget — time to first row, to a full listing, and to one where every row can draw its size and date. | After touching `ferret-vfs` or the file pane. Exits non-zero past budget. |
+| `cargo test -p ferret-searchd` | The end-to-end search daemon test: real socket, real launch, real crawl. | After touching `ferret-search`'s `ipc/` or `index/`. |
 | `just budget` | Assert the allocations-per-frame budget (`docs/audit.html` §10) with dhat. Runs alone; installs a global allocator. | After touching anything a `Render` impl or a table delegate calls, or the selection. |
 | `cargo run --release --features profile` | Frame, layout and paint spans in the Tracy profiler, through GPUI's own instrumentation. | When a stall needs locating rather than guessing at. |
 

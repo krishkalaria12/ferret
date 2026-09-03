@@ -1114,9 +1114,11 @@ footer {
       <p>A modal search panel over the window. Filename field with All / Files / Folders
       toggles, an extension filter, and a case-sensitivity toggle. Results table shows Name,
       Location and Kind, with a live count.</p>
-      <p><em>Behaviour:</em> no index, no background daemon — results stream as the walk
-      proceeds, exactly as Iruka does it. Respects <code>.gitignore</code> optionally.
-      Cancels immediately when the query changes.</p>
+      <p><em>Behaviour:</em> a supervised per-user daemon maintains a persistent path and
+      content index; a live filesystem walk remains the fallback for unindexed, stale and
+      arbitrary-regex searches. Results stream from either source, respect
+      <code>.gitignore</code> optionally, and cancel immediately when the query changes.
+      See the detailed <a href="power-search-plan.html">Power Search plan</a>.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-search</code></dd>
         <dt>Components</dt><dd><code>dialog</code>, <code>table</code>, <code>input</code></dd>

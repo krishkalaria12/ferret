@@ -1,8 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ferret", "crates/ferret-git",
+    "crates/ferret",
+    "crates/ferret-git",
     "crates/ferret-platform",
+    "crates/ferret-search",
+    "crates/ferret-searchd",
     "crates/ferret-settings",
     "crates/ferret-terminal",
     "crates/ferret-ui",
@@ -56,6 +59,8 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 
 ferret-git = { path = "crates/ferret-git" }
 ferret-platform = { path = "crates/ferret-platform" }
+ferret-search = { path = "crates/ferret-search" }
+ferret-searchd = { path = "crates/ferret-searchd" }
 ferret-ui = { path = "crates/ferret-ui" }
 ferret-settings = { path = "crates/ferret-settings" }
 ferret-terminal = { path = "crates/ferret-terminal" }
@@ -109,6 +114,34 @@ jwalk = "0.9"
 # timeout with nothing to return. `std` can put the child in its own process
 # group but gives no way to signal one.
 libc = "0.2"
+# D-34 / F-40. Search needs ignore-file semantics, which bulk-operation walker
+# `jwalk` deliberately does not provide. The first live-search engine uses the
+# serial iterator on Ferret's shared worker pool; no second implicit pool.
+ignore = "0.4"
+# F-41. Live content search uses ripgrep's matcher/searcher pair for binary
+# detection, encodings, line accounting, and regex/literal semantics. Ferret
+# still owns traversal and cancellation; these crates own bytes-to-matches.
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+# PS-2. The persistent path index: canonical path identity, fingerprints,
+# crawl state, indexed roots, and FTS5 trigram substring lookup over names and
+# paths. `bundled` on purpose — the trigram tokenizer needs SQLite 3.34+, and
+# macOS ships an older library than that, so linking the system one would make
+# the index silently unavailable on the platform Ferret targets first.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# PS-5. The persistent content index. Tantivy owns tokenisation, the inverted
+# index and BM25 ranking; it deliberately does *not* own snippets here —
+# `grep-searcher` re-reads the small set of top-ranked files to produce the
+# same line/column/preview shape the live path emits, so an indexed row and a
+# live row are indistinguishable to the UI and dedup by construction.
+tantivy = "0.26"
+# PS-1. One local-socket abstraction over a Unix-domain socket on macOS and a
+# named pipe on Windows, with the same blocking stream API on both. The
+# alternative is two hand-written transports, one of which (Windows overlapped
+# I/O against `CreateNamedPipe`) is the kind of code that is wrong in ways only
+# a customer finds. No TCP listener is ever created.
+interprocess = "2"
 notify = "7"
 portable-pty = "=0.9.0"
 # Not for speed first: `std`'s poisoning was doing active harm. Every lock in
@@ -120,6 +153,10 @@ parking_lot = "0.12"
 # A-12. Sorting 200,000 rows on a header click is embarrassingly parallel, and
 # is safe to parallelise only now that the comparator no longer allocates.
 rayon = "1"
+# F-40. One compiled Unicode-aware literal matcher per query. This avoids
+# allocating a lowercased filename for every visited path while preserving
+# explicit case-sensitive, insensitive and smart-case behavior.
+regex = "1"
 rust-embed = "8"
 # Bounded collections that never reach the heap: at most four table columns,
 # at most two of them hideable.
@@ -130,7 +167,11 @@ smol = "2"
 # allocation and an atomic. `gpui::SharedString` is a newtype over this same
 # type, so the render boundary converts for free; `ferret-vfs` takes the leaf
 # crate directly rather than a GPUI dependency it is documented not to have.
-smol_str = "0.3"
+#
+# `serde` is on because search's local IPC carries entry names across a process
+# boundary (PS-1); `SmolStr`'s own impl keeps the short-string representation
+# instead of round-tripping through `String`.
+smol_str = { version = "0.3", features = ["serde"] }
 thiserror = "2"
 trash = "5"
 

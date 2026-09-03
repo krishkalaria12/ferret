@@ -1,16 +1,23 @@
 default: dev
 
 # Run the app in debug mode.
+#
+# `ferret-searchd` is built first because Ferret launches it from beside its own
+# binary. Without it search still works — it falls back to walking the disk —
+# but nothing exercises the index, which is the opposite of what a dev run is
+# for.
 dev:
+    cargo build -p ferret-searchd
     cargo run -p ferret
 
 # Run the optimized release build.
 run:
+    cargo build --release -p ferret-searchd
     cargo run --release -p ferret
 
-# Build the release binary.
+# Build the release binaries. Both ship: Ferret expects the helper beside it.
 build:
-    cargo build --release -p ferret
+    cargo build --release -p ferret -p ferret-searchd
 
 # Type-check the whole workspace.
 check:

@@ -57,6 +57,7 @@ mod git;
 mod git_bar;
 mod mutations;
 mod path_bar;
+mod power_search;
 mod render;
 mod sidebar;
 mod tab_strip;
@@ -214,7 +215,9 @@ pub struct Browser {
 
     /// `Some` while the path bar renders an editable input.
     path_editing: Option<PathEdit>,
-
+    /// Reused across opens so inputs and result state are owned by an entity,
+    /// never rebuilt by `Dialog`'s per-frame builder.
+    power_search: Option<Entity<power_search::PowerSearch>>,
     /// The inline name filter, always mounted at the right of the path bar.
     filter_input: Entity<InputState>,
     /// Held so the filter input keeps notifying the folder.
@@ -366,6 +369,7 @@ impl Browser {
             tab_lefts: Arc::new(Mutex::new(Vec::new())),
             clipboard: None,
             path_editing: None,
+            power_search: None,
             filter_input,
             _filter_subscription: filter_subscription,
             volumes: Vec::new(),

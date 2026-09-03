@@ -1,0 +1,17 @@
+[package]
+name = "ferret-searchd"
+description = "Ferret's per-user search index daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ferret-searchd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+ferret-search.workspace = true
+ferret-vfs.workspace = true

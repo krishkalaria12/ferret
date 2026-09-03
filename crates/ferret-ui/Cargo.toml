@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ferret-git.workspace = true
 ferret-platform.workspace = true
+ferret-search.workspace = true
 ferret-settings.workspace = true
 ferret-terminal.workspace = true
 ferret-vfs.workspace = true
