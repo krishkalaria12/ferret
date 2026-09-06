@@ -256,14 +256,18 @@ async fn mount(
     };
 
     let session = std::sync::Arc::new(session);
-    let backend: std::sync::Arc<dyn ferret_vfs::Vfs> = std::sync::Arc::new(sftp);
+    // One backend, two handles: the router routes through the trait object,
+    // and transfers need the concrete type for handles and offsets the trait
+    // has no shape for. Both point at the same session.
+    let backend = std::sync::Arc::new(sftp);
+    let routed: std::sync::Arc<dyn ferret_vfs::Vfs> = backend.clone();
     let landed = landing.clone();
     cx.update(move |cx| {
         let state = cx.global_mut::<FerretState>();
         // Registered with the router *before* the mount is marked connected,
         // so nothing can navigate to a path the router would refuse.
-        state.fs.mount(record.mount, backend);
-        state.mounts.finish(&record.id, session, landed);
+        state.fs.mount(record.mount, routed);
+        state.mounts.finish(&record.id, session, backend, landed);
     });
 
     Ok(landing)

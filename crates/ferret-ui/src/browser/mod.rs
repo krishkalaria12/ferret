@@ -62,6 +62,7 @@ mod mutations;
 mod path_bar;
 mod power_search;
 mod render;
+mod send_to;
 mod sidebar;
 mod tab_strip;
 mod tabs;
@@ -253,6 +254,13 @@ pub struct Browser {
     /// Reused while opening and editing saved SSH endpoints. Input state must
     /// live in an entity because a dialog builder runs again every frame.
     connection_dialog: Option<Entity<ConnectionDialog>>,
+    /// The running transfer, drawn in the status bar. One at a time: the
+    /// interim queue exists so browsing continues during a copy, not so
+    /// several copies can compete for one link.
+    transfer: Option<send_to::TransferProgress>,
+    /// Pumps that transfer's events. Held here so it lives as long as the
+    /// window and dies with it — a transfer nobody can see should not run on.
+    transfer_task: Option<gpui::Task<()>>,
     /// Re-reads git status when the window comes back to the front. Held here
     /// so it lasts as long as the window does; see
     /// [`Browser::observe_git_activation`] for why the feature needs it.
@@ -385,6 +393,8 @@ impl Browser {
             git: GitPanel::new(),
             commit_dialog: None,
             connection_dialog: None,
+            transfer: None,
+            transfer_task: None,
             _git_activation: Self::observe_git_activation(window, cx),
         };
         this.push_tab(start_directory(), window, cx);

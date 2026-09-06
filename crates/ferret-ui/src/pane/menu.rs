@@ -45,6 +45,7 @@ impl FilePane {
         cx: &mut Context<Self>,
     ) {
         let focus = gpui::Focusable::focus_handle(self.table.read(cx), cx);
+        let servers = send_to_targets(cx);
         let (key, order, show_hidden, selected, trashable) = self.folder.read_with(cx, |f, _| {
             (
                 f.sort_key(),
@@ -59,7 +60,7 @@ impl FilePane {
             use gpui_component::menu::PopupMenuItem;
             let menu = menu.action_context(focus);
             let menu = if target.is_some() {
-                entry_menu_items(menu, selected, trashable).separator()
+                entry_menu_items(menu, selected, trashable, servers.clone()).separator()
             } else {
                 menu
             };
@@ -178,7 +179,16 @@ impl FilePane {
 /// `trashable` is false on a mount: a server has no trash, so offering to move
 /// something there would be offering an action that cannot happen. The
 /// permanent entry is what remains, and it confirms every time.
-pub(super) fn entry_menu_items(menu: PopupMenu, selected: usize, trashable: bool) -> PopupMenu {
+///
+/// `servers` are the saved connections a local selection can be sent to, as
+/// `(label, id)` pairs. Passed in rather than read from the global here so
+/// this stays a pure builder that a test can call.
+pub(super) fn entry_menu_items(
+    menu: PopupMenu,
+    selected: usize,
+    trashable: bool,
+    servers: Vec<(String, String)>,
+) -> PopupMenu {
     let multiple = selected > 1;
     let count = selected.min(999);
 
@@ -202,6 +212,27 @@ pub(super) fn entry_menu_items(menu: PopupMenu, selected: usize, trashable: bool
         menu.item(PopupMenuItem::new("Rename…").action(Box::new(actions::Rename)))
     };
 
+    // "Send to" (F-22), offered only for local files: a server-to-server copy
+    // would have to relay through this machine, which is a different
+    // performance story and belongs with dual pane (F-05).
+    //
+    // Flat items rather than a submenu, because `PopupMenu::submenu` needs a
+    // `Context<PopupMenu>` and the list view builds its row menu from the
+    // table's own context. One level that works in both places beats two
+    // levels in one of them.
+    let menu = if trashable && !servers.is_empty() {
+        let mut menu = menu.separator();
+        for (label, id) in servers {
+            menu = menu.item(
+                PopupMenuItem::new(format!("Send to {label}"))
+                    .action(Box::new(actions::SendToConnection { id })),
+            );
+        }
+        menu.separator()
+    } else {
+        menu
+    };
+
     let menu = if trashable {
         menu.item(
             PopupMenuItem::new(if multiple {
@@ -217,4 +248,17 @@ pub(super) fn entry_menu_items(menu: PopupMenu, selected: usize, trashable: bool
     menu.item(
         PopupMenuItem::new("Delete Permanently…").action(Box::new(actions::DeletePermanently)),
     )
+}
+
+/// The saved connections a "Send to" item can name.
+///
+/// Read from the global here because the menu is built inside a closure that
+/// has an `App` and no view to ask.
+pub(super) fn send_to_targets(cx: &App) -> Vec<(String, String)> {
+    cx.global::<crate::state::FerretState>()
+        .connections
+        .connections()
+        .iter()
+        .map(|connection| (connection.display_name(), connection.id.0.clone()))
+        .collect()
 }

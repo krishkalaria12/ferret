@@ -331,7 +331,9 @@ impl Browser {
         let this = cx.weak_entity();
         let clicked = connection.clone();
         let menu_record = connection.clone();
+        let dropped_on = connection.clone();
         let connected = status.is_connected();
+        let drop_tint = selected.opacity(0.5);
         let row = h_flex()
             .id(id.into())
             .w_full()
@@ -344,6 +346,23 @@ impl Browser {
             .when(active, |el| el.bg(selected))
             .when(!active, |el| el.hover(|el| el.bg(theme.secondary)))
             .when(status.is_busy(), |el| el.opacity(0.7))
+            // "Drag to transfer": the same gesture that moves files between
+            // local folders sends them to a server, with the destination
+            // already answered by which row was hit.
+            .drag_over::<crate::pane::DraggedPaths>(move |style, _, _, _| style.bg(drop_tint))
+            .on_drop({
+                let this = this.clone();
+                move |dragged: &crate::pane::DraggedPaths, window, cx| {
+                    let Some(browser) = this.upgrade() else {
+                        return;
+                    };
+                    let sources = dragged.paths.to_vec();
+                    let record = dropped_on.clone();
+                    browser.update(cx, |browser, cx| {
+                        browser.send_to_connection(record, sources, window, cx);
+                    });
+                }
+            })
             .child(
                 Icon::new(gpui_component::IconName::Globe)
                     .with_size(px(super::SIDEBAR_ICON_SIZE))

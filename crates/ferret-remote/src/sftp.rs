@@ -57,6 +57,24 @@ impl SftpVfs {
         self.mount
     }
 
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The protocol session, for the transfer engine.
+    ///
+    /// `pub(crate)` on purpose: transfers need raw handles and offsets, which
+    /// the `Vfs` trait has no shape for, but nothing outside this crate may
+    /// hold an SFTP handle.
+    pub(crate) fn raw_session(&self) -> Arc<RawSftpSession> {
+        self.raw.clone()
+    }
+
+    /// Whether something is at `path`, for the conflict scan.
+    pub(crate) async fn remote_exists(&self, path: &str) -> bool {
+        self.raw.lstat(path.to_string()).await.is_ok()
+    }
+
     /// Resolve the login account's home directory for the mount's first path.
     pub async fn home(&self) -> ferret_vfs::Result<VfsPath> {
         let raw = self.raw.clone();
@@ -498,6 +516,44 @@ fn valid_name(name: &str) -> bool {
         && !name.as_bytes().contains(&0)
 }
 
+/// Whether a server-supplied name may be joined onto a **local** path.
+///
+/// Stricter than [`valid_name`], and it has to be: a name is about to become a
+/// file on the user's own disk, so this is where a hostile or broken server is
+/// stopped from writing outside the directory the user chose. Windows rules
+/// apply on both platforms, because a name that is fine on macOS and creates a
+/// device file on Windows is still a name Ferret should not write.
+pub(crate) fn safe_local_name(name: &str) -> std::result::Result<(), &'static str> {
+    if !valid_name(name) {
+        return Err("not a usable file name");
+    }
+    if name.contains('\\') {
+        return Err("contains a path separator");
+    }
+    // `CON`, `NUL`, `COM1` and friends are devices on Windows whatever the
+    // extension, and a file named after one cannot be created or removed.
+    const RESERVED: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return Err("is a reserved device name on Windows");
+    }
+    // Windows silently strips these, so `report.` and `report` become the same
+    // file — which is how one download quietly overwrites another.
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("ends with a dot or a space");
+    }
+    if name
+        .chars()
+        .any(|c| matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err("contains a character Windows cannot store");
+    }
+    Ok(())
+}
+
 fn invalid_path(path: &VfsPath, message: &'static str) -> VfsError {
     VfsError::Io {
         action: "use remote path",
@@ -625,6 +681,34 @@ mod tests {
             payload,
             vec![0, 0, 0, 2, b'/', b'a', 0, 0, 0, 3, b'/', b'b', b'b']
         );
+    }
+
+    /// The check standing between a hostile server and the user's disk. Every
+    /// case here is a real technique for escaping a download directory.
+    #[test]
+    fn a_name_that_could_escape_a_download_directory_is_refused() {
+        assert!(safe_local_name("report.txt").is_ok());
+        assert!(safe_local_name(".hidden").is_ok());
+
+        for hostile in [
+            "..",               // the parent directory
+            "../../etc/passwd", // traversal
+            "sub/file",         // a separator that would create a path
+            "sub\\file",        // the Windows separator, refused on both
+            "",                 // no name at all
+            "bad\0name",        // truncates in a C API
+            "CON",              // a Windows device, whatever the platform
+            "com1.txt",         // still a device with an extension
+            "report.",          // Windows strips the dot, colliding names
+            "report ",          // and the trailing space
+            "a:b",              // an alternate data stream on NTFS
+            "what?",            // wildcards Windows cannot store
+        ] {
+            assert!(
+                safe_local_name(hostile).is_err(),
+                "{hostile:?} must not become a local file name"
+            );
+        }
     }
 
     #[test]

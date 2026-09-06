@@ -16,6 +16,7 @@ mod session;
 mod sftp;
 mod ssh_config;
 mod store;
+mod transfer;
 
 pub use errors::{PromptKind, RemoteError, Result};
 pub use host_keys::{
@@ -31,3 +32,6 @@ pub use secrets::{
 pub use session::{Credentials, HostKeyPolicy, Session, connect, connect_with_known_hosts};
 pub use sftp::SftpVfs;
 pub use store::{ConnectionStore, connections_path, write_store};
+pub use transfer::{
+    Conflict, Direction, Transfer, TransferDestination, TransferEvent, TransferSource,
+};

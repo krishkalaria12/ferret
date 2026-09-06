@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ferret_remote::{Connection, ConnectionId, Session};
+use ferret_remote::{Connection, ConnectionId, Session, SftpVfs};
 use ferret_vfs::{MountId, VfsPath};
 use gpui::SharedString;
 
@@ -52,6 +52,23 @@ struct Mount {
     /// The live connection. Dropping this closes the SSH session, so it stays
     /// here until the user disconnects or the application quits.
     session: Option<Arc<Session>>,
+    /// The same backend the router holds, but concretely.
+    ///
+    /// The router's `Arc<dyn Vfs>` is the right shape for listing and
+    /// mutation and the wrong one for a transfer, which needs handles and
+    /// offsets the trait deliberately has no room for.
+    backend: Option<Arc<SftpVfs>>,
+}
+
+impl Mount {
+    fn idle() -> Self {
+        Self {
+            status: MountStatus::Idle,
+            home: None,
+            session: None,
+            backend: None,
+        }
+    }
 }
 
 /// Every connection's live state, keyed by record id.
@@ -88,37 +105,45 @@ impl Mounts {
         self.by_id.values().any(|mount| mount.status.is_connected())
     }
 
+    /// The backend a transfer needs, or `None` when nothing is mounted.
+    pub fn backend(&self, id: &ConnectionId) -> Option<Arc<SftpVfs>> {
+        self.by_id
+            .get(id)
+            .filter(|mount| mount.status.is_connected())
+            .and_then(|mount| mount.backend.clone())
+    }
+
     pub(crate) fn begin(&mut self, id: &ConnectionId) {
-        let mount = self.by_id.entry(id.clone()).or_insert_with(|| Mount {
-            status: MountStatus::Idle,
-            home: None,
-            session: None,
-        });
+        let mount = self.by_id.entry(id.clone()).or_insert_with(Mount::idle);
         mount.status = MountStatus::Connecting;
     }
 
-    pub(crate) fn finish(&mut self, id: &ConnectionId, session: Arc<Session>, home: VfsPath) {
+    pub(crate) fn finish(
+        &mut self,
+        id: &ConnectionId,
+        session: Arc<Session>,
+        backend: Arc<SftpVfs>,
+        home: VfsPath,
+    ) {
         self.by_id.insert(
             id.clone(),
             Mount {
                 status: MountStatus::Connected,
                 home: Some(home),
                 session: Some(session),
+                backend: Some(backend),
             },
         );
     }
 
     pub(crate) fn fail(&mut self, id: &ConnectionId, reason: impl Into<SharedString>) {
-        let mount = self.by_id.entry(id.clone()).or_insert_with(|| Mount {
-            status: MountStatus::Idle,
-            home: None,
-            session: None,
-        });
+        let mount = self.by_id.entry(id.clone()).or_insert_with(Mount::idle);
         mount.status = MountStatus::Failed(reason.into());
         mount.home = None;
         // Dropping the session closes the connection, which is what a failure
         // means: there is nothing left to reuse.
         mount.session = None;
+        mount.backend = None;
     }
 
     /// Forget a mount, returning its session so the caller can close it
