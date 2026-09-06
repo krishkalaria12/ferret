@@ -344,7 +344,15 @@ async fn dial(
 
     for _ in 0..=MAX_PROMPTS {
         match ferret_remote::connect(record.clone(), credentials.clone(), policy.clone()).await {
-            Ok(session) => return mount(record, session, as_root, cx).await.map(Some),
+            Ok(session) => {
+                return match mount(record, session, as_root, cx).await {
+                    Ok(landing) => Ok(Some(landing)),
+                    // The record went away mid-dial. Not a failure to report:
+                    // the row it would have gone red on no longer exists.
+                    Err(RemoteError::Cancelled) => Ok(None),
+                    Err(error) => Err(error),
+                };
+            }
 
             // The one question a person can answer about identity. Accepting
             // writes the key to known_hosts; declining ends the attempt.
@@ -449,15 +457,31 @@ async fn mount(
     let backend = std::sync::Arc::new(sftp);
     let routed: std::sync::Arc<dyn ferret_vfs::Vfs> = backend.clone();
     let landed = landing.clone();
-    cx.update(move |cx| {
+
+    // A dial takes seconds, and the record can be deleted or the attempt
+    // abandoned while it runs. Installing a backend for a connection the
+    // sidebar no longer shows would leave a mount nobody can reach the
+    // disconnect for, so the attempt has to still be the current one.
+    let installed = cx.update(move |cx| {
         let state = cx.global_mut::<FerretState>();
+        let still_current = state.connections.get(&record.id).is_some()
+            && state.mounts.status(&record.id).is_busy();
+        if !still_current {
+            return false;
+        }
         // Registered with the router *before* the mount is marked connected,
         // so nothing can navigate to a path the router would refuse.
         state.fs.mount(record.mount, routed);
         state
             .mounts
             .finish(&record.id, session, backend, landed, as_root);
+        true
     });
+    if !installed {
+        // Dropping the session here is what closes the connection that was
+        // opened for a record that is now gone.
+        return Err(RemoteError::Cancelled);
+    }
 
     Ok(landing)
 }
