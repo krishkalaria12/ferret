@@ -691,13 +691,36 @@ async fn download_one(
     })?;
     drop(sink);
 
-    std::fs::rename(&part, &file.local).map_err(|error| {
+    replace_file(&part, &file.local).map_err(|error| {
         let _ = std::fs::remove_file(&part);
         RemoteError::Server {
             path: file.local.display().to_string(),
             message: error.to_string(),
         }
     })
+}
+
+/// Move a finished part file over its destination.
+///
+/// `std::fs::rename` replaces the destination on Unix and *fails* on Windows
+/// when one exists, so a plain rename would report every completed
+/// replace-download on Windows as a failure and then delete the part file,
+/// leaving the stale destination in place. Both platforms are supported, so
+/// both have to work.
+///
+/// The Windows path is a remove followed by a rename, which is not atomic —
+/// that is the platform's limitation rather than a choice, and the window is
+/// between two local metadata operations rather than around the transfer.
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        match std::fs::remove_file(to) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    std::fs::rename(from, to)
 }
 
 /// Read until the buffer is full or the file ends.
