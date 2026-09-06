@@ -4,6 +4,14 @@
 //! is one nobody can safely change. Numbers here are stated against an 80 ms
 //! round trip, because that is what a server across a country feels like and
 //! it is the condition these were chosen for.
+//!
+//! **Every constant here is read by something**, and that is enforced by
+//! removing the ones that are not. Five more were written for behaviour this
+//! phase did not ship — a reconnect delay, a per-mount transfer concurrency,
+//! and the three that would govern an attribute and listing cache. Keeping
+//! them would have made this file documentation that lies, which is the
+//! failure D-41 exists to prevent. They come back with the code that reads
+//! them.
 
 use std::time::Duration;
 
@@ -37,13 +45,6 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// listing. Three missed intervals is a dead session.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How long to wait before the one automatic reconnect attempt.
-///
-/// One attempt, not a retry loop: if a server is down, hammering it helps
-/// nobody, and the banner offering Reconnect is a better answer than a spinner
-/// that never resolves.
-pub const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-
 /// Directory entries in one batch handed to the UI.
 ///
 /// One `SSH_FXP_NAME` response is one batch, so this is really a cap rather
@@ -70,34 +71,11 @@ pub const TRANSFER_CHUNK: usize = 32 * 1024;
 /// without buffering half a gigabyte in memory.
 pub const TRANSFER_WINDOW: usize = 16;
 
-/// Files transferred at once per mount.
-///
-/// Two, not more: extra streams do not make one link faster, and they do make
-/// the server's logs and the progress display worse.
-pub const TRANSFER_CONCURRENCY: usize = 2;
-
 /// Suffix for a partially written upload.
 ///
 /// A transfer writes here and renames into place on success, so a cancelled or
 /// failed upload can never leave a truncated file under the real name.
 pub const PART_SUFFIX: &str = ".ferret-part";
-
-/// How long a cached attribute stays trusted.
-///
-/// Short on purpose. The cache exists to stop the path bar and the column view
-/// re-stat-ing what the listing just delivered — not to pretend the server is
-/// local. Anything Ferret itself changes invalidates immediately regardless.
-pub const ATTR_CACHE_TTL: Duration = Duration::from_secs(5);
-
-/// Directory listings kept per mount for back/forward and column ancestors.
-pub const LISTING_CACHE_SIZE: usize = 16;
-
-/// Concurrent directory listings per mount.
-///
-/// Column view opens several directories at once, which over a high-latency
-/// link is several concurrent `opendir` sequences. Without this cap the mode
-/// is unusable at 150 ms RTT.
-pub const MAX_CONCURRENT_LISTINGS: usize = 3;
 
 /// Largest response Ferret will accept for a single read.
 ///
