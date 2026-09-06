@@ -193,10 +193,18 @@ pub struct Browser {
     /// The newest directory waiting to be injected, held until the shell can
     /// safely take it (§6). Only ever one: someone arrow-keying down a tree
     /// should produce one `cd`, not forty.
-    terminal_pending_sync: Option<PathBuf>,
+    ///
+    /// A `VfsPath` rather than a `PathBuf` because an SSH session follows the
+    /// mount it is logged in to, and a remote path is not a local one.
+    terminal_pending_sync: Option<VfsPath>,
     /// The last directory actually written, so a queue that catches up with
     /// where the shell already is writes nothing at all.
-    terminal_synced_to: Option<PathBuf>,
+    terminal_synced_to: Option<VfsPath>,
+    /// The mount an SSH session is logged in to, if this session is one.
+    ///
+    /// What decides whether a `cd` may be sent at all: a session on one server
+    /// must never be told to follow a path on another, or on local disk.
+    terminal_mount: Option<ferret_vfs::MountId>,
     /// Whether the user has typed something the injected line would complete.
     terminal_input_dirty: bool,
     /// When the terminal last saw a keystroke. A keystroke inside the idle
@@ -375,6 +383,7 @@ impl Browser {
             terminal_rows: 24,
             terminal_pending_sync: None,
             terminal_synced_to: None,
+            terminal_mount: None,
             terminal_input_dirty: false,
             terminal_last_key: None,
             terminal_poll: None,

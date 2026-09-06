@@ -85,6 +85,12 @@ impl Browser {
 
     pub(super) fn restart_terminal(&mut self, cx: &mut Context<Self>) {
         let dir = self.active().folder.read(cx).dir.clone();
+        // A remote folder gets a real `ssh` session that lands in it (F-13),
+        // rather than a local shell that has no way to reach it.
+        if let VfsPath::Remote { mount, .. } = &dir {
+            self.restart_ssh_terminal(*mount, dir.clone(), cx);
+            return;
+        }
         let Some(local) = dir.as_local() else {
             self.terminal_session = None;
             self.terminal_poll = None;
@@ -116,8 +122,106 @@ impl Browser {
                 }
                 self.terminal_session = Some(session);
                 self.terminal_generation = 0;
+                self.terminal_mount = None;
                 // The shell was spawned in this directory, so nothing is owed.
-                self.terminal_synced_to = Some(local.to_path_buf());
+                self.terminal_synced_to = Some(VfsPath::local(local.to_path_buf()));
+                self.start_terminal_poll(cx);
+            }
+            Err(error) => {
+                self.terminal_session = None;
+                self.terminal_poll = None;
+                self.terminal_error = Some(error.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Start a real `ssh` session that lands in the mounted folder (F-13).
+    ///
+    /// The interactive half deliberately shells out to the user's own `ssh`
+    /// (D-07), so jump hosts, `Match` blocks, hardware tokens and everything
+    /// else in their config work exactly as they do in their own terminal —
+    /// none of it is reimplemented here. Only browsing uses the in-process
+    /// client.
+    fn restart_ssh_terminal(
+        &mut self,
+        mount: ferret_vfs::MountId,
+        dir: VfsPath,
+        cx: &mut Context<Self>,
+    ) {
+        let state = cx.global::<FerretState>();
+        let Some(record) =
+            crate::mounts::connection_for_mount(state.connections.connections(), mount).cloned()
+        else {
+            self.terminal_error = Some("That server is no longer saved.".into());
+            self.terminal_session = None;
+            self.terminal_poll = None;
+            cx.notify();
+            return;
+        };
+
+        // Windows ships OpenSSH as an optional feature, so its absence is a
+        // real case rather than a theoretical one. Saying what to do about it
+        // beats spawning and reporting "No such file".
+        let Some(ssh) = ssh_program() else {
+            self.terminal_error = Some(
+                "Ferret couldn't find `ssh` on your PATH. On Windows, install the \
+                 OpenSSH Client optional feature."
+                    .into(),
+            );
+            self.terminal_session = None;
+            self.terminal_poll = None;
+            cx.notify();
+            return;
+        };
+
+        let settings = &state.settings.terminal;
+        let options = TerminalOptions {
+            shell: None,
+            term: settings.term.clone(),
+            scrollback_lines: settings.scrollback_lines,
+            backend: match settings.backend {
+                ferret_settings::TerminalBackend::Auto => TerminalBackend::Auto,
+                ferret_settings::TerminalBackend::Ghostty => TerminalBackend::Ghostty,
+                ferret_settings::TerminalBackend::Alacritty => TerminalBackend::Alacritty,
+            },
+        };
+
+        // The same arguments the connection dialog's copy button shows, plus
+        // the landing directory. `-t` forces a PTY so an interactive shell
+        // starts; if the `cd` fails the login shell still opens at home, which
+        // is far better than no session at all.
+        let mut args = record.ssh_args();
+        args.insert(0, "-t".into());
+        let remote_dir = match &dir {
+            VfsPath::Remote { path, .. } => path.to_string(),
+            VfsPath::Local(_) => "/".to_string(),
+        };
+        args.push(format!(
+            "cd -- '{}' 2>/dev/null; exec \"$SHELL\" -l",
+            remote_dir.replace('\'', "'\\''")
+        ));
+
+        let home = cx.global::<FerretState>().home_dir();
+        self.terminal_pending_sync = None;
+        self.terminal_input_dirty = false;
+        self.terminal_last_key = None;
+        match TerminalSession::spawn_command(&ssh, &args, &home, &options) {
+            Ok(session) => {
+                self.terminal_error = None;
+                if let Err(error) = session.resize(self.terminal_columns, self.terminal_rows, 0, 0)
+                {
+                    self.terminal_error = Some(error.to_string());
+                }
+                self.terminal_session = Some(session);
+                self.terminal_generation = 0;
+                self.terminal_mount = Some(mount);
+                self.terminal_synced_to = Some(dir);
+                // Sync starts off for a remote session (R-D09). Injecting a
+                // line into a shell that may be `su`-ed, inside an editor, or
+                // on a machine the user is being careful on deserves an
+                // explicit opt-in rather than a default.
+                self.terminal_sync = TerminalSyncState::Off;
                 self.start_terminal_poll(cx);
             }
             Err(error) => {
@@ -139,14 +243,23 @@ impl Browser {
         if !self.terminal_sync.is_enabled() || self.terminal_session.is_none() {
             return;
         }
-        let Some(local) = dir.as_local() else {
-            return;
+        // A session must only ever be told to follow the place it is logged
+        // in to. An SSH session on one server has no business receiving a
+        // local path, and a local shell has no way to reach a remote one.
+        let follows = match (&self.terminal_mount, dir) {
+            (None, VfsPath::Local(_)) => true,
+            (Some(session_mount), VfsPath::Remote { mount, .. }) => session_mount == mount,
+            _ => false,
         };
-        if self.terminal_synced_to.as_deref() == Some(local) {
+        if !follows {
             self.terminal_pending_sync = None;
             return;
         }
-        self.terminal_pending_sync = Some(local.to_path_buf());
+        if self.terminal_synced_to.as_ref() == Some(dir) {
+            self.terminal_pending_sync = None;
+            return;
+        }
+        self.terminal_pending_sync = Some(dir.clone());
         self.flush_terminal_sync(cx);
     }
 
@@ -182,7 +295,13 @@ impl Browser {
         if typing_recently || session.idle_for() < TERMINAL_SYNC_IDLE {
             return;
         }
-        match session.change_directory(&target) {
+        let written = match &target {
+            VfsPath::Local(path) => session.change_directory(path),
+            // Always the POSIX form: what is running on the other end is the
+            // remote login shell, which Ferret cannot classify.
+            VfsPath::Remote { path, .. } => session.change_remote_directory(path),
+        };
+        match written {
             Ok(()) => {
                 self.terminal_pending_sync = None;
                 self.terminal_synced_to = Some(target);
@@ -353,16 +472,32 @@ impl Browser {
                     .border_b_1()
                     .border_color(border.opacity(0.8))
                     .child(
-                        Icon::new(gpui_component::IconName::SquareTerminal)
-                            .size_4()
-                            .text_color(muted_foreground),
+                        // An SSH session is a different thing from a local
+                        // shell, and the header is the only place that can say
+                        // so before the user types something into the wrong
+                        // machine (F-13).
+                        Icon::new(if self.terminal_mount.is_some() {
+                            gpui_component::IconName::Globe
+                        } else {
+                            gpui_component::IconName::SquareTerminal
+                        })
+                        .size_4()
+                        .text_color(if self.terminal_mount.is_some() {
+                            cx.theme().primary
+                        } else {
+                            muted_foreground
+                        }),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(foreground)
-                            .child("Terminal"),
+                            .child(if self.terminal_mount.is_some() {
+                                "SSH"
+                            } else {
+                                "Terminal"
+                            }),
                     )
                     .child(
                         div()
@@ -897,5 +1032,40 @@ mod tests {
         assert!(!submits_or_clears_the_input_line(b"\x1b[D"));
         // A `\r` inside a longer sequence is not a submission.
         assert!(!submits_or_clears_the_input_line(b"rm \r"));
+    }
+}
+
+/// Where the system `ssh` binary is, if it is anywhere.
+///
+/// Looked up rather than assumed: on Windows the OpenSSH client is an optional
+/// feature that may not be installed, and the difference between "not
+/// installed" and "failed to start" is the difference between an actionable
+/// message and a mystery.
+fn ssh_program() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) { "ssh.exe" } else { "ssh" };
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(test)]
+mod ssh_tests {
+    #[test]
+    fn the_landing_command_quotes_a_directory_with_a_quote_in_it() {
+        // Built the same way `restart_ssh_terminal` builds it. A path
+        // containing a single quote would otherwise end the quoting and hand
+        // the rest to the remote shell as commands.
+        let remote_dir = "/srv/it's here";
+        let command = format!(
+            "cd -- '{}' 2>/dev/null; exec \"$SHELL\" -l",
+            remote_dir.replace('\'', "'\\''")
+        );
+        assert_eq!(
+            command,
+            "cd -- '/srv/it'\\''s here' 2>/dev/null; exec \"$SHELL\" -l"
+        );
+        // And the failure path still opens a shell rather than nothing.
+        assert!(command.contains("exec \"$SHELL\""));
     }
 }

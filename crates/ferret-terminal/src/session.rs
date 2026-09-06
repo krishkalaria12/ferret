@@ -30,7 +30,61 @@ pub struct TerminalSession {
 }
 
 impl TerminalSession {
+    /// Start a session running an explicit program instead of a login shell.
+    ///
+    /// This is what F-13 uses to run the user's own `ssh` (D-07): the PTY, the
+    /// engine, the reader thread and the snapshot machinery are identical, and
+    /// only the command differs. `cwd` is the *local* directory the process
+    /// starts in, which for an SSH session only matters for relative key paths.
+    ///
+    /// The shell dialect is reported as POSIX because that is what a remote
+    /// login shell is overwhelmingly likely to be, and it is the only dialect
+    /// whose `cd` is safe to send blind — see `shell::change_directory_command`.
+    pub fn spawn_command(
+        program: &Path,
+        args: &[String],
+        cwd: &Path,
+        options: &TerminalOptions,
+    ) -> Result<Self> {
+        let mut command = CommandBuilder::new(program);
+        for arg in args {
+            command.arg(arg);
+        }
+        command.cwd(cwd);
+        command.env("TERM", &options.term);
+        Self::spawn_with(
+            command,
+            program.to_path_buf(),
+            ShellKind::Posix,
+            cwd,
+            options,
+        )
+    }
+
     pub fn spawn(directory: &Path, options: &TerminalOptions) -> Result<Self> {
+        let shell = options.shell.clone().unwrap_or_else(default_shell);
+        let mut command = CommandBuilder::new(&shell);
+        command.cwd(directory);
+        command.env("TERM", &options.term);
+        #[cfg(not(windows))]
+        command.arg("-l");
+
+        let kind = ShellKind::detect(&shell);
+        Self::spawn_with(command, shell, kind, directory, options)
+    }
+
+    /// The half both spawns share: the PTY, the engine, the reader thread.
+    ///
+    /// Only the command and the reported dialect differ between a login shell
+    /// and an `ssh` process, so everything else lives here rather than in two
+    /// copies that could drift.
+    fn spawn_with(
+        command: CommandBuilder,
+        program: PathBuf,
+        shell_kind: ShellKind,
+        directory: &Path,
+        options: &TerminalOptions,
+    ) -> Result<Self> {
         let Engine {
             commands: engine,
             snapshot,
@@ -50,13 +104,7 @@ impl TerminalSession {
                 source: std::io::Error::other(source.to_string()),
             })?;
 
-        let shell = options.shell.clone().unwrap_or_else(default_shell);
-        let mut command = CommandBuilder::new(&shell);
-        command.cwd(directory);
-        command.env("TERM", &options.term);
-        #[cfg(not(windows))]
-        command.arg("-l");
-
+        let shell = program;
         let mut child =
             pair.slave
                 .spawn_command(command)
@@ -102,7 +150,7 @@ impl TerminalSession {
             snapshot,
             engine,
             backend,
-            shell_kind: ShellKind::detect(&shell),
+            shell_kind,
             last_output,
             writer,
             master: pair.master,
@@ -151,6 +199,16 @@ impl TerminalSession {
     pub fn change_directory(&self, directory: &Path) -> Result<()> {
         let command = change_directory_command(self.shell_kind, directory)?;
         self.write(command.as_bytes())
+    }
+
+    /// Inject a `cd` to a path on the other side of an SSH session.
+    ///
+    /// Always the POSIX form, never the dialect this session was told it has:
+    /// what is running is the *remote* shell, which Ferret has no way to
+    /// classify. Sending `Set-Location` to it because the local machine runs
+    /// PowerShell would be a guess with nothing behind it.
+    pub fn change_remote_directory(&self, directory: &str) -> Result<()> {
+        self.write(crate::shell::posix_change_directory(directory).as_bytes())
     }
 
     /// Write pasted text, wrapped in bracketed-paste markers when the program
