@@ -639,7 +639,7 @@ impl TableDelegate for ListDelegate {
         if folder.entry_at(row_ix).is_none() {
             return menu;
         }
-        entry_menu_items(menu, folder.selection_count())
+        entry_menu_items(menu, folder.selection_count(), folder.dir.is_local())
     }
 
     fn render_empty(

@@ -7,6 +7,17 @@
 
 use super::*;
 
+/// Why a delete is irreversible, which decides whether it may be skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermanentReason {
+    /// The user chose "Delete Permanently". Honours the settings toggle.
+    Asked,
+    /// The user chose Trash, but the items are on a server, which has none.
+    /// Always confirms: agreeing to skip confirmations for a *local*
+    /// permanent delete says nothing about this.
+    NoRemoteTrash,
+}
+
 impl Browser {
     pub(super) fn open_current_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.active().folder.read(cx).dir.clone();
@@ -135,12 +146,18 @@ impl Browser {
     {
         let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
+        // A mount has no watcher, so the new row would never appear on its
+        // own and the rename request would wait for a row that never comes.
+        let needs_reload = !path.is_local();
         // Capture the initiating pane. If the user changes tabs while a slow
         // volume creates the item, the rename must not land in whichever tab
         // happens to be active when the operation completes.
         let pane = self.active().pane.clone();
-        cx.spawn(async move |_, cx| match create(fs, path.clone()).await {
+        cx.spawn(async move |this, cx| match create(fs, path.clone()).await {
             Ok(()) => {
+                if needs_reload {
+                    let _ = this.update(cx, |this, cx| this.refresh(cx));
+                }
                 let _ = window_handle.update(cx, |_, _window, cx| {
                     pane.update(cx, |pane, cx| pane.request_rename_when_visible(path, cx));
                 });
@@ -159,11 +176,28 @@ impl Browser {
         if paths.is_empty() {
             return;
         }
+
+        // There is no trash on a server. Silently skipping the remote half of
+        // a selection would be the worst of the three options — the user
+        // pressed Delete and nothing happened — and quietly deleting it
+        // instead is exactly what the "trash before delete" gate forbids. So
+        // remote paths are split out and routed to the permanent path, which
+        // says so before it does it.
+        let (local, remote): (Vec<VfsPath>, Vec<VfsPath>) =
+            paths.into_iter().partition(VfsPath::is_local);
+
+        if !remote.is_empty() {
+            self.confirm_permanent_delete(remote, PermanentReason::NoRemoteTrash, window, cx);
+        }
+        if local.is_empty() {
+            return;
+        }
+
         let platform = cx.global::<FerretState>().platform.clone();
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let mut failures = Vec::new();
-            for path in paths {
+            for path in local {
                 let Some(local) = path.as_local().map(Path::to_path_buf) else {
                     continue;
                 };
@@ -191,28 +225,55 @@ impl Browser {
             return;
         }
 
-        // `settings.browser.confirm_permanent_delete`. On by default, and the
-        // schema says why trashing is never confirmed: it is reversible, and a
-        // dialog on every delete trains people to dismiss them. Someone who
-        // has turned this off has said they know what the action does.
-        if !cx
-            .global::<FerretState>()
-            .settings
-            .browser
-            .confirm_permanent_delete
+        self.confirm_permanent_delete(paths, PermanentReason::Asked, window, cx);
+    }
+
+    /// Confirm, then delete irreversibly.
+    ///
+    /// `reason` decides whether the confirmation can be skipped.
+    /// `settings.browser.confirm_permanent_delete` is on by default, and the
+    /// schema says why trashing is never confirmed: it is reversible, and a
+    /// dialog on every delete trains people to dismiss them. Someone who has
+    /// turned it off has said they know what Delete Permanently does — but
+    /// they have *not* said anything about a server with no trash, so
+    /// [`PermanentReason::NoRemoteTrash`] always asks.
+    fn confirm_permanent_delete(
+        &mut self,
+        paths: Vec<VfsPath>,
+        reason: PermanentReason,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let skippable = reason == PermanentReason::Asked;
+        if skippable
+            && !cx
+                .global::<FerretState>()
+                .settings
+                .browser
+                .confirm_permanent_delete
         {
             self.delete_now(paths, window, cx);
             return;
         }
 
         let count = paths.len();
+        let description = match reason {
+            PermanentReason::Asked => {
+                format!("{count} item(s) will be deleted permanently. This can't be undone.")
+            }
+            PermanentReason::NoRemoteTrash => format!(
+                "{count} item(s) are on a server, which has no trash. \
+                 They will be deleted permanently. This can't be undone."
+            ),
+        };
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             alert
                 .title("Delete Permanently?")
-                .description(format!(
-                    "{count} item(s) will be deleted permanently. This can't be undone."
-                ))
+                .description(description.clone())
                 .confirm()
                 .on_ok({
                     let paths = paths.clone();
@@ -232,18 +293,24 @@ impl Browser {
     /// Delete without asking. The confirmation, where there is one, has
     /// already happened.
     fn delete_now(&mut self, paths: Vec<VfsPath>, window: &mut Window, cx: &mut Context<Self>) {
+        // A mount has no watcher, so nothing else will notice the rows are
+        // gone. The reload is scheduled here rather than left to the user.
+        let needs_reload = paths.iter().any(|path| !path.is_local());
         // Through the Vfs, not the platform: deleting irreversibly is
         // filesystem mechanics with nothing OS-specific in it, and
         // `RemoveMode::Permanent` is where the parallel tree delete lives
         // (D-34).
         let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let mut failures = Vec::new();
             for path in paths {
                 if let Err(err) = fs.remove(&path, ferret_vfs::RemoveMode::Permanent).await {
                     failures.push(err.to_string());
                 }
+            }
+            if needs_reload {
+                let _ = this.update(cx, |this, cx| this.refresh(cx));
             }
             if let Some(message) = summarize_failures("be deleted", &failures) {
                 let _ = window_handle.update(cx, |_, window, cx| {
@@ -273,8 +340,10 @@ impl Browser {
         // Names are settled here, so a copy beside its original gets "file 2"
         // rather than failing or overwriting.
         let planned = self.plan_names(sources, &dest, cx);
+        // Either end being remote means no watcher saw the change.
+        let needs_reload = !dest.is_local() || planned.iter().any(|(source, _)| !source.is_local());
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let mut failures = Vec::new();
 
             for (src, target) in planned {
@@ -298,6 +367,10 @@ impl Browser {
                 if let Err(err) = result {
                     failures.push(err.to_string());
                 }
+            }
+
+            if needs_reload {
+                let _ = this.update(cx, |this, cx| this.refresh(cx));
             }
 
             let verb = if force_copy { "copy" } else { "move" };

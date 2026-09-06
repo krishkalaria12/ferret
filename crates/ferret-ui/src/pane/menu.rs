@@ -45,12 +45,13 @@ impl FilePane {
         cx: &mut Context<Self>,
     ) {
         let focus = gpui::Focusable::focus_handle(self.table.read(cx), cx);
-        let (key, order, show_hidden, selected) = self.folder.read_with(cx, |f, _| {
+        let (key, order, show_hidden, selected, trashable) = self.folder.read_with(cx, |f, _| {
             (
                 f.sort_key(),
                 f.sort_order(),
                 f.show_hidden(),
                 f.selection_count(),
+                f.dir.is_local(),
             )
         });
 
@@ -58,7 +59,7 @@ impl FilePane {
             use gpui_component::menu::PopupMenuItem;
             let menu = menu.action_context(focus);
             let menu = if target.is_some() {
-                entry_menu_items(menu, selected).separator()
+                entry_menu_items(menu, selected, trashable).separator()
             } else {
                 menu
             };
@@ -173,7 +174,11 @@ impl FilePane {
 /// a multi-selection menu that offered it would have to pick one of them
 /// silently. Everything else states its count, because "Move to Trash" over
 /// nine selected files should say so before it happens.
-pub(super) fn entry_menu_items(menu: PopupMenu, selected: usize) -> PopupMenu {
+///
+/// `trashable` is false on a mount: a server has no trash, so offering to move
+/// something there would be offering an action that cannot happen. The
+/// permanent entry is what remains, and it confirms every time.
+pub(super) fn entry_menu_items(menu: PopupMenu, selected: usize, trashable: bool) -> PopupMenu {
     let multiple = selected > 1;
     let count = selected.min(999);
 
@@ -197,13 +202,19 @@ pub(super) fn entry_menu_items(menu: PopupMenu, selected: usize) -> PopupMenu {
         menu.item(PopupMenuItem::new("Rename…").action(Box::new(actions::Rename)))
     };
 
+    let menu = if trashable {
+        menu.item(
+            PopupMenuItem::new(if multiple {
+                format!("Move {count} Items to Trash")
+            } else {
+                "Move to Trash".to_string()
+            })
+            .action(Box::new(actions::Trash)),
+        )
+    } else {
+        menu
+    };
     menu.item(
-        PopupMenuItem::new(if multiple {
-            format!("Move {count} Items to Trash")
-        } else {
-            "Move to Trash".to_string()
-        })
-        .action(Box::new(actions::Trash)),
+        PopupMenuItem::new("Delete Permanently…").action(Box::new(actions::DeletePermanently)),
     )
-    .item(PopupMenuItem::new("Delete Permanently…").action(Box::new(actions::DeletePermanently)))
 }

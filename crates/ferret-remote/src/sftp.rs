@@ -322,19 +322,159 @@ impl Vfs for SftpVfs {
         .map_err(|error| error.into_vfs("read", path))?
     }
 
-    async fn create_dir(&self, _path: &VfsPath) -> ferret_vfs::Result<()> {
-        read_only("creating directories")
+    async fn create_dir(&self, path: &VfsPath) -> ferret_vfs::Result<()> {
+        let remote = self.remote_path(path)?;
+        let raw = self.raw.clone();
+        crate::spawn(async move { raw.mkdir(remote, FileAttributes::empty()).await })
+            .await
+            .map_err(|error| error.into_vfs("create", path))?
+            .map(drop)
+            .map_err(|error| map_error(error, "create", path))
     }
-    async fn rename(&self, _from: &VfsPath, _to: &VfsPath) -> ferret_vfs::Result<()> {
-        read_only("renaming")
+
+    /// Create an empty file, refusing to overwrite.
+    ///
+    /// `EXCL` is what makes that true on the server rather than in a check
+    /// here: a stat-then-create would race, and "New File" must never blank
+    /// something the user already had.
+    async fn create_file(&self, path: &VfsPath) -> ferret_vfs::Result<()> {
+        let remote = self.remote_path(path)?;
+        let raw = self.raw.clone();
+        let subject = path.clone();
+        crate::spawn(async move {
+            let opened = raw
+                .open(
+                    remote,
+                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                    FileAttributes::empty(),
+                )
+                .await
+                .map_err(|error| map_error(error, "create", &subject))?;
+            let _ = raw.close(opened.handle).await;
+            Ok(())
+        })
+        .await
+        .map_err(|error| error.into_vfs("create", path))?
     }
-    async fn remove(&self, _path: &VfsPath, _mode: RemoveMode) -> ferret_vfs::Result<()> {
-        read_only("removing files")
+
+    /// Rename, preferring the atomic OpenSSH extension when the server has it.
+    ///
+    /// SFTP v3's own `SSH_FXP_RENAME` fails when the destination exists, so
+    /// without `posix-rename@openssh.com` this cannot replace anything — which
+    /// is exactly what `Capabilities::atomic_rename` reports, so the caller has
+    /// already asked before it gets here.
+    async fn rename(&self, from: &VfsPath, to: &VfsPath) -> ferret_vfs::Result<()> {
+        let source = self.remote_path(from)?;
+        let destination = self.remote_path(to)?;
+        let raw = self.raw.clone();
+        let atomic = self.atomic_rename;
+        crate::spawn(async move {
+            if atomic {
+                let mut payload = Vec::new();
+                encode_string(&mut payload, &source);
+                encode_string(&mut payload, &destination);
+                raw.extended("posix-rename@openssh.com", payload)
+                    .await
+                    .map(drop)
+            } else {
+                raw.rename(source, destination).await.map(drop)
+            }
+        })
+        .await
+        .map_err(|error| error.into_vfs("rename", from))?
+        .map_err(|error| map_error(error, "rename", from))
+    }
+
+    /// Remove a file or a whole directory tree.
+    ///
+    /// `Trash` is refused rather than quietly downgraded: there is no remote
+    /// trash, and silently deleting something the user asked to *move* is the
+    /// failure the "trash before delete" gate exists to prevent. The caller
+    /// asks for `Permanent` explicitly, having said so to the user first.
+    async fn remove(&self, path: &VfsPath, mode: RemoveMode) -> ferret_vfs::Result<()> {
+        if mode == RemoveMode::Trash {
+            return Err(VfsError::Unsupported {
+                capability: "moving to the trash",
+            });
+        }
+        let remote = self.remote_path(path)?;
+        let raw = self.raw.clone();
+        let subject = path.clone();
+        crate::spawn(async move { remove_recursive(&raw, remote, &subject).await })
+            .await
+            .map_err(|error| error.into_vfs("delete", path))?
     }
 }
 
-fn read_only<T>(capability: &'static str) -> ferret_vfs::Result<T> {
-    Err(VfsError::Unsupported { capability })
+/// Depth-first removal, because SFTP has no recursive delete.
+///
+/// Boxed because it recurses in an `async fn`. It reports the *first* failure
+/// with its own path rather than continuing blindly: a half-deleted tree is
+/// bad enough without also being unable to say where it stopped.
+fn remove_recursive<'a>(
+    raw: &'a Arc<RawSftpSession>,
+    path: String,
+    subject: &'a VfsPath,
+) -> std::pin::Pin<Box<dyn Future<Output = ferret_vfs::Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let attrs = raw
+            .lstat(path.clone())
+            .await
+            .map_err(|error| map_error(error, "delete", subject))?;
+
+        // A symlink to a directory is removed as the link, never followed —
+        // following one would delete something outside the tree the user
+        // pointed at.
+        if !attrs.attrs.is_dir() {
+            return raw
+                .remove(path)
+                .await
+                .map(drop)
+                .map_err(|error| map_error(error, "delete", subject));
+        }
+
+        let handle = raw
+            .opendir(path.clone())
+            .await
+            .map_err(|error| map_error(error, "delete", subject))?
+            .handle;
+        let mut children = Vec::new();
+        loop {
+            match raw.readdir(handle.clone()).await {
+                Ok(response) => children.extend(
+                    response
+                        .files
+                        .into_iter()
+                        .map(|file| file.filename)
+                        .filter(|name| valid_name(name)),
+                ),
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+                Err(error) => {
+                    let _ = raw.close(handle).await;
+                    return Err(map_error(error, "delete", subject));
+                }
+            }
+        }
+        let _ = raw.close(handle).await;
+
+        for child in children {
+            let child_path = format!("{}/{}", path.trim_end_matches('/'), child);
+            remove_recursive(raw, child_path, subject).await?;
+        }
+        raw.rmdir(path)
+            .await
+            .map(drop)
+            .map_err(|error| map_error(error, "delete", subject))
+    })
+}
+
+/// An SSH `string`: a four-byte big-endian length followed by the bytes.
+///
+/// Needed because `posix-rename@openssh.com` takes its two paths as an opaque
+/// extended-request payload rather than as protocol fields.
+fn encode_string(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    out.extend_from_slice(value.as_bytes());
 }
 
 fn validate_path(path: &str) -> std::result::Result<(), &'static str> {
@@ -469,5 +609,31 @@ mod tests {
         };
         assert_eq!(metadata_from_attrs(".hidden", &attrs).len, 7);
         assert!(metadata_from_attrs(".hidden", &attrs).hidden);
+    }
+
+    /// `posix-rename@openssh.com` carries its two paths as an opaque payload,
+    /// so the framing is ours to get right: four-byte big-endian length, then
+    /// the bytes, per path. A server given the wrong framing renames the
+    /// wrong thing rather than failing cleanly.
+    #[test]
+    fn the_posix_rename_payload_is_two_ssh_strings() {
+        let mut payload = Vec::new();
+        encode_string(&mut payload, "/a");
+        encode_string(&mut payload, "/bb");
+
+        assert_eq!(
+            payload,
+            vec![0, 0, 0, 2, b'/', b'a', 0, 0, 0, 3, b'/', b'b', b'b']
+        );
+    }
+
+    #[test]
+    fn a_multibyte_name_is_framed_by_bytes_not_characters() {
+        let mut payload = Vec::new();
+        encode_string(&mut payload, "/é");
+        // Two bytes for the slash and one two-byte character: a length in
+        // `chars` would truncate the name on the server.
+        assert_eq!(&payload[..4], &[0, 0, 0, 3]);
+        assert_eq!(payload.len(), 7);
     }
 }
