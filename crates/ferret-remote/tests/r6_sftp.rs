@@ -382,6 +382,71 @@ fn a_root_mount_is_refused_rather_than_hanging_without_passwordless_sudo() {
     shutdown_runtime();
 }
 
+#[test]
+fn a_file_whose_size_is_not_a_chunk_multiple_round_trips_exactly() {
+    let Some(server) = sshd::Sshd::start_if_enabled() else {
+        eprintln!("skipped: set FERRET_REMOTE_SSHD_TEST=1 to run the sftp suite");
+        return;
+    };
+    let sftp = mount(&server);
+    let dir = scratch(&sftp, "ferret-r6-ragged");
+    let VfsPath::Remote {
+        path: remote_dir, ..
+    } = &dir
+    else {
+        panic!("the scratch directory is remote");
+    };
+
+    // Deliberately ragged: several full 32 KB chunks plus a remainder, so the
+    // last block of every window is short and the final one is shorter still.
+    // A reader that assumed every block came back full length would skip the
+    // bytes between the short block and the next fixed offset, and the
+    // part-file rename would then present the result as a finished download.
+    let payload: Vec<u8> = (0..(32 * 1024 * 3 + 1_237u32))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let local = std::env::temp_dir().join(format!("ferret-ragged-{}.bin", std::process::id()));
+    std::fs::write(&local, &payload).expect("write the source");
+
+    let job = sftp.clone().transfer(
+        Direction::Upload,
+        vec![TransferSource::Local(local.clone())],
+        TransferDestination::RemoteDir(remote_dir.to_string()),
+        Conflict::Replace,
+    );
+    assert_eq!(drain(job), (1, 0));
+
+    let name = local.file_name().unwrap().to_string_lossy().into_owned();
+    let down = std::env::temp_dir().join(format!("ferret-ragged-down-{}", std::process::id()));
+    std::fs::create_dir_all(&down).expect("create the download directory");
+    let job = sftp.clone().transfer(
+        Direction::Download,
+        vec![TransferSource::Remote(format!(
+            "{}/{name}",
+            remote_dir.trim_end_matches('/')
+        ))],
+        TransferDestination::LocalDir(down.clone()),
+        Conflict::Replace,
+    );
+    assert_eq!(drain(job), (1, 0));
+
+    let round_tripped = std::fs::read(down.join(&name)).expect("read the download");
+    assert_eq!(
+        round_tripped.len(),
+        payload.len(),
+        "a ragged file must not change length"
+    );
+    assert!(
+        round_tripped == payload,
+        "the bytes differ after a round trip"
+    );
+
+    let _ = smol::block_on(sftp.remove(&dir, RemoveMode::Permanent));
+    std::fs::remove_file(&local).ok();
+    std::fs::remove_dir_all(&down).ok();
+    shutdown_runtime();
+}
+
 /// Run a transfer to completion, returning `(copied, failed)`.
 fn drain(job: ferret_remote::Transfer) -> (usize, usize) {
     smol::block_on(async {

@@ -26,7 +26,9 @@ use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use crate::config::{PART_SUFFIX, TRANSFER_CHUNK, TRANSFER_WINDOW};
+use crate::config::{
+    MAX_RESPONSE_BYTES, PART_SUFFIX, PLAN_CANCEL_POLL, TRANSFER_CHUNK, TRANSFER_WINDOW,
+};
 use crate::sftp::SftpVfs;
 use crate::{RemoteError, Result};
 
@@ -593,10 +595,14 @@ async fn download_one(
 
     let mut offset = 0_u64;
     loop {
+        // Every slot is requested at a fixed stride from `base`, which is only
+        // where the next byte actually is while every preceding block came
+        // back full length.
+        let base = offset;
         let reads = (0..TRANSFER_WINDOW).map(|slot| {
             let raw = raw.clone();
             let handle = handle.clone();
-            let at = offset + (slot * TRANSFER_CHUNK) as u64;
+            let at = base + (slot * TRANSFER_CHUNK) as u64;
             async move {
                 match raw.read(handle, at, TRANSFER_CHUNK as u32).await {
                     Ok(data) => Ok(data.data),
@@ -623,6 +629,27 @@ async fn download_one(
                 hit_end = true;
                 break;
             }
+            // A server may answer with fewer bytes than asked for at any
+            // point, not only at the end of the file — the protocol allows it
+            // and some implementations do it. Every later slot in this window
+            // was requested at a stride that assumed this block was full, so
+            // its data begins *after* a gap. Writing it here would drop the
+            // bytes in between and silently corrupt the file, which the
+            // part-file rename would then present as a completed download.
+            //
+            // So the short block is written, the rest of the window is thrown
+            // away, and the next window starts from the true next byte. The
+            // cost is one wasted round trip in a case that is rare; the
+            // alternative is a download that is quietly wrong.
+            let short = chunk.len() < TRANSFER_CHUNK;
+            if chunk.len() > TRANSFER_CHUNK || chunk.len() > MAX_RESPONSE_BYTES {
+                let _ = raw.close(handle).await;
+                let _ = std::fs::remove_file(&part);
+                return Err(RemoteError::Server {
+                    path: file.remote.clone(),
+                    message: "the server returned more bytes than were asked for".into(),
+                });
+            }
             moved += chunk.len() as u64;
             if let Err(error) = sink.write_all(&chunk).await {
                 let _ = raw.close(handle).await;
@@ -632,8 +659,11 @@ async fn download_one(
                     message: error.to_string(),
                 });
             }
+            if short {
+                break;
+            }
         }
-        offset += moved;
+        offset = base + moved;
         *bytes_done += moved;
 
         if moved > 0
