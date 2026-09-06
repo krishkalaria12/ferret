@@ -51,12 +51,18 @@ the `notify` file watcher in `ferret-vfs`, and everything in `ferret-ui`.
 
 **Remote mounts are live.** `FerretState.fs` is a `ferret_vfs::Router`, not a
 `LocalFs`: it dispatches each `VfsPath` to local disk or to a mounted backend,
-and local paths still go straight to `LocalFs` with no dynamic dispatch. Two
-consequences worth knowing before touching anything that takes a path — a
-directory on a mount has **no watcher**, so a mutation there has to reload the
-listing itself, and there is **no trash on a server**, so a remote delete is
-explicitly permanent and always confirmed. Ask `capabilities_for(path)`, never
-`capabilities()`, when deciding what a folder can do.
+and local paths still go straight to `LocalFs` with no dynamic dispatch. Four
+things to know before touching anything that takes a path:
+
+- A directory on a mount has **no watcher**, so a mutation there has to reload
+  the listing itself.
+- There is **no trash on a server**, so a remote delete is explicitly permanent
+  and always confirmed.
+- Ask `capabilities_for(path)`, never `capabilities()`, when deciding what a
+  folder can do — the answer is a property of the backend the folder is on.
+- A mount **answers from a five-second cache**, so anything that means "show me
+  what is actually there" must call `Vfs::invalidate(path)` first. Local disk
+  implements that as a no-op.
 
 ### Gates
 
