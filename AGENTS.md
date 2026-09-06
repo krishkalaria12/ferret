@@ -21,6 +21,9 @@ product feature is implemented.
   architecture, platform hazards, decisions, phases.
 - [`docs/terminal.html`](docs/terminal.html) — Phase 2: the docked terminal and
   directory sync.
+- [`docs/preview-plan.html`](docs/preview-plan.html) — Phase 3: the preview pane,
+  Markdown, syntax-highlighted code, images and thumbnails, PDF through the OS
+  thumbnail service, the CSV grid, and in-place editing. Closes Q-01 and Q-02.
 - [`docs/git.html`](docs/git.html) — Phase 5: the branch segment in the status
   bar, per-file status in the listing, the commit dialog, pull and push.
 
