@@ -58,8 +58,23 @@ pub struct Connection {
     /// the UI falls back to `user@host`.
     pub name: String,
 
-    /// Host name, IP address, or an alias defined in `~/.ssh/config`.
+    /// Where the in-process SFTP client dials: a host name or IP address.
+    ///
+    /// Resolved at import time, because that client opens a TCP connection and
+    /// cannot look an alias up in the user's config.
     pub host: String,
+
+    /// The `~/.ssh/config` alias this record came from, if it came from one.
+    ///
+    /// Kept because `host` is the *resolved* address, and handing that to
+    /// `ssh` would not match the `Host` block it came from — so `ProxyJump`,
+    /// `Match`, certificates and every other setting in that block would be
+    /// silently bypassed by the interactive terminal, which is the one half of
+    /// this feature that promises to honour them (D-07).
+    ///
+    /// `None` for a connection typed into the dialog, which has no block to
+    /// match and nothing to lose.
+    pub ssh_alias: Option<String>,
 
     pub user: String,
 
@@ -102,6 +117,7 @@ impl Default for Connection {
             mount: MountId(0),
             name: String::new(),
             host: String::new(),
+            ssh_alias: None,
             user: String::new(),
             port: None,
             key_path: None,
@@ -144,17 +160,9 @@ impl Connection {
     /// button would be lying about what Ferret does.
     pub fn ssh_command(&self) -> String {
         let mut parts = vec!["ssh".to_string()];
-        if let Some(port) = self.port
-            && port != 22
-        {
-            parts.push("-p".into());
-            parts.push(port.to_string());
+        for arg in self.ssh_args() {
+            parts.push(shell_quote(&arg));
         }
-        if let Some(key) = &self.key_path {
-            parts.push("-i".into());
-            parts.push(shell_quote(&key.to_string_lossy()));
-        }
-        parts.push(shell_quote(&self.endpoint()));
         parts.join(" ")
     }
 
@@ -163,6 +171,16 @@ impl Connection {
     /// Derived from the same fields in the same order, so what the terminal
     /// runs and what the copy button shows cannot drift apart.
     pub fn ssh_args(&self) -> Vec<String> {
+        // An alias-backed record hands `ssh` the alias and nothing else: the
+        // user's own `Host` block owns the user, port, key, jump host and
+        // everything else in it, and that is the entire reason the alias was
+        // kept. Passing Ferret's copy of those as flags would override the
+        // block with values that go stale the moment the user edits their
+        // config.
+        if let Some(alias) = &self.ssh_alias {
+            return vec![alias.clone()];
+        }
+
         let mut args = Vec::new();
         if let Some(port) = self.port
             && port != 22

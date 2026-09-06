@@ -50,12 +50,16 @@ pub fn parse(path: Option<&Path>) -> Vec<Connection> {
     let mut imported = Vec::new();
     for alias in aliases(&text) {
         let params = config.query(&alias);
-        // `Host build-*` is a rule, not a server: there is nothing to connect
-        // to, and inventing a host name from a pattern would be a guess.
+        // Two different questions with two different answers. The in-process
+        // client opens a socket, so it needs the resolved address; `ssh` needs
+        // the *alias*, because that is what matches the `Host` block carrying
+        // the user's `ProxyJump`, `Match` and certificate settings. Storing
+        // only the address would silently bypass all of it.
         let host = params.host_name.clone().unwrap_or_else(|| alias.clone());
         imported.push(Connection {
             name: alias.clone(),
             host,
+            ssh_alias: Some(alias.clone()),
             user: params.user.clone().unwrap_or_default(),
             port: params.port,
             key_path: params
@@ -111,8 +115,9 @@ fn aliases(text: &str) -> Vec<String> {
 fn notes_for(params: &ssh2_config::HostParams) -> String {
     match &params.proxy_jump {
         Some(jump) if !jump.is_empty() => format!(
-            "Imported from ~/.ssh/config. ProxyJump {} applies to the SSH terminal; \
-             browsing this server connects directly.",
+            "Imported from ~/.ssh/config. The SSH terminal goes through ProxyJump {} \
+             because it runs `ssh` against this alias; browsing connects directly and \
+             will not reach a host that is only available through the jump.",
             jump.join(",")
         ),
         _ => "Imported from ~/.ssh/config.".to_string(),
@@ -180,6 +185,24 @@ Host web-* staging
         assert_eq!(build.user, "dorien");
         assert_eq!(build.port, Some(2222));
         assert!(build.key_path.is_some());
+    }
+
+    #[test]
+    fn an_imported_record_keeps_the_alias_ssh_needs() {
+        let path = write(SAMPLE);
+        let imported = parse(Some(&path));
+        std::fs::remove_file(&path).ok();
+
+        let jump = imported
+            .iter()
+            .find(|c| c.name == "jump-target")
+            .expect("jump-target");
+        // The client dials the resolved address...
+        assert_eq!(jump.host, "internal.example");
+        // ...and `ssh` is handed the alias, so the user's own Host block —
+        // and the ProxyJump in it — actually applies.
+        assert_eq!(jump.ssh_alias.as_deref(), Some("jump-target"));
+        assert_eq!(jump.ssh_command(), "ssh jump-target");
     }
 
     #[test]
