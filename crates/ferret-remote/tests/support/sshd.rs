@@ -1,3 +1,8 @@
+// Included by more than one test binary, and each uses a different part of
+// it: `r1_sshd` replaces the host key, `r6_sftp` never does. Without this,
+// every helper one binary happens not to call is reported as dead.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
