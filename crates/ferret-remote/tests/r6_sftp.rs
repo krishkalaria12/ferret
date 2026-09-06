@@ -292,6 +292,96 @@ fn a_path_from_another_mount_is_refused() {
     shutdown_runtime();
 }
 
+#[test]
+fn a_cached_listing_never_outlives_the_change_that_invalidates_it() {
+    let Some(server) = sshd::Sshd::start_if_enabled() else {
+        eprintln!("skipped: set FERRET_REMOTE_SSHD_TEST=1 to run the sftp suite");
+        return;
+    };
+    let sftp = mount(&server);
+    let dir = scratch(&sftp, "ferret-cache");
+    smol::block_on(sftp.create_file(&dir.join("first.txt"))).expect("create");
+
+    // Warm the cache, then create a second file. The listing must not still
+    // be the one-entry answer from a moment ago.
+    assert_eq!(list_names(&sftp, &dir), ["first.txt"]);
+    smol::block_on(sftp.create_file(&dir.join("second.txt"))).expect("create");
+    assert_eq!(
+        list_names(&sftp, &dir),
+        ["first.txt", "second.txt"],
+        "a create must invalidate the directory holding it"
+    );
+
+    // Same for a rename, which changes the directory without adding to it.
+    smol::block_on(sftp.rename(&dir.join("first.txt"), &dir.join("third.txt"))).expect("rename");
+    assert_eq!(list_names(&sftp, &dir), ["second.txt", "third.txt"]);
+
+    // And for a delete.
+    smol::block_on(sftp.remove(&dir.join("second.txt"), RemoveMode::Permanent)).expect("remove");
+    assert_eq!(list_names(&sftp, &dir), ["third.txt"]);
+
+    // `invalidate` is what Refresh calls, and it has to reach the server even
+    // when nothing changed.
+    sftp.invalidate(&dir);
+    assert_eq!(list_names(&sftp, &dir), ["third.txt"]);
+
+    let _ = smol::block_on(sftp.remove(&dir, RemoveMode::Permanent));
+    shutdown_runtime();
+}
+
+#[test]
+fn a_root_mount_is_refused_rather_than_hanging_without_passwordless_sudo() {
+    let Some(server) = sshd::Sshd::start_if_enabled() else {
+        eprintln!("skipped: set FERRET_REMOTE_SSHD_TEST=1 to run the sftp suite");
+        return;
+    };
+    let connection = Connection {
+        host: "127.0.0.1".into(),
+        port: Some(server.port()),
+        user: server.user().into(),
+        key_path: Some(server.private_key()),
+        ..Connection::default()
+    };
+    let known_hosts = server.known_hosts();
+    let fingerprint = match smol::block_on(connect_with_known_hosts(
+        connection.clone(),
+        Credentials::default(),
+        HostKeyPolicy::Strict,
+        Some(known_hosts.clone()),
+    )) {
+        Err(RemoteError::UnknownHostKey { fingerprint, .. }) => fingerprint,
+        other => panic!(
+            "expected an unknown key, got {other:?}",
+            other = other.err()
+        ),
+    };
+    let session = smol::block_on(connect_with_known_hosts(
+        connection,
+        Credentials::default(),
+        HostKeyPolicy::AcceptFingerprint(fingerprint),
+        Some(known_hosts),
+    ))
+    .expect("connect");
+
+    // The harness account has no passwordless sudo, which is the ordinary
+    // case. `sudo -n` must fail fast and say what is missing rather than
+    // waiting on a password prompt nobody can answer — a mount that hangs is
+    // the failure this test exists to prevent.
+    let started = std::time::Instant::now();
+    let result = smol::block_on(session.open_sftp_as_root(MOUNT, "127.0.0.1"));
+    assert!(result.is_err(), "a root mount must not succeed here");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "it must fail fast rather than wait for a password"
+    );
+
+    // And the ordinary mount on the same session still works, so a refused
+    // root attempt costs nothing.
+    assert!(smol::block_on(session.open_sftp(MOUNT, "127.0.0.1")).is_ok());
+    smol::block_on(session.disconnect()).expect("disconnect");
+    shutdown_runtime();
+}
+
 /// Run a transfer to completion, returning `(copied, failed)`.
 fn drain(job: ferret_remote::Transfer) -> (usize, usize) {
     smol::block_on(async {

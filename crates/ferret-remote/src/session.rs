@@ -14,7 +14,7 @@ use std::sync::{
 use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key};
 
-use crate::config::CONNECT_TIMEOUT;
+use crate::config::{CONNECT_TIMEOUT, LIVENESS_POLL};
 use crate::{Connection, RemoteError, Result, Secret};
 
 #[derive(Clone, Debug, Default)]
@@ -33,7 +33,12 @@ pub enum HostKeyPolicy {
 }
 
 enum Command {
-    OpenSftp(futures::channel::oneshot::Sender<Result<crate::SftpVfs>>),
+    /// `privileged` runs the server under `sudo` on an exec channel instead of
+    /// asking for the `sftp` subsystem, which is what makes a root mount root.
+    OpenSftp {
+        privileged: bool,
+        done: futures::channel::oneshot::Sender<Result<crate::SftpVfs>>,
+    },
     Disconnect(futures::channel::oneshot::Sender<()>),
 }
 
@@ -41,11 +46,36 @@ enum Command {
 pub struct Session {
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     connected: Arc<AtomicBool>,
+    closed: ClosedSignal,
+}
+
+/// Resolves when a connection ends, however it ends.
+///
+/// Deliberately holds no reference to the [`Session`]: a watcher that kept the
+/// session alive would stop the user's own disconnect from closing anything,
+/// since the actor only shuts down once the last command sender is dropped.
+#[derive(Clone)]
+pub struct ClosedSignal(async_channel::Receiver<()>);
+
+impl ClosedSignal {
+    /// Wait for the connection to end.
+    ///
+    /// Returns as soon as the link is observed closed, and also when the
+    /// session is dropped — a closed channel means the actor is gone, which is
+    /// the same news by a different route.
+    pub async fn wait(&self) {
+        let _ = self.0.recv().await;
+    }
 }
 
 impl Session {
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    /// A signal that fires when this connection ends.
+    pub fn closed_signal(&self) -> ClosedSignal {
+        self.closed.clone()
     }
 
     pub async fn disconnect(&self) -> Result<()> {
@@ -70,10 +100,40 @@ impl Session {
         mount: ferret_vfs::MountId,
         host: impl Into<String>,
     ) -> Result<crate::SftpVfs> {
+        self.open_sftp_channel(mount, host, false).await
+    }
+
+    /// Open an SFTP channel running as root on the far side (F-23).
+    ///
+    /// Requires passwordless `sudo` for the SFTP server binary on that host.
+    /// That requirement is not papered over: `sudo -n` fails immediately
+    /// rather than waiting for a password nobody can type, and the caller is
+    /// told exactly what is missing.
+    ///
+    /// This hands a file manager unrestricted write access to a machine. The
+    /// confirmation that gates it belongs to the UI; this only makes it
+    /// possible, and only when asked in so many words.
+    pub async fn open_sftp_as_root(
+        &self,
+        mount: ferret_vfs::MountId,
+        host: impl Into<String>,
+    ) -> Result<crate::SftpVfs> {
+        self.open_sftp_channel(mount, host, true).await
+    }
+
+    async fn open_sftp_channel(
+        &self,
+        mount: ferret_vfs::MountId,
+        host: impl Into<String>,
+        privileged: bool,
+    ) -> Result<crate::SftpVfs> {
         let host = host.into();
         let (tx, rx) = futures::channel::oneshot::channel();
         self.commands
-            .send(Command::OpenSftp(tx))
+            .send(Command::OpenSftp {
+                privileged,
+                done: tx,
+            })
             .map_err(|_| RemoteError::Disconnected { host: host.clone() })?;
         rx.await
             .map_err(|_| RemoteError::Cancelled)?
@@ -372,11 +432,33 @@ fn start_actor(handle: client::Handle<Handler>) -> Session {
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let connected = Arc::new(AtomicBool::new(true));
     let actor_connected = connected.clone();
+    // Capacity one: the news is "it closed", and hearing it twice adds
+    // nothing. Every clone of the signal sees it.
+    let (closed_tx, closed_rx) = async_channel::bounded(1);
     crate::detach(async move {
         let handle = handle;
-        while let Some(command) = receiver.recv().await {
+        // Between commands, watch for the link going away on its own. A
+        // laptop that slept has a dead connection and no error to show for it
+        // until something is asked of it, which is several seconds after the
+        // user expected a listing.
+        let mut liveness = tokio::time::interval(LIVENESS_POLL);
+        liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            let command = tokio::select! {
+                received = receiver.recv() => match received {
+                    Some(command) => command,
+                    None => break, // Every sender dropped: an ordinary shutdown.
+                },
+                _ = liveness.tick() => {
+                    if handle.is_closed() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             match command {
-                Command::OpenSftp(done) => {
+                Command::OpenSftp { privileged, done } => {
                     let opened = async {
                         let channel = handle.channel_open_session().await.map_err(|error| {
                             RemoteError::Subsystem {
@@ -384,14 +466,42 @@ fn start_actor(handle: client::Handle<Handler>) -> Session {
                                 message: error.to_string(),
                             }
                         })?;
-                        channel
-                            .request_subsystem(true, "sftp")
-                            .await
-                            .map_err(|error| RemoteError::Subsystem {
+                        if privileged {
+                            // An exec channel, not the subsystem request: the
+                            // subsystem runs as the logged-in user, which is
+                            // the one thing a root mount must not do.
+                            channel
+                                .exec(true, crate::config::ROOT_SFTP_COMMAND)
+                                .await
+                                .map_err(|error| RemoteError::RootUnavailable {
+                                    host: "the remote server".into(),
+                                    message: error.to_string(),
+                                })?;
+                        } else {
+                            channel
+                                .request_subsystem(true, "sftp")
+                                .await
+                                .map_err(|error| RemoteError::Subsystem {
+                                    host: "the remote server".into(),
+                                    message: error.to_string(),
+                                })?;
+                        }
+                        let stream = channel.into_stream();
+                        match crate::sftp::SftpVfs::negotiate(stream).await {
+                            Ok(sftp) => Ok(sftp),
+                            // A refusal here is nearly always `sudo` declining
+                            // rather than a protocol fault, and saying so is
+                            // the difference between an actionable message and
+                            // "handshake failed".
+                            Err(error) if privileged => Err(RemoteError::RootUnavailable {
                                 host: "the remote server".into(),
-                                message: error.to_string(),
-                            })?;
-                        crate::sftp::SftpVfs::negotiate(channel.into_stream()).await
+                                message: format!(
+                                    "{error}. A root mount needs passwordless sudo for the \
+                                     SFTP server on that host."
+                                ),
+                            }),
+                            Err(error) => Err(error),
+                        }
                     }
                     .await;
                     let _ = done.send(opened);
@@ -411,10 +521,15 @@ fn start_actor(handle: client::Handle<Handler>) -> Session {
             }
         }
         actor_connected.store(false, Ordering::Release);
+        // Whoever is watching learns the connection is over — whether that was
+        // the user's doing, the network's, or the process shutting down.
+        let _ = closed_tx.try_send(());
+        closed_tx.close();
     });
     Session {
         commands,
         connected,
+        closed: ClosedSignal(closed_rx),
     }
 }
 

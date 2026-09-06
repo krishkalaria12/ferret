@@ -512,6 +512,13 @@ impl Browser {
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
+        // A mount answers from a short-lived cache, so Refresh has to say so
+        // first — otherwise ⌘R over a remote folder could return exactly what
+        // is already on screen, which is the opposite of what it promises.
+        // Local disk implements this as a no-op.
+        let dir = self.active().folder.read(cx).dir.clone();
+        cx.global::<FerretState>().fs.invalidate(&dir);
+
         self.active()
             .folder
             .update(cx, |f, cx| f.reload_preserving_state(cx));

@@ -208,7 +208,14 @@ async fn run(
             }
         };
         match result {
-            Ok(()) => copied += 1,
+            Ok(()) => {
+                copied += 1;
+                if direction == Direction::Upload {
+                    // The destination directory has one more file in it than
+                    // whatever was last listed.
+                    sftp.invalidate_remote(&file.remote);
+                }
+            }
             // A cancelled job stops entirely rather than reporting every
             // remaining file as a failure.
             Err(RemoteError::Cancelled) => return Ok(()),

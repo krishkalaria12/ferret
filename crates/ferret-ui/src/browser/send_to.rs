@@ -21,6 +21,19 @@ use ferret_remote::{
 use gpui::Focusable as _;
 use gpui_component::dialog::DialogButtonProps;
 
+/// How often a queued "Send to" checks whether its dial has landed.
+///
+/// Coarse on purpose: nothing is being drawn from this, and the dial itself
+/// takes hundreds of milliseconds at best.
+const CONNECT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a queued "Send to" waits before giving up on its dial.
+///
+/// Generous, because the wait may include a person reading a fingerprint or
+/// finding a hardware token — but bounded, so a dialog left open overnight
+/// does not surface a destination sheet in the morning.
+const CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// What the status bar shows while a transfer runs.
 #[derive(Clone, Debug)]
 pub(super) struct TransferProgress {
@@ -112,21 +125,14 @@ impl Browser {
             return;
         }
 
-        // Connecting first means the destination browser has something to
-        // list, and it is also the only way to know the remote home directory
-        // to pre-fill.
+        // Connecting first means there is a home directory to pre-fill and a
+        // backend to hand the files to. A drop onto an idle row therefore
+        // dials and then carries on by itself — the gesture was "send this
+        // there", and making the user repeat it after watching a spinner
+        // would be answering a different question.
         if !cx.global::<FerretState>().mounts.is_connected(&record.id) {
             self.open_connection(record.clone(), window, cx);
-            // The dial is asynchronous and may need a prompt; asking for a
-            // destination on top of that would stack two dialogs. The user
-            // repeats the gesture once the row shows connected.
-            window.push_notification(
-                Notification::info(format!(
-                    "Connecting to {}. Try again once it's connected.",
-                    record.display_name()
-                )),
-                cx,
-            );
+            self.send_when_connected(record, locals, window, cx);
             return;
         }
 
@@ -138,6 +144,52 @@ impl Browser {
             .unwrap_or_else(|| "/".to_string());
 
         self.ask_destination(record, locals, default_dir, window, cx);
+    }
+
+    /// Wait for an in-flight dial, then ask where the files should go.
+    ///
+    /// Polled rather than driven by a signal because the dial may stop for a
+    /// person — a fingerprint to read, a passphrase to type — and those are
+    /// dialogs of their own. Asking for a destination on top of one would
+    /// stack two, so this waits for the row to settle and only then continues.
+    fn send_when_connected(
+        &mut self,
+        record: Connection,
+        sources: Vec<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let deadline = std::time::Instant::now() + CONNECT_WAIT;
+            loop {
+                cx.background_executor().timer(CONNECT_POLL).await;
+
+                let status = cx.update(|cx| {
+                    let mounts = &cx.global::<FerretState>().mounts;
+                    (mounts.is_connected(&record.id), mounts.status(&record.id))
+                });
+                match status {
+                    (true, _) => break,
+                    // The dial failed or was cancelled; it has already said so.
+                    (false, state) if !state.is_busy() => return,
+                    _ if std::time::Instant::now() >= deadline => return,
+                    _ => continue,
+                }
+            }
+
+            let default_dir = cx
+                .update(|cx| cx.global::<FerretState>().mounts.home(&record.id))
+                .map(|home| home.to_string())
+                .unwrap_or_else(|| "/".to_string());
+
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.ask_destination(record.clone(), sources, default_dir, window, cx);
+                });
+            });
+        })
+        .detach();
     }
 
     /// The destination sheet: which remote directory, and what to do about

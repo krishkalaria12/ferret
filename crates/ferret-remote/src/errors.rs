@@ -73,6 +73,15 @@ pub enum RemoteError {
     #[error("Couldn't open an SFTP session on {host}: {message}")]
     Subsystem { host: String, message: String },
 
+    /// A root mount was asked for and the host would not give one.
+    ///
+    /// Its own variant because the fix is specific and worth naming: the
+    /// account needs passwordless `sudo` for the SFTP server binary. F-23 says
+    /// to document that requirement rather than paper over it, and an error
+    /// that says "handshake failed" would be papering over it.
+    #[error("{host} wouldn't start an SFTP server as root: {message}")]
+    RootUnavailable { host: String, message: String },
+
     /// The link went away mid-operation. Distinct from an I/O error on a path,
     /// because the recovery is different: reconnect, not retry.
     #[error("The connection to {host} was lost.")]

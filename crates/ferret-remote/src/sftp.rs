@@ -14,8 +14,10 @@ use russh_sftp::client::{RawSftpSession, error::Error as SftpError};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::cache::MountCache;
 use crate::config::{
-    LISTING_BATCH_CAP, MAX_RESPONSE_BYTES, PIPELINE_DEPTH, REQUEST_TIMEOUT, TRANSFER_CHUNK,
+    HANDSHAKE_TIMEOUT, LISTING_BATCH_CAP, LISTING_CACHE_MAX_ENTRIES, MAX_RESPONSE_BYTES,
+    PIPELINE_DEPTH, REQUEST_TIMEOUT, TRANSFER_CHUNK,
 };
 use crate::{RemoteError, Result};
 
@@ -26,6 +28,9 @@ pub struct SftpVfs {
     host: Arc<str>,
     raw: Arc<RawSftpSession>,
     atomic_rename: bool,
+    /// What this mount remembers between calls, and the permit pool that caps
+    /// how many listings it may have open at once. See [`crate::cache`].
+    cache: Arc<MountCache>,
 }
 
 impl SftpVfs {
@@ -35,15 +40,31 @@ impl SftpVfs {
     {
         let raw = RawSftpSession::new(stream);
         raw.set_timeout(REQUEST_TIMEOUT.as_secs());
-        let version = raw.init().await.map_err(|error| RemoteError::Subsystem {
-            host: "the remote server".into(),
-            message: error.to_string(),
-        })?;
+        // Bounded separately from an ordinary request: if nothing on the far
+        // side speaks SFTP — a refused `sudo`, a missing server binary — then
+        // no version packet is coming, and waiting the request timeout to
+        // discover that reads as a hang rather than as the refusal it is.
+        let version = match tokio::time::timeout(HANDSHAKE_TIMEOUT, raw.init()).await {
+            Ok(Ok(version)) => version,
+            Ok(Err(error)) => {
+                return Err(RemoteError::Subsystem {
+                    host: "the remote server".into(),
+                    message: error.to_string(),
+                });
+            }
+            Err(_) => {
+                return Err(RemoteError::Subsystem {
+                    host: "the remote server".into(),
+                    message: "it never started an SFTP server on the channel".into(),
+                });
+            }
+        };
         Ok(Self {
             mount: MountId(0),
             host: Arc::from("the remote server"),
             raw: Arc::new(raw),
             atomic_rename: version.extensions.contains_key("posix-rename@openssh.com"),
+            cache: Arc::new(MountCache::default()),
         })
     }
 
@@ -73,6 +94,12 @@ impl SftpVfs {
     /// Whether something is at `path`, for the conflict scan.
     pub(crate) async fn remote_exists(&self, path: &str) -> bool {
         self.raw.lstat(path.to_string()).await.is_ok()
+    }
+
+    /// Forget a remote path, for callers holding protocol strings rather than
+    /// a [`VfsPath`] — the transfer engine, which has just written one.
+    pub(crate) fn invalidate_remote(&self, path: &str) {
+        self.cache.invalidate(path);
     }
 
     /// Resolve the login account's home directory for the mount's first path.
@@ -122,11 +149,27 @@ impl Vfs for SftpVfs {
             Ok(path) => path,
             Err(error) => return stream::once(async move { Err(error) }).boxed(),
         };
+        // A hit is the whole point of the cache: back, forward and the column
+        // view's ancestors all re-read directories that were listed seconds
+        // ago, and over a link each of those is a round trip.
+        if let Some(cached) = self.cache.listing(&path) {
+            let batch = (*cached).clone();
+            return stream::once(async move { Ok(batch) }).boxed();
+        }
+
         let subject = dir.clone();
         let mount = self.mount;
         let raw = self.raw.clone();
+        let cache = self.cache.clone();
+        let cache_key = path.clone();
         let (sender, receiver) = async_channel::bounded(ferret_vfs::config::LISTING_BUFFER);
         crate::detach(async move {
+            // Held for the whole walk and released on every exit, including
+            // the early one when the reader drops the stream. Column view
+            // opens several listings at once; without this they compete for
+            // the one channel and each finishes later than it needed to.
+            let _slot = cache.listing_slot().await;
+
             let handle = match raw.opendir(path).await {
                 Ok(handle) => handle.handle,
                 Err(error) => {
@@ -136,6 +179,15 @@ impl Vfs for SftpVfs {
                     return;
                 }
             };
+
+            // Accumulated alongside the stream so the listing can be cached
+            // once it completes. Abandoned past the cap rather than growing:
+            // a hit copies this back, and a 200,000-entry copy is not a
+            // saving.
+            let mut collected = Some(Vec::new());
+            // Set only by the EOF arm: any other exit leaves a partial walk,
+            // which must not be remembered as the directory's contents.
+            let mut complete = false;
 
             loop {
                 match raw.readdir(handle.clone()).await {
@@ -166,6 +218,12 @@ impl Vfs for SftpVfs {
                         .collect::<Vec<_>>()
                         .await;
                         for entry in converted.into_iter().flatten() {
+                            match &mut collected {
+                                Some(all) if all.len() < LISTING_CACHE_MAX_ENTRIES => {
+                                    all.push(entry.clone())
+                                }
+                                slot => *slot = None,
+                            }
                             entries.push(entry);
                             // A send failure is the listing being cancelled by
                             // drop: the receiver is gone, so close the handle
@@ -184,6 +242,7 @@ impl Vfs for SftpVfs {
                         }
                     }
                     Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
+                        complete = true;
                         break;
                     }
                     Err(error) => {
@@ -195,21 +254,31 @@ impl Vfs for SftpVfs {
                 }
             }
             let _ = raw.close(handle).await;
+
+            // Only a walk that ran to completion is worth remembering. One cut
+            // short by an error would cache a directory that is missing rows.
+            if let Some(all) = collected.filter(|_| complete) {
+                cache.store_listing(&cache_key, all);
+            }
         });
         receiver.boxed()
     }
 
     async fn metadata(&self, path: &VfsPath) -> ferret_vfs::Result<Metadata> {
         let remote = self.remote_path(path)?;
+        // Usually a hit: the listing that produced this row seeded it.
+        if let Some(cached) = self.cache.metadata(&remote) {
+            return Ok(cached);
+        }
         let raw = self.raw.clone();
-        let attrs = crate::spawn(async move { raw.lstat(remote).await })
+        let request = remote.clone();
+        let attrs = crate::spawn(async move { raw.lstat(request).await })
             .await
             .map_err(|error| error.into_vfs("read metadata for", path))?
             .map_err(|error| map_error(error, "read metadata for", path))?;
-        Ok(metadata_from_attrs(
-            path.file_name().unwrap_or_default(),
-            &attrs.attrs,
-        ))
+        let metadata = metadata_from_attrs(path.file_name().unwrap_or_default(), &attrs.attrs);
+        self.cache.store_metadata(&remote, metadata);
+        Ok(metadata)
     }
 
     async fn metadata_batch(
@@ -342,6 +411,9 @@ impl Vfs for SftpVfs {
 
     async fn create_dir(&self, path: &VfsPath) -> ferret_vfs::Result<()> {
         let remote = self.remote_path(path)?;
+        // Before the call, not after: a failure still means whatever was
+        // remembered about the parent may no longer be true.
+        self.cache.invalidate(&remote);
         let raw = self.raw.clone();
         crate::spawn(async move { raw.mkdir(remote, FileAttributes::empty()).await })
             .await
@@ -357,6 +429,7 @@ impl Vfs for SftpVfs {
     /// something the user already had.
     async fn create_file(&self, path: &VfsPath) -> ferret_vfs::Result<()> {
         let remote = self.remote_path(path)?;
+        self.cache.invalidate(&remote);
         let raw = self.raw.clone();
         let subject = path.clone();
         crate::spawn(async move {
@@ -384,6 +457,9 @@ impl Vfs for SftpVfs {
     async fn rename(&self, from: &VfsPath, to: &VfsPath) -> ferret_vfs::Result<()> {
         let source = self.remote_path(from)?;
         let destination = self.remote_path(to)?;
+        // Both ends: the name leaves one directory and appears in another.
+        self.cache.invalidate(&source);
+        self.cache.invalidate(&destination);
         let raw = self.raw.clone();
         let atomic = self.atomic_rename;
         crate::spawn(async move {
@@ -416,11 +492,22 @@ impl Vfs for SftpVfs {
             });
         }
         let remote = self.remote_path(path)?;
+        self.cache.invalidate(&remote);
         let raw = self.raw.clone();
         let subject = path.clone();
         crate::spawn(async move { remove_recursive(&raw, remote, &subject).await })
             .await
             .map_err(|error| error.into_vfs("delete", path))?
+    }
+
+    /// What makes Refresh mean "ask the server".
+    ///
+    /// Unconditional: the browser calls this immediately before re-listing, so
+    /// a cache that could answer here would turn ⌘R into a no-op.
+    fn invalidate(&self, path: &VfsPath) {
+        if let Ok(remote) = self.remote_path(path) {
+            self.cache.invalidate(&remote);
+        }
     }
 }
 

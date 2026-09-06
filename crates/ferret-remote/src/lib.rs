@@ -7,6 +7,7 @@
 
 pub mod config;
 
+mod cache;
 mod errors;
 mod host_keys;
 mod record;
@@ -29,7 +30,9 @@ pub use secrets::{
     Secret, SecretKind, forget as forget_secret, forget_all as forget_all_secrets,
     load as load_secret, store as store_secret,
 };
-pub use session::{Credentials, HostKeyPolicy, Session, connect, connect_with_known_hosts};
+pub use session::{
+    ClosedSignal, Credentials, HostKeyPolicy, Session, connect, connect_with_known_hosts,
+};
 pub use sftp::SftpVfs;
 pub use store::{ConnectionStore, connections_path, write_store};
 pub use transfer::{

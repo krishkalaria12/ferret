@@ -197,6 +197,9 @@ tokio = { version = "1", features = [
     # so the local file I/O has to be async there too — a blocking read would
     # stall one of only two worker threads.
     "fs",
+    # The session actor's command channel, and the semaphore that caps how many
+    # directory listings one mount may have open at once.
+    "sync",
 ] }
 # Bounded collections that never reach the heap: at most four table columns,
 # at most two of them hideable.

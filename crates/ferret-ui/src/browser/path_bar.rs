@@ -262,13 +262,19 @@ impl Browser {
         // A remote root crumb names the server rather than showing a mount
         // number. An unmounted path still resolves here, so a tab left over
         // from a disconnected session keeps a readable trail.
-        let mount_label = match &dir {
+        let (mount_label, mount_is_root) = match &dir {
             VfsPath::Remote { mount, .. } => {
                 let state = cx.global::<FerretState>();
-                crate::mounts::connection_for_mount(state.connections.connections(), *mount)
-                    .map(|connection| connection.display_name())
+                let connections = state.connections.connections();
+                (
+                    crate::mounts::connection_for_mount(connections, *mount)
+                        .map(|connection| connection.display_name()),
+                    // F-23: a root mount is marked wherever it appears, and
+                    // the path bar is where the eye goes before a drag.
+                    state.mounts.mount_is_root(*mount, connections),
+                )
             }
-            VfsPath::Local(_) => None,
+            VfsPath::Local(_) => (None, false),
         };
         let crumbs = breadcrumb_targets(&dir, mount_label.as_deref());
         let this = cx.weak_entity();
@@ -310,6 +316,22 @@ impl Browser {
                     .with_size(px(15.))
                     .text_color(BrowserTint::folder(cx)),
             )
+            // F-23's persistent marker. Before the crumbs rather than after,
+            // because it changes what the whole path means and the eye reads
+            // left to right.
+            .when(mount_is_root, |el| {
+                let danger = cx.theme().danger;
+                el.child(
+                    div()
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .bg(danger.opacity(0.16))
+                        .text_size(px(10.5))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(danger)
+                        .child("ROOT"),
+                )
+            })
             .child(Breadcrumb::new().children(items).flex_1().truncate());
 
         bar.child(crumbs)

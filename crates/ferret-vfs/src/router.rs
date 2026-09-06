@@ -257,6 +257,21 @@ impl Vfs for Router {
             VfsPath::Remote { .. } => self.remote(path)?.remove(path, mode).await,
         }
     }
+
+    /// Forward to the backend, if there is one.
+    ///
+    /// An unmounted path is not an error here: there is nothing cached about a
+    /// server nobody is connected to, so "invalidate it" is already true.
+    fn invalidate(&self, path: &VfsPath) {
+        match path {
+            VfsPath::Local(_) => self.local.invalidate(path),
+            VfsPath::Remote { .. } => {
+                if let Some(backend) = self.backend(path) {
+                    backend.invalidate(path);
+                }
+            }
+        }
+    }
 }
 
 fn same_backend(a: &VfsPath, b: &VfsPath) -> bool {

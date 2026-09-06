@@ -58,6 +58,13 @@ struct Mount {
     /// mutation and the wrong one for a transfer, which needs handles and
     /// offsets the trait deliberately has no room for.
     backend: Option<Arc<SftpVfs>>,
+    /// Whether this mount is running as root on the far side (F-23).
+    ///
+    /// Lives here and nowhere else. It is deliberately *not* on the saved
+    /// record — `Connection::sanitised` makes the file incapable of expressing
+    /// it — so it cannot survive a restart and cannot be turned on except by
+    /// someone typing the host's name into the confirmation.
+    as_root: bool,
 }
 
 impl Mount {
@@ -67,6 +74,7 @@ impl Mount {
             home: None,
             session: None,
             backend: None,
+            as_root: false,
         }
     }
 }
@@ -105,6 +113,18 @@ impl Mounts {
         self.by_id.values().any(|mount| mount.status.is_connected())
     }
 
+    /// The signal that fires when this mount's connection ends.
+    ///
+    /// A signal rather than the session itself, so a watcher cannot keep a
+    /// connection alive past the user closing it.
+    pub fn closed_signal(&self, id: &ConnectionId) -> Option<ferret_remote::ClosedSignal> {
+        self.by_id
+            .get(id)
+            .filter(|mount| mount.status.is_connected())
+            .and_then(|mount| mount.session.as_ref())
+            .map(|session| session.closed_signal())
+    }
+
     /// The backend a transfer needs, or `None` when nothing is mounted.
     pub fn backend(&self, id: &ConnectionId) -> Option<Arc<SftpVfs>> {
         self.by_id
@@ -124,6 +144,7 @@ impl Mounts {
         session: Arc<Session>,
         backend: Arc<SftpVfs>,
         home: VfsPath,
+        as_root: bool,
     ) {
         self.by_id.insert(
             id.clone(),
@@ -132,8 +153,25 @@ impl Mounts {
                 home: Some(home),
                 session: Some(session),
                 backend: Some(backend),
+                as_root,
             },
         );
+    }
+
+    /// Whether this mount is running as root (F-23).
+    ///
+    /// Drawn wherever the mount is: a window that can delete anything on a
+    /// server must never look like one that cannot.
+    pub fn is_root(&self, id: &ConnectionId) -> bool {
+        self.by_id
+            .get(id)
+            .is_some_and(|mount| mount.as_root && mount.status.is_connected())
+    }
+
+    /// Whether the mount behind a path is running as root, for the path bar,
+    /// which has an id for the mount but not for the connection.
+    pub fn mount_is_root(&self, mount: MountId, connections: &[Connection]) -> bool {
+        connection_for_mount(connections, mount).is_some_and(|record| self.is_root(&record.id))
     }
 
     pub(crate) fn fail(&mut self, id: &ConnectionId, reason: impl Into<SharedString>) {
@@ -144,6 +182,9 @@ impl Mounts {
         // means: there is nothing left to reuse.
         mount.session = None;
         mount.backend = None;
+        // A failed root mount is not a root mount. Leaving this set would draw
+        // the marker on a row that is no longer privileged.
+        mount.as_root = false;
     }
 
     /// Forget a mount, returning its session so the caller can close it

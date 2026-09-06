@@ -415,12 +415,26 @@ impl Browser {
             } else {
                 let connect = this.clone();
                 let connect_record = record.clone();
+                let root = this.clone();
+                let root_record = record.clone();
                 menu.item(
                     PopupMenuItem::new("Connect").on_click(move |_, window, cx| {
                         if let Some(browser) = connect.upgrade() {
                             let record = connect_record.clone();
                             browser.update(cx, |browser, cx| {
                                 browser.open_connection(record, window, cx)
+                            });
+                        }
+                    }),
+                )
+                // Ellipsis because it asks first, and what it asks for has to
+                // be typed (F-23).
+                .item(
+                    PopupMenuItem::new("Connect as Root…").on_click(move |_, window, cx| {
+                        if let Some(browser) = root.upgrade() {
+                            let record = root_record.clone();
+                            browser.update(cx, |browser, cx| {
+                                browser.connect_as_root(record, window, cx)
                             });
                         }
                     }),

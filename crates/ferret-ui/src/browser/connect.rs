@@ -43,6 +43,16 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_connection_with(record, false, window, cx);
+    }
+
+    fn open_connection_with(
+        &mut self,
+        record: Connection,
+        as_root: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let state = cx.global::<FerretState>();
         if let Some(home) = state.mounts.home(&record.id) {
             // Already connected: a second click is navigation, not a re-dial.
@@ -58,10 +68,11 @@ impl Browser {
 
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let outcome = dial(record.clone(), handle, cx).await;
+            let outcome = dial(record.clone(), as_root, handle, cx).await;
             let _ = handle.update(cx, |_, window, cx| match outcome {
                 Ok(Some(home)) => {
                     let _ = this.update(cx, |this, cx| {
+                        this.watch_mount(record.clone(), window, cx);
                         this.navigate(home, window, cx);
                         cx.notify();
                     });
@@ -83,6 +94,174 @@ impl Browser {
             });
         })
         .detach();
+    }
+
+    /// Connect as root, once someone has typed the host's name to say so
+    /// (F-23).
+    ///
+    /// This is the sharpest edge in the product: it hands a file manager
+    /// unrestricted write access to a machine, where one mis-aimed drag
+    /// deletes something no trash will give back. Three things guard it, and
+    /// all three are deliberate friction:
+    ///
+    /// * The confirmation cannot be dismissed by pressing Return. The host's
+    ///   name has to be typed, which is impossible to do by accident and
+    ///   impossible to do without reading what it says.
+    /// * It is per-connect. Nothing persists it — `Connection::sanitised`
+    ///   makes the saved record incapable of expressing it — so it can never
+    ///   come back on from restored state, and a reconnect drops it.
+    /// * The mount is marked wherever it appears, for as long as it lasts.
+    pub(super) fn connect_as_root(
+        &mut self,
+        record: Connection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(record.host.clone()));
+        let focus = input.read(cx).focus_handle(cx).clone();
+        window.focus(&focus, cx);
+
+        let this = cx.weak_entity();
+        let expected = record.host.clone();
+        let name = record.display_name();
+
+        window.open_dialog(cx, move |modal, _, cx| {
+            let theme = cx.theme();
+            let confirm_input = input.clone();
+            let this = this.clone();
+            let record = record.clone();
+            let expected = expected.clone();
+            modal
+                .w(px(520.))
+                .close_button(false)
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.danger)
+                                .child(format!("Mount {name} as root?")),
+                        )
+                        .child(div().text_color(theme.muted_foreground).child(
+                            "Every file on that server becomes writable and deletable from \
+                             this window, and there is no trash to undo it with. The \
+                             account needs passwordless sudo for the SFTP server.",
+                        ))
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("Type {expected} to continue.")),
+                        )
+                        .child(Input::new(&input)),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Mount as root")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                        .cancel_text("Cancel"),
+                )
+                .on_ok(move |_, window, cx| {
+                    // Anything other than the host's exact name keeps the
+                    // dialog open. There is no Return-to-confirm here.
+                    if confirm_input.read(cx).value().trim() != expected {
+                        return false;
+                    }
+                    if let Some(browser) = this.upgrade() {
+                        let record = record.clone();
+                        browser.update(cx, |browser, cx| {
+                            browser.open_connection_with(record, true, window, cx);
+                        });
+                    }
+                    true
+                })
+        });
+    }
+
+    /// Watch a live mount, and re-dial once if the link goes away.
+    ///
+    /// One attempt, not a loop: a server that is down does not become up
+    /// because it was asked four times, and a banner offering Reconnect is
+    /// more useful than a spinner that never resolves.
+    ///
+    /// The watcher holds the closed *signal*, never the session — a strong
+    /// reference here would keep the connection alive after the user asked to
+    /// close it, since the actor only shuts down once its last sender drops.
+    fn watch_for_disconnect(
+        &mut self,
+        record: Connection,
+        closed: ferret_remote::ClosedSignal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            closed.wait().await;
+
+            // Deliberate disconnects come through here too. The mount is
+            // already gone from the registry in that case, and re-dialling a
+            // server the user just closed would be the worst possible answer.
+            if !cx.update(|cx| cx.global::<FerretState>().mounts.is_connected(&record.id)) {
+                return;
+            }
+
+            cx.update(|cx| {
+                let state = cx.global_mut::<FerretState>();
+                state.fs.unmount(record.mount);
+                state.mounts.begin(&record.id);
+            });
+            let _ = this.update(cx, |_, cx| cx.notify());
+
+            cx.background_executor()
+                .timer(ferret_remote::config::RECONNECT_DELAY)
+                .await;
+
+            // A fresh dial, with a fresh backend and therefore a fresh cache:
+            // a link that dropped proves nothing about what changed on the
+            // other side while it was gone.
+            // Deliberately not `as_root`: F-23 requires that the switch
+            // cannot come back on without someone asking for it again, and a
+            // reconnect is not asking.
+            match dial(record.clone(), false, handle, cx).await {
+                Ok(Some(_)) => {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.watch_mount(record.clone(), window, cx);
+                            // Whatever is on screen was listed by the session
+                            // that just died.
+                            this.refresh(cx);
+                            cx.notify();
+                        });
+                    });
+                }
+                outcome => {
+                    let message = match outcome {
+                        Err(error) => error.to_string(),
+                        _ => format!("Lost the connection to {}.", record.display_name()),
+                    };
+                    let _ = handle.update(cx, |_, window, cx| {
+                        cx.global_mut::<FerretState>()
+                            .mounts
+                            .fail(&record.id, message.clone());
+                        window.push_notification(Notification::error(message), cx);
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Start watching a mount that has just come up.
+    fn watch_mount(&mut self, record: Connection, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(closed) = cx.global::<FerretState>().mounts.closed_signal(&record.id) else {
+            return;
+        };
+        self.watch_for_disconnect(record, closed, window, cx);
     }
 
     /// Close a mount and stop routing its paths.
@@ -144,6 +323,7 @@ impl Browser {
 /// cancelled login is not an error worth a red banner.
 async fn dial(
     record: Connection,
+    as_root: bool,
     window: AnyWindowHandle,
     cx: &mut gpui::AsyncApp,
 ) -> ferret_remote::Result<Option<VfsPath>> {
@@ -164,7 +344,7 @@ async fn dial(
 
     for _ in 0..=MAX_PROMPTS {
         match ferret_remote::connect(record.clone(), credentials.clone(), policy.clone()).await {
-            Ok(session) => return mount(record, session, cx).await.map(Some),
+            Ok(session) => return mount(record, session, as_root, cx).await.map(Some),
 
             // The one question a person can answer about identity. Accepting
             // writes the key to known_hosts; declining ends the attempt.
@@ -240,9 +420,16 @@ async fn dial(
 async fn mount(
     record: Connection,
     session: ferret_remote::Session,
+    as_root: bool,
     cx: &mut gpui::AsyncApp,
 ) -> ferret_remote::Result<VfsPath> {
-    let sftp = session.open_sftp(record.mount, record.host.clone()).await?;
+    let sftp = if as_root {
+        session
+            .open_sftp_as_root(record.mount, record.host.clone())
+            .await?
+    } else {
+        session.open_sftp(record.mount, record.host.clone()).await?
+    };
 
     // The account's home unless the record names somewhere else. Resolved
     // through the server rather than assumed, because `/home/<user>` is a
@@ -267,7 +454,9 @@ async fn mount(
         // Registered with the router *before* the mount is marked connected,
         // so nothing can navigate to a path the router would refuse.
         state.fs.mount(record.mount, routed);
-        state.mounts.finish(&record.id, session, backend, landed);
+        state
+            .mounts
+            .finish(&record.id, session, backend, landed, as_root);
     });
 
     Ok(landing)
