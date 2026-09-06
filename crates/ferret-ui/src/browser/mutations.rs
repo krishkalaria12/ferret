@@ -149,14 +149,17 @@ impl Browser {
         // A mount has no watcher, so the new row would never appear on its
         // own and the rename request would wait for a row that never comes.
         let needs_reload = !path.is_local();
-        // Capture the initiating pane. If the user changes tabs while a slow
-        // volume creates the item, the rename must not land in whichever tab
-        // happens to be active when the operation completes.
+        // Capture the initiating pane *and its folder*. If the user changes
+        // tabs while a slow volume creates the item, neither the rename nor
+        // the reload may land on whichever tab happens to be active when the
+        // operation completes — reloading the wrong one leaves the initiating
+        // folder stale and the rename waiting for a row that never arrives.
         let pane = self.active().pane.clone();
-        cx.spawn(async move |this, cx| match create(fs, path.clone()).await {
+        let folder = self.active().folder.clone();
+        cx.spawn(async move |_, cx| match create(fs, path.clone()).await {
             Ok(()) => {
                 if needs_reload {
-                    let _ = this.update(cx, |this, cx| this.refresh(cx));
+                    folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
                 }
                 let _ = window_handle.update(cx, |_, _window, cx| {
                     pane.update(cx, |pane, cx| pane.request_rename_when_visible(path, cx));
