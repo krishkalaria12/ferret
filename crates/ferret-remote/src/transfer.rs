@@ -163,9 +163,19 @@ async fn run(
     conflict: Conflict,
     events: &async_channel::Sender<TransferEvent>,
 ) -> Result<()> {
+    // The receiver going away is the cancellation signal for the whole job,
+    // including the planning phase that runs before any event is sent.
+    let cancelled = || events.is_closed();
     let planned = match direction {
-        Direction::Upload => plan_upload(&sftp, &sources, &destination).await?,
-        Direction::Download => plan_download(&sftp, &sources, &destination).await?,
+        Direction::Upload => plan_upload(&sftp, &sources, &destination, &cancelled).await,
+        Direction::Download => plan_download(&sftp, &sources, &destination, &cancelled).await,
+    };
+    let planned = match planned {
+        Ok(planned) => planned,
+        // A job cancelled while planning ends quietly: nobody is listening,
+        // and there is nothing to report to.
+        Err(RemoteError::Cancelled) => return Ok(()),
+        Err(error) => return Err(error),
     };
 
     let total_files = planned.len();
@@ -245,13 +255,19 @@ async fn run(
 
 /// Expand the selection into files, creating the directories they need.
 ///
-/// Directories are walked with `std::fs` on a blocking thread rather than with
-/// a parallel walker: the job here is enumerating what the user selected, not
-/// visiting a tree as fast as possible, and D-34's rule is one walker per job.
+/// The local tree is walked with `jwalk` on Ferret's own pool, which is the
+/// walker D-34 assigns to bulk file work like a tree copy — and never rayon's
+/// implicit global pool, which would be a second one.
+///
+/// `cancelled` is checked as the walk proceeds. Planning happens before any
+/// progress event exists, so without it a drop could not stop a walk over a
+/// large selection, and the transfer would keep creating remote directories
+/// for a job nobody is waiting on.
 async fn plan_upload(
     sftp: &Arc<SftpVfs>,
     sources: &[TransferSource],
     destination: &TransferDestination,
+    cancelled: &(impl Fn() -> bool + Send + Sync),
 ) -> Result<Vec<PlannedFile>> {
     let TransferDestination::RemoteDir(dest) = destination else {
         return Err(RemoteError::Unsupported {
@@ -267,14 +283,36 @@ async fn plan_upload(
         .collect();
 
     let dest = dest.trim_end_matches('/').to_string();
-    let expanded = tokio::task::spawn_blocking(move || expand_local(&locals, &dest))
-        .await
-        .map_err(|_| RemoteError::Cancelled)??;
+    let stop = CancelFlag::default();
+    let walk_stop = stop.clone();
+    // The walk runs on a blocking thread and cannot poll the event channel
+    // itself, so the flag is what carries the cancellation across to it.
+    let mut walk = Box::pin(tokio::task::spawn_blocking(move || {
+        expand_local(&locals, &dest, &walk_stop)
+    }));
+    let expanded = loop {
+        tokio::select! {
+            finished = &mut walk => {
+                break finished.map_err(|_| RemoteError::Cancelled)??;
+            }
+            _ = tokio::time::sleep(PLAN_CANCEL_POLL) => {
+                if cancelled() {
+                    stop.set();
+                }
+            }
+        }
+    };
+    if cancelled() {
+        return Err(RemoteError::Cancelled);
+    }
 
     // Every directory the plan needs, deepest last, created before any file
     // lands in it. `mkdir` on one that exists is not an error worth stopping
     // for — another transfer may have made it a second ago.
     for directory in &expanded.directories {
+        if cancelled() {
+            return Err(RemoteError::Cancelled);
+        }
         let _ = sftp
             .raw_session()
             .mkdir(directory.clone(), FileAttributes::empty())
@@ -287,6 +325,7 @@ async fn plan_download(
     sftp: &Arc<SftpVfs>,
     sources: &[TransferSource],
     destination: &TransferDestination,
+    cancelled: &(impl Fn() -> bool + Send + Sync),
 ) -> Result<Vec<PlannedFile>> {
     let TransferDestination::LocalDir(dest) = destination else {
         return Err(RemoteError::Unsupported {
@@ -298,9 +337,23 @@ async fn plan_download(
         let TransferSource::Remote(path) = source else {
             continue;
         };
-        collect_remote(sftp, path, dest, &mut files).await?;
+        collect_remote(sftp, path, dest, &mut files, cancelled).await?;
     }
     Ok(files)
+}
+
+/// A stop flag the blocking walk can see.
+#[derive(Clone, Default)]
+struct CancelFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelFlag {
+    fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_set(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 struct ExpandedUpload {
@@ -308,65 +361,111 @@ struct ExpandedUpload {
     directories: Vec<String>,
 }
 
-fn expand_local(sources: &[PathBuf], dest: &str) -> Result<ExpandedUpload> {
+fn expand_local(sources: &[PathBuf], dest: &str, stop: &CancelFlag) -> Result<ExpandedUpload> {
     let mut files = Vec::new();
     let mut directories = Vec::new();
     for source in sources {
+        if stop.is_set() {
+            return Err(RemoteError::Cancelled);
+        }
         let Some(name) = source.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
         let target = format!("{dest}/{name}");
-        walk_local(source, &target, &mut files, &mut directories)?;
+        walk_local(source, &target, &mut files, &mut directories, stop)?;
     }
     Ok(ExpandedUpload { files, directories })
 }
 
+/// One selected item, expanded into the files and directories it implies.
+///
+/// `jwalk` on Ferret's shared pool (D-34): this is bulk file work with no
+/// ignore semantics, which is exactly the job that walker owns, and
+/// `pool::parallelism()` is what keeps it off rayon's implicit global pool.
+///
+/// Symlinks are not followed. Following one turns a link loop into an infinite
+/// transfer and copies data the user never pointed at.
 fn walk_local(
     source: &Path,
     target: &str,
     files: &mut Vec<PlannedFile>,
     directories: &mut Vec<String>,
+    stop: &CancelFlag,
 ) -> Result<()> {
     let metadata = std::fs::symlink_metadata(source).map_err(|error| RemoteError::Server {
         path: source.display().to_string(),
         message: error.to_string(),
     })?;
 
-    // Symlinks are not followed: following one turns a link loop into an
-    // infinite transfer, and copies data the user never pointed at.
     if metadata.is_symlink() {
         return Ok(());
     }
 
-    if metadata.is_dir() {
-        directories.push(target.to_string());
-        let entries = std::fs::read_dir(source).map_err(|error| RemoteError::Server {
-            path: source.display().to_string(),
-            message: error.to_string(),
-        })?;
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            walk_local(
-                &entry.path(),
-                &format!("{target}/{name}"),
-                files,
-                directories,
-            )?;
-        }
+    if !metadata.is_dir() {
+        files.push(PlannedFile {
+            name: source
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            local: source.to_path_buf(),
+            remote: target.to_string(),
+            bytes: metadata.len(),
+        });
         return Ok(());
     }
 
-    files.push(PlannedFile {
-        name: source
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        local: source.to_path_buf(),
-        remote: target.to_string(),
-        bytes: metadata.len(),
-    });
+    directories.push(target.to_string());
+    for entry in jwalk::WalkDir::new(source)
+        .parallelism(ferret_vfs::pool::parallelism())
+        .skip_hidden(false)
+        .follow_links(false)
+    {
+        if stop.is_set() {
+            return Err(RemoteError::Cancelled);
+        }
+        let Ok(entry) = entry else { continue };
+        // The root of the walk is the directory itself, already recorded.
+        let Ok(relative) = entry.path().strip_prefix(source).map(Path::to_path_buf) else {
+            continue;
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        // A remote path is `/`-separated whatever this platform uses locally,
+        // and a component that is not usable text has no name to send.
+        let mut suffix = String::new();
+        for component in relative.components() {
+            let Some(part) = component.as_os_str().to_str() else {
+                suffix.clear();
+                break;
+            };
+            suffix.push('/');
+            suffix.push_str(part);
+        }
+        if suffix.is_empty() {
+            continue;
+        }
+        let remote = format!("{target}{suffix}");
+
+        if entry.path_is_symlink() {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            directories.push(remote);
+            continue;
+        }
+        let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        files.push(PlannedFile {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            local: entry.path(),
+            remote,
+            bytes,
+        });
+    }
+    // Parents before children, so a file never lands before its directory
+    // exists. `jwalk` yields depth-first but not in a guaranteed order across
+    // threads, and sorting by depth is cheaper than reasoning about it.
+    directories.sort_by_key(|path| path.matches('/').count());
     Ok(())
 }
 
@@ -377,8 +476,14 @@ fn collect_remote<'a>(
     path: &'a str,
     dest: &'a Path,
     files: &'a mut Vec<PlannedFile>,
+    cancelled: &'a (impl Fn() -> bool + Send + Sync),
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
+        // Walking a server's tree is round trips, so a cancelled job must stop
+        // here rather than at the first byte it would have moved.
+        if cancelled() {
+            return Err(RemoteError::Cancelled);
+        }
         let raw = sftp.raw_session();
         let attrs = raw
             .lstat(path.to_string())
@@ -429,7 +534,7 @@ fn collect_remote<'a>(
             let _ = raw.close(handle).await;
             for child in children {
                 let child_path = format!("{}/{}", path.trim_end_matches('/'), child);
-                collect_remote(sftp, &child_path, &local, files).await?;
+                collect_remote(sftp, &child_path, &local, files, cancelled).await?;
             }
             return Ok(());
         }
@@ -769,7 +874,8 @@ mod tests {
         std::fs::write(nested.join("a.txt"), b"hello").unwrap();
         std::fs::write(root.join("tree").join("b.txt"), b"hi").unwrap();
 
-        let expanded = expand_local(&[root.join("tree")], "/srv/dest").unwrap();
+        let expanded =
+            expand_local(&[root.join("tree")], "/srv/dest", &CancelFlag::default()).unwrap();
         std::fs::remove_dir_all(&root).ok();
 
         let mut remotes: Vec<&str> = expanded.files.iter().map(|f| f.remote.as_str()).collect();
@@ -802,7 +908,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
 
-        let expanded = expand_local(&[root.join("link.txt")], "/srv").unwrap();
+        let expanded =
+            expand_local(&[root.join("link.txt")], "/srv", &CancelFlag::default()).unwrap();
         std::fs::remove_dir_all(&root).ok();
 
         // Following a link copies data the user never pointed at, and a loop

@@ -2396,6 +2396,7 @@ dependencies = [
  "dirs",
  "ferret-vfs",
  "futures",
+ "jwalk",
  "keyring",
  "parking_lot",
  "russh",

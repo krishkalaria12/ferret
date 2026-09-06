@@ -10,6 +10,11 @@ repository.workspace = true
 [dependencies]
 ferret-vfs.workspace = true
 
+# D-34. The plan phase of a transfer is bulk file work with no ignore
+# semantics — a tree copy — which is the job this walker owns. Always through
+# `ferret_vfs::pool::parallelism()`, never rayon's implicit global pool.
+jwalk.workspace = true
+
 async-channel.workspace = true
 async-trait.workspace = true
 dirs.workspace = true

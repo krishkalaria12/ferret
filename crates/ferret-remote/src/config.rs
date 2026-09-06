@@ -95,6 +95,14 @@ pub const TRANSFER_CHUNK: usize = 32 * 1024;
 /// without buffering half a gigabyte in memory.
 pub const TRANSFER_WINDOW: usize = 16;
 
+/// How often a transfer's planning walk checks whether it was cancelled.
+///
+/// The walk runs on a blocking thread and cannot poll the event channel
+/// itself, so a flag carries the news across and this is how often it is set.
+/// A quarter of a second is imperceptible to a person and thousands of
+/// directory entries to the walk.
+pub const PLAN_CANCEL_POLL: Duration = Duration::from_millis(250);
+
 /// Suffix for a partially written upload.
 ///
 /// A transfer writes here and renames into place on success, so a cancelled or
