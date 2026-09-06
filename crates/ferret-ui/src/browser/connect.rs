@@ -403,7 +403,23 @@ async fn dial(
                 if answer.remember {
                     // Best effort: a keychain that refuses to store must not
                     // stop a connection that is otherwise ready to go.
-                    let _ = ferret_remote::store_secret(&record.id, stored_kind, &answer.secret);
+                    if ferret_remote::store_secret(&record.id, stored_kind, &answer.secret).is_ok()
+                    {
+                        // The flag is what the *next* dial reads to know there
+                        // is anything to load. Storing the secret without
+                        // setting it would prompt again every time and look
+                        // like the checkbox did nothing.
+                        let id = record.id.clone();
+                        cx.update(move |cx| {
+                            let state = cx.global_mut::<FerretState>();
+                            if let Some(existing) = state.connections.get(&id) {
+                                let mut updated = existing.clone();
+                                updated.remember_secret = true;
+                                state.connections.update(updated);
+                            }
+                            crate::state::arm_config_save(cx);
+                        });
+                    }
                 }
                 match kind {
                     PromptKind::KeyPassphrase => {
