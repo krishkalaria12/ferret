@@ -327,6 +327,11 @@ impl Browser {
     /// was held. The cross-volume case is not guessed at from the paths —
     /// `rename` reports `CrossVolume` and the copy path takes over, which is
     /// the only answer that stays right for mount points and network shares.
+    ///
+    /// A drop that spans local disk and a mount is a different operation
+    /// entirely: the router refuses it by design, because moving those bytes
+    /// is a network transfer that needs progress and a cancel. It is handed to
+    /// the transfer queue instead of failing.
     pub(super) fn transfer(
         &mut self,
         sources: Vec<VfsPath>,
@@ -335,6 +340,10 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some((sources, dest)) = crossing_backends(&sources, &dest) {
+            self.transfer_across_backends(sources, dest, window, cx);
+            return;
+        }
         let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
         // Names are settled here, so a copy beside its original gets "file 2"
@@ -701,4 +710,83 @@ fn read_clipboard_paths(cx: &App) -> Option<Vec<VfsPath>> {
         .map(VfsPath::local)
         .collect();
     (!paths.is_empty()).then_some(paths)
+}
+
+/// The sources that would cross a backend boundary landing in `dest`, if any.
+///
+/// Returns `None` when every source is on the same side as the destination,
+/// which is the ordinary drop the `Vfs` handles directly. A mixed selection
+/// keeps only the crossing half here; the rest is refused rather than
+/// half-handled, because a drag that silently did two different things to two
+/// halves of one selection would be worse than one that did nothing.
+fn crossing_backends(sources: &[VfsPath], dest: &VfsPath) -> Option<(Vec<VfsPath>, VfsPath)> {
+    let crossing: Vec<VfsPath> = sources
+        .iter()
+        .filter(|source| !same_backend(source, dest))
+        .cloned()
+        .collect();
+    (!crossing.is_empty()).then(|| (crossing, dest.clone()))
+}
+
+/// Whether two paths live on the same backend, and so can be renamed or copied
+/// between without moving bytes across a link.
+fn same_backend(a: &VfsPath, b: &VfsPath) -> bool {
+    match (a, b) {
+        (VfsPath::Local(_), VfsPath::Local(_)) => true,
+        (VfsPath::Remote { mount: x, .. }, VfsPath::Remote { mount: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod transfer_routing_tests {
+    use super::*;
+    use ferret_vfs::MountId;
+
+    #[test]
+    fn a_drop_within_one_backend_is_not_a_transfer() {
+        let local = VfsPath::local("/tmp/a");
+        let dest = VfsPath::local("/tmp/dir");
+        assert!(crossing_backends(&[local], &dest).is_none());
+
+        let remote = VfsPath::remote(MountId(1), "/srv/a");
+        let remote_dest = VfsPath::remote(MountId(1), "/srv/dir");
+        assert!(crossing_backends(&[remote], &remote_dest).is_none());
+    }
+
+    #[test]
+    fn a_drop_that_crosses_is_routed_to_the_queue() {
+        // Both directions: the router refuses each of these pairs, so each has
+        // to become a transfer rather than an error.
+        let up = crossing_backends(
+            &[VfsPath::local("/tmp/a")],
+            &VfsPath::remote(MountId(1), "/srv"),
+        );
+        assert_eq!(up.expect("upload").0.len(), 1);
+
+        let down = crossing_backends(
+            &[VfsPath::remote(MountId(1), "/srv/a")],
+            &VfsPath::local("/tmp"),
+        );
+        assert_eq!(down.expect("download").0.len(), 1);
+
+        // Two servers are two backends, and neither is the destination's.
+        let across = crossing_backends(
+            &[VfsPath::remote(MountId(2), "/srv/a")],
+            &VfsPath::remote(MountId(1), "/srv"),
+        );
+        assert_eq!(across.expect("cross-mount").0.len(), 1);
+    }
+
+    #[test]
+    fn a_mixed_selection_only_routes_the_crossing_half() {
+        let sources = vec![
+            VfsPath::local("/tmp/a"),
+            VfsPath::remote(MountId(1), "/srv/b"),
+        ];
+        let (crossing, _) = crossing_backends(&sources, &VfsPath::local("/tmp/dir"))
+            .expect("the remote source crosses");
+        assert_eq!(crossing.len(), 1);
+        assert!(!crossing[0].is_local());
+    }
 }

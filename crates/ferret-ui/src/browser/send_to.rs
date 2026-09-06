@@ -435,6 +435,76 @@ impl Browser {
         }));
     }
 
+    /// Run a drop that crosses between local disk and a mount.
+    ///
+    /// The router refuses these pairs on purpose — moving those bytes is a
+    /// network transfer, not a rename — so the gesture is completed here
+    /// instead of failing. The destination is already known, so unlike "Send
+    /// to" there is nothing to ask: the drop said where.
+    ///
+    /// Conflicts resolve to Skip. A drop is a quick gesture and the pane it
+    /// landed in may not even be visible; silently overwriting on the strength
+    /// of a drag is not a trade this makes.
+    pub(super) fn transfer_across_backends(
+        &mut self,
+        sources: Vec<VfsPath>,
+        dest: VfsPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mount = match (&dest, sources.first()) {
+            (VfsPath::Remote { mount, .. }, _) => *mount,
+            (VfsPath::Local(_), Some(VfsPath::Remote { mount, .. })) => *mount,
+            _ => return,
+        };
+        let state = cx.global::<FerretState>();
+        let Some(record) =
+            crate::mounts::connection_for_mount(state.connections.connections(), mount).cloned()
+        else {
+            return;
+        };
+        let Some(backend) = state.mounts.backend(&record.id) else {
+            window.push_notification(
+                Notification::error(format!("{} isn't connected.", record.display_name())),
+                cx,
+            );
+            return;
+        };
+
+        let job = match &dest {
+            // Local selection into a remote folder.
+            VfsPath::Remote { path, .. } => backend.transfer(
+                Direction::Upload,
+                sources
+                    .iter()
+                    .filter_map(|source| {
+                        source
+                            .as_local()
+                            .map(|path| TransferSource::Local(path.to_path_buf()))
+                    })
+                    .collect(),
+                TransferDestination::RemoteDir(path.to_string()),
+                Conflict::Skip,
+            ),
+            // Remote selection into a local folder.
+            VfsPath::Local(path) => backend.transfer(
+                Direction::Download,
+                sources
+                    .iter()
+                    .filter_map(|source| match source {
+                        VfsPath::Remote { path, .. } => {
+                            Some(TransferSource::Remote(path.to_string()))
+                        }
+                        VfsPath::Local(_) => None,
+                    })
+                    .collect(),
+                TransferDestination::LocalDir(path.to_path_buf()),
+                Conflict::Skip,
+            ),
+        };
+        self.pump_transfer(job, record.id, window, cx);
+    }
+
     /// Handle the menu's `SendToConnection`: look the record up and start.
     ///
     /// The action carries an id rather than a record because a menu is built
