@@ -49,6 +49,15 @@ Already done, do not redo:
 Still to create: `ferret-platform` (trash, reveal, open-with, volumes, Places),
 the `notify` file watcher in `ferret-vfs`, and everything in `ferret-ui`.
 
+**Remote mounts are live.** `FerretState.fs` is a `ferret_vfs::Router`, not a
+`LocalFs`: it dispatches each `VfsPath` to local disk or to a mounted backend,
+and local paths still go straight to `LocalFs` with no dynamic dispatch. Two
+consequences worth knowing before touching anything that takes a path — a
+directory on a mount has **no watcher**, so a mutation there has to reload the
+listing itself, and there is **no trash on a server**, so a remote delete is
+explicitly permanent and always confirmed. Ask `capabilities_for(path)`, never
+`capabilities()`, when deciding what a folder can do.
+
 ### Gates
 
 Do not move past a gate until it passes. These exist because each one is far
@@ -132,6 +141,14 @@ base shippable.
 │   │   ├── src/discover.rs # rev-parse --show-cdup --absolute-git-dir
 │   │   ├── src/status.rs   # porcelain v2 parser + the per-path status index
 │   │   └── src/ops.rs      # status, stage_all, commit, pull, push
+│   ├── ferret-remote/    # Saved SSH connections, SFTP mounts, transfers (GPUI-free)
+│   │   ├── src/session.rs   # Dial, host-key check, authenticate, disconnect
+│   │   ├── src/sftp.rs      # `SftpVfs` — the Vfs impl; streaming listings
+│   │   ├── src/transfer.rs  # "Send to": part-file uploads and downloads
+│   │   ├── src/runtime.rs   # The one Tokio runtime `russh` needs (R-D03)
+│   │   ├── src/host_keys.rs # known_hosts: known, unknown, changed (R-D08)
+│   │   ├── src/secrets.rs   # The only module that touches a secret
+│   │   └── src/store.rs     # connections.json + ~/.ssh/config import
 │   ├── ferret-search/    # Filename and content search (GPUI-free)
 │   │   ├── src/live.rs   # The always-available filesystem walk
 │   │   ├── src/index/    # SQLite path index + Tantivy content index
@@ -165,6 +182,7 @@ base shippable.
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
 | `crates/ferret-git` | `ferret-git` | Repository discovery, `git status` parsing and the four operations the status bar offers. Reaches git through the **git binary** (D-04), so the user's credential helper, SSH agent, hooks and config all keep working. Knows nothing about GPUI. See `docs/git.html`. |
+| `crates/ferret-remote` | `ferret-remote` | Saved SSH connections, host-key policy, the OS keychain, the SFTP `Vfs` backend and file transfers. Interactive SSH shells out to the **`ssh` binary** (D-07), so the user's own config, agent and jump hosts keep working; only browsing uses the in-process client (D-06). Owns the single Tokio runtime `russh` needs and lets no `russh` type cross its boundary. Knows nothing about GPUI. See `docs/ssh-scp-plan.html`. |
 | `crates/ferret-search` | `ferret-search` | Filename and content search: the live walk, the persistent index, the local protocol, and the planner that merges them. GPUI-free. |
 | `crates/ferret-searchd` | `ferret-searchd` | The unprivileged per-user daemon that owns the index's lifecycle. Optional at runtime — Ferret searches live without it. |
 | `crates/ferret-settings` | `ferret-settings` | The settings schema and per-folder view preferences. Knows nothing about GPUI or the filesystem layer. Every key it ships is read by something, and a test enforces that (D-41). |
