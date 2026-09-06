@@ -28,6 +28,9 @@ pub struct SftpVfs {
     host: Arc<str>,
     raw: Arc<RawSftpSession>,
     atomic_rename: bool,
+    /// The server advertises `copy-data`, so it can copy a file's bytes
+    /// itself. Without it there is no server-side copy in SFTP v3.
+    server_side_copy: bool,
     /// What this mount remembers between calls, and the permit pool that caps
     /// how many listings it may have open at once. See [`crate::cache`].
     cache: Arc<MountCache>,
@@ -64,6 +67,7 @@ impl SftpVfs {
             host: Arc::from("the remote server"),
             raw: Arc::new(raw),
             atomic_rename: version.extensions.contains_key("posix-rename@openssh.com"),
+            server_side_copy: version.extensions.contains_key("copy-data"),
             cache: Arc::new(MountCache::default()),
         })
     }
@@ -500,6 +504,32 @@ impl Vfs for SftpVfs {
             .map_err(|error| error.into_vfs("delete", path))?
     }
 
+    /// Copy a file or a tree within one mount, server-side.
+    ///
+    /// The router has already refused a pair that spans two backends, so both
+    /// ends are on this server and no byte needs to cross the link. That is
+    /// only possible when the server advertises `copy-data`: SFTP v3 has no
+    /// copy of its own, and doing it client-side would be a download followed
+    /// by an upload — a transfer, which belongs in the queue with progress and
+    /// a cancel button rather than hidden behind a trait method that looks
+    /// instant.
+    async fn copy(&self, from: &VfsPath, to: &VfsPath) -> ferret_vfs::Result<()> {
+        if !self.server_side_copy {
+            return Err(VfsError::Unsupported {
+                capability: "copying files on the server",
+            });
+        }
+        let source = self.remote_path(from)?;
+        let destination = self.remote_path(to)?;
+        self.cache.invalidate(&destination);
+
+        let raw = self.raw.clone();
+        let subject = to.clone();
+        crate::spawn(async move { copy_recursive(&raw, source, destination, &subject).await })
+            .await
+            .map_err(|error| error.into_vfs("copy", from))?
+    }
+
     /// What makes Refresh mean "ask the server".
     ///
     /// Unconditional: the browser calls this immediately before re-listing, so
@@ -571,6 +601,127 @@ fn remove_recursive<'a>(
             .map(drop)
             .map_err(|error| map_error(error, "delete", subject))
     })
+}
+
+/// Copy one path to another on the same server, recursing into directories.
+///
+/// Boxed because it recurses in an `async fn`. Files go through `copy-data`,
+/// which moves the bytes inside the server; directories are recreated and
+/// walked, because the extension copies a file handle's contents and has no
+/// concept of a tree.
+fn copy_recursive<'a>(
+    raw: &'a Arc<RawSftpSession>,
+    from: String,
+    to: String,
+    subject: &'a VfsPath,
+) -> std::pin::Pin<Box<dyn Future<Output = ferret_vfs::Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let attrs = raw
+            .lstat(from.clone())
+            .await
+            .map_err(|error| map_error(error, "copy", subject))?;
+
+        // A symlink is copied as a link rather than followed, the same rule
+        // the delete and the transfer walk follow.
+        if attrs.attrs.is_symlink() {
+            let target = raw
+                .readlink(from.clone())
+                .await
+                .ok()
+                .and_then(|names| names.files.into_iter().next().map(|file| file.filename));
+            if let Some(target) = target {
+                return raw
+                    .symlink(to, target)
+                    .await
+                    .map(drop)
+                    .map_err(|error| map_error(error, "copy", subject));
+            }
+            return Ok(());
+        }
+
+        if attrs.attrs.is_dir() {
+            let _ = raw.mkdir(to.clone(), FileAttributes::empty()).await;
+            let handle = raw
+                .opendir(from.clone())
+                .await
+                .map_err(|error| map_error(error, "copy", subject))?
+                .handle;
+            let mut children = Vec::new();
+            loop {
+                match raw.readdir(handle.clone()).await {
+                    Ok(response) => children.extend(
+                        response
+                            .files
+                            .into_iter()
+                            .map(|file| file.filename)
+                            .filter(|name| valid_name(name)),
+                    ),
+                    Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = raw.close(handle).await;
+                        return Err(map_error(error, "copy", subject));
+                    }
+                }
+            }
+            let _ = raw.close(handle).await;
+            for child in children {
+                let source = format!("{}/{}", from.trim_end_matches('/'), child);
+                let target = format!("{}/{}", to.trim_end_matches('/'), child);
+                copy_recursive(raw, source, target, subject).await?;
+            }
+            return Ok(());
+        }
+
+        copy_file_data(raw, &from, &to, subject).await
+    })
+}
+
+/// One file's contents, copied inside the server with `copy-data`.
+///
+/// The extension takes two open handles and a range, so both files are opened
+/// here and closed however this ends. A length of zero means "to the end of
+/// the source", which is what a copy wants.
+async fn copy_file_data(
+    raw: &Arc<RawSftpSession>,
+    from: &str,
+    to: &str,
+    subject: &VfsPath,
+) -> ferret_vfs::Result<()> {
+    let source = raw
+        .open(from.to_string(), OpenFlags::READ, FileAttributes::empty())
+        .await
+        .map_err(|error| map_error(error, "copy", subject))?
+        .handle;
+    let destination = match raw
+        .open(
+            to.to_string(),
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            FileAttributes::empty(),
+        )
+        .await
+    {
+        Ok(opened) => opened.handle,
+        Err(error) => {
+            let _ = raw.close(source).await;
+            return Err(map_error(error, "copy", subject));
+        }
+    };
+
+    let mut payload = Vec::new();
+    encode_string(&mut payload, &source);
+    payload.extend_from_slice(&0_u64.to_be_bytes()); // read from the start
+    payload.extend_from_slice(&0_u64.to_be_bytes()); // to the end of the file
+    encode_string(&mut payload, &destination);
+    payload.extend_from_slice(&0_u64.to_be_bytes()); // write from the start
+
+    let outcome = raw.extended("copy-data", payload).await;
+    let _ = raw.close(source).await;
+    let _ = raw.close(destination).await;
+    outcome
+        .map(drop)
+        .map_err(|error| map_error(error, "copy", subject))
 }
 
 /// An SSH `string`: a four-byte big-endian length followed by the bytes.

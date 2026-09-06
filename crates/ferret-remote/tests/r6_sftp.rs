@@ -447,6 +447,41 @@ fn a_file_whose_size_is_not_a_chunk_multiple_round_trips_exactly() {
     shutdown_runtime();
 }
 
+#[test]
+fn a_copy_within_one_mount_needs_no_bytes_over_the_link() {
+    let Some(server) = sshd::Sshd::start_if_enabled() else {
+        eprintln!("skipped: set FERRET_REMOTE_SSHD_TEST=1 to run the sftp suite");
+        return;
+    };
+    let sftp = mount(&server);
+    let dir = scratch(&sftp, "ferret-r6-copy");
+
+    let source = dir.join("original.txt");
+    smol::block_on(sftp.create_file(&source)).expect("create");
+
+    // `copy-data` is an OpenSSH extension. Where the server has it, copy and
+    // paste inside one mount works; where it does not, the answer must be a
+    // clean `Unsupported` rather than a confusing protocol error, because the
+    // alternative is a download plus an upload and that belongs in the queue.
+    let result = smol::block_on(sftp.copy(&source, &dir.join("copy.txt")));
+    match result {
+        Ok(()) => {
+            eprintln!("copy-data: supported by this server");
+            assert!(list_names(&sftp, &dir).contains(&"copy.txt".to_string()));
+        }
+        Err(error) => {
+            eprintln!("copy-data: not advertised — {error}");
+            assert!(
+                matches!(error, ferret_vfs::VfsError::Unsupported { .. }),
+                "a server without copy-data must say so plainly, got {error}"
+            );
+        }
+    }
+
+    let _ = smol::block_on(sftp.remove(&dir, RemoveMode::Permanent));
+    shutdown_runtime();
+}
+
 /// Run a transfer to completion, returning `(copied, failed)`.
 fn drain(job: ferret_remote::Transfer) -> (usize, usize) {
     smol::block_on(async {
