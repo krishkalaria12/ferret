@@ -259,7 +259,18 @@ impl Browser {
         }
 
         let dir = self.active().folder.read(cx).dir.clone();
-        let crumbs = breadcrumb_targets(&dir);
+        // A remote root crumb names the server rather than showing a mount
+        // number. An unmounted path still resolves here, so a tab left over
+        // from a disconnected session keeps a readable trail.
+        let mount_label = match &dir {
+            VfsPath::Remote { mount, .. } => {
+                let state = cx.global::<FerretState>();
+                crate::mounts::connection_for_mount(state.connections.connections(), *mount)
+                    .map(|connection| connection.display_name())
+            }
+            VfsPath::Local(_) => None,
+        };
+        let crumbs = breadcrumb_targets(&dir, mount_label.as_deref());
         let this = cx.weak_entity();
 
         let mut items = Vec::with_capacity(crumbs.len());
@@ -482,7 +493,15 @@ fn tool_button_pencil(
 
 /// `(label, target)` pairs from root to `dir`, with the home prefix folded
 /// into a single `~`.
-fn breadcrumb_targets(dir: &VfsPath) -> Vec<(String, VfsPath)> {
+///
+/// `mount_label` names the server for a remote path. It is passed in rather
+/// than looked up because this crate's path handling has no business knowing
+/// about connection records — and a mount number in the breadcrumb would tell
+/// the user nothing.
+fn breadcrumb_targets(dir: &VfsPath, mount_label: Option<&str>) -> Vec<(String, VfsPath)> {
+    if let VfsPath::Remote { mount, path } = dir {
+        return remote_breadcrumb_targets(*mount, path, mount_label);
+    }
     let Some(local) = dir.as_local() else {
         return vec![];
     };
@@ -522,6 +541,30 @@ fn breadcrumb_targets(dir: &VfsPath) -> Vec<(String, VfsPath)> {
         .collect()
 }
 
+/// Crumbs for a mounted path: the server's name as the root, then one crumb
+/// per segment.
+///
+/// Remote paths are always `/`-separated UTF-8, so this splits the string
+/// rather than going through `Path` — which would apply the *local*
+/// platform's rules to a path that does not follow them.
+fn remote_breadcrumb_targets(
+    mount: ferret_vfs::MountId,
+    path: &str,
+    mount_label: Option<&str>,
+) -> Vec<(String, VfsPath)> {
+    let mut out = vec![(
+        mount_label.unwrap_or("Remote").to_string(),
+        VfsPath::remote(mount, "/"),
+    )];
+    let mut accumulated = String::new();
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        accumulated.push('/');
+        accumulated.push_str(segment);
+        out.push((segment.to_string(), VfsPath::remote(mount, &accumulated)));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,12 +574,43 @@ mod tests {
         let Some(home) = dirs::home_dir() else {
             return; // No home on this machine; nothing to fold.
         };
-        let crumbs = breadcrumb_targets(&VfsPath::local(home.join("Projects/ferret")));
+        let crumbs = breadcrumb_targets(&VfsPath::local(home.join("Projects/ferret")), None);
         let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, ["~", "Projects", "ferret"]);
 
         // The tilde still has to navigate somewhere real.
         assert_eq!(crumbs[0].1, VfsPath::local(home));
+    }
+
+    #[test]
+    fn a_remote_breadcrumb_is_rooted_at_the_server_name() {
+        let mount = ferret_vfs::MountId(3);
+        let crumbs = breadcrumb_targets(
+            &VfsPath::remote(mount, "/srv/data/reports"),
+            Some("build-box"),
+        );
+        let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
+        // The root crumb names the server. A mount number would be accurate
+        // and useless.
+        assert_eq!(labels, ["build-box", "srv", "data", "reports"]);
+
+        assert_eq!(crumbs[0].1, VfsPath::remote(mount, "/"));
+        assert_eq!(crumbs[2].1, VfsPath::remote(mount, "/srv/data"));
+    }
+
+    #[test]
+    fn a_remote_root_is_one_crumb_and_navigates_nowhere_else() {
+        let crumbs = breadcrumb_targets(&VfsPath::remote(ferret_vfs::MountId(1), "/"), Some("box"));
+        assert_eq!(crumbs.len(), 1);
+    }
+
+    #[test]
+    fn an_unnamed_mount_still_renders_a_trail() {
+        // A tab restored while its server is disconnected has a valid path and
+        // no record to name it; it must not render an empty bar.
+        let crumbs = breadcrumb_targets(&VfsPath::remote(ferret_vfs::MountId(9), "/var/log"), None);
+        let labels: Vec<&str> = crumbs.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["Remote", "var", "log"]);
     }
 
     fn dir_entry(name: &str, hidden: bool) -> ferret_vfs::Entry {

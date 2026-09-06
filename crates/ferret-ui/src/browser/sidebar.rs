@@ -3,6 +3,7 @@
 //! favourites.
 
 use super::*;
+use ferret_remote::Connection;
 
 /// Sidebar width bounds; mirrors `ferret-settings`' clamps so a drag can't
 /// produce a width the settings file would refuse.
@@ -184,6 +185,14 @@ impl Browser {
         } else {
             Vec::new()
         };
+        // Connection records are small and bounded by what a person saved.
+        // Clone them before building rows so the render does not hold a global
+        // borrow while installing event handlers.
+        let connections = cx
+            .global::<FerretState>()
+            .connections
+            .connections()
+            .to_vec();
         let current = current_place(
             &dir,
             places
@@ -253,6 +262,21 @@ impl Browser {
             ));
         }
 
+        // Unlike the other optional groups, Connections keeps its heading
+        // while empty: the trailing + is the discovery and creation affordance
+        // shown by the product reference (F-20).
+        side = side.child(connection_section_label(cx.weak_entity(), cx));
+        for (i, connection) in connections.into_iter().enumerate() {
+            let active =
+                matches!(&dir, VfsPath::Remote { mount, .. } if *mount == connection.mount);
+            side = side.child(self.sidebar_connection_row(
+                ("sidebar-connection", i),
+                connection,
+                active,
+                cx,
+            ));
+        }
+
         if !volumes.is_empty() {
             side = side.child(section_label("Volumes", cx));
         }
@@ -270,6 +294,151 @@ impl Browser {
         }
 
         side
+    }
+
+    fn sidebar_connection_row(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        connection: Connection,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::mounts::MountStatus;
+
+        let selected = crate::theme::BrowserPalette::resolve(cx).selected;
+        let theme = cx.theme();
+        let status = self.mount_status(&connection.id, cx);
+        let foreground = if active {
+            crate::theme::text_on(selected, theme.sidebar_foreground)
+        } else {
+            theme.sidebar_foreground
+        };
+        // State is carried by the icon rather than by a badge: the row is 22
+        // logical pixels and a second element would crowd the name out.
+        let icon_color = match &status {
+            MountStatus::Connected => theme.primary,
+            MountStatus::Failed(_) => theme.danger,
+            _ => foreground.opacity(0.9),
+        };
+        // The subtitle is the one place a failure reason fits. `endpoint()`
+        // returns when the row recovers, so nothing has to clear it.
+        let (subtitle, subtitle_color) = match &status {
+            MountStatus::Connecting => ("Connecting…".to_string(), foreground.opacity(0.65)),
+            MountStatus::Failed(reason) => (reason.to_string(), theme.danger),
+            _ => (connection.endpoint(), foreground.opacity(0.65)),
+        };
+
+        let this = cx.weak_entity();
+        let clicked = connection.clone();
+        let menu_record = connection.clone();
+        let connected = status.is_connected();
+        let row = h_flex()
+            .id(id.into())
+            .w_full()
+            .min_h(px(SIDEBAR_ROW_HEIGHT + 10.))
+            .mx(px(8.))
+            .rounded(px(6.))
+            .px(px(10.))
+            .gap(px(10.))
+            .items_center()
+            .when(active, |el| el.bg(selected))
+            .when(!active, |el| el.hover(|el| el.bg(theme.secondary)))
+            .when(status.is_busy(), |el| el.opacity(0.7))
+            .child(
+                Icon::new(gpui_component::IconName::Globe)
+                    .with_size(px(super::SIDEBAR_ICON_SIZE))
+                    .text_color(icon_color),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(foreground)
+                            .child(connection.display_name()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(subtitle_color)
+                            .child(subtitle),
+                    ),
+            )
+            // One click connects, and a second navigates without re-dialling —
+            // `open_connection` decides which, because only it knows whether
+            // the mount is live.
+            .on_click({
+                let this = this.clone();
+                move |_: &ClickEvent, window, cx| {
+                    if let Some(this) = this.upgrade() {
+                        let record = clicked.clone();
+                        this.update(cx, |this, cx| this.open_connection(record, window, cx));
+                    }
+                }
+            });
+
+        row.context_menu(move |menu, _, _| {
+            let this = this.clone();
+            let record = menu_record.clone();
+            let menu = if connected {
+                let disconnect = this.clone();
+                let disconnect_record = record.clone();
+                menu.item(PopupMenuItem::new("Disconnect").on_click(move |_, _, cx| {
+                    if let Some(browser) = disconnect.upgrade() {
+                        let record = disconnect_record.clone();
+                        browser
+                            .update(cx, |browser, cx| browser.disconnect_connection(&record, cx));
+                    }
+                }))
+            } else {
+                let connect = this.clone();
+                let connect_record = record.clone();
+                menu.item(
+                    PopupMenuItem::new("Connect").on_click(move |_, window, cx| {
+                        if let Some(browser) = connect.upgrade() {
+                            let record = connect_record.clone();
+                            browser.update(cx, |browser, cx| {
+                                browser.open_connection(record, window, cx)
+                            });
+                        }
+                    }),
+                )
+            };
+            let edit = this.clone();
+            let edit_record = record.clone();
+            let copy_command = record.ssh_command();
+            let remove_record = record.clone();
+            menu.separator()
+                .item(PopupMenuItem::new("Edit…").on_click(move |_, window, cx| {
+                    if let Some(browser) = edit.upgrade() {
+                        let record = edit_record.clone();
+                        browser.update(cx, |browser, cx| {
+                            browser.open_connection_dialog(Some(record), window, cx)
+                        });
+                    }
+                }))
+                .item(
+                    PopupMenuItem::new("Copy SSH Command").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            copy_command.clone(),
+                        ));
+                    }),
+                )
+                .separator()
+                .item(PopupMenuItem::new("Remove Connection").on_click({
+                    let this = this.clone();
+                    move |_, _, cx| {
+                        if let Some(browser) = this.upgrade() {
+                            let record = remove_record.clone();
+                            browser
+                                .update(cx, |browser, cx| browser.remove_connection(&record, cx));
+                        }
+                    }
+                }))
+        })
     }
 
     /// One h22 pill row. `favorite` carries the row's place in the favourites
@@ -446,6 +615,31 @@ fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground.opacity(0.8))
         .child(label)
+}
+
+fn connection_section_label(this: WeakEntity<Browser>, cx: &App) -> impl IntoElement {
+    h_flex()
+        .h(px(SIDEBAR_SECTION_HEIGHT))
+        .mt(px(14.))
+        .mb(px(2.))
+        .px(px(14.))
+        .items_center()
+        .justify_between()
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(cx.theme().muted_foreground.opacity(0.8))
+        .child("Connections")
+        .child(
+            Button::new("new-connection")
+                .ghost()
+                .compact()
+                .label("+")
+                .on_click(move |_, window, cx| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.open_connection_dialog(None, window, cx));
+                    }
+                }),
+        )
 }
 
 #[cfg(test)]

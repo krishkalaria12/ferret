@@ -19,6 +19,7 @@ mod browser;
 mod folder;
 mod format;
 mod icons;
+mod mounts;
 mod pane;
 mod state;
 mod theme;
@@ -39,6 +40,18 @@ pub use theme::{BrowserPalette, TerminalPalette, register as register_theme};
 pub fn flush_pending_saves(cx: &mut gpui::App) {
     if cx.has_global::<FerretState>() {
         cx.global_mut::<FerretState>().flush_pending_saves();
+    }
+}
+
+/// Close every mounted connection before the process exits.
+///
+/// Sessions live in the global state precisely so a tab close cannot take one
+/// with it, which means quitting is the only thing that ends them. Dropping
+/// each one closes its connection; the runtime shutdown that follows in the
+/// binary is what guarantees no SSH task outlives the process.
+pub fn disconnect_mounts(cx: &mut gpui::App) {
+    if cx.has_global::<FerretState>() {
+        Browser::disconnect_all(cx);
     }
 }
 

@@ -100,9 +100,8 @@ impl Router {
     }
 
     fn remote(&self, path: &VfsPath) -> Result<Arc<dyn Vfs>> {
-        self.backend(path).ok_or_else(|| VfsError::NotMounted {
-            path: path.clone(),
-        })
+        self.backend(path)
+            .ok_or_else(|| VfsError::NotMounted { path: path.clone() })
     }
 
     /// Resolve both sides of a two-path operation, refusing a pair that spans
@@ -392,7 +391,10 @@ mod tests {
         // The message has to name both ends: "it failed" with no subject is
         // the failure this convention exists to prevent.
         let message = err.to_string();
-        assert!(message.contains("/tmp/a") && message.contains("/srv/a"), "{message}");
+        assert!(
+            message.contains("/tmp/a") && message.contains("/srv/a"),
+            "{message}"
+        );
 
         // Two different servers are also two backends.
         let other = VfsPath::remote(MountId(8), "/srv/a");

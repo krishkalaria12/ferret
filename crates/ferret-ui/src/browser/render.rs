@@ -125,6 +125,9 @@ impl Render for Browser {
                     this.toggle_power_search(window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &actions::NewConnection, window, cx| {
+                this.open_connection_dialog(None, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &actions::ToggleSidebar, _, cx| this.toggle_sidebar(cx)),
             )

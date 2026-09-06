@@ -47,7 +47,9 @@ pub enum VfsError {
     /// copy: two local volumes copy in seconds, and a server is a network
     /// transfer that needs progress and a cancel button. The caller routes
     /// this to the transfer queue rather than retrying.
-    #[error("{from} and {to} are on different filesystems, so this has to be a transfer rather than a move.")]
+    #[error(
+        "{from} and {to} are on different filesystems, so this has to be a transfer rather than a move."
+    )]
     CrossBackend { from: VfsPath, to: VfsPath },
 
     #[error("Couldn't {action} {path}: {source}")]

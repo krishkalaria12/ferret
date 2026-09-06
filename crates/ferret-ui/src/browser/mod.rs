@@ -46,6 +46,7 @@ use crate::pane::{FilePane, PaneEvent};
 use crate::state::FerretState;
 
 use commit_dialog::CommitDialog;
+use connection_dialog::ConnectionDialog;
 pub(crate) use git::GitHandle;
 use git::GitPanel;
 // Only the allocations-per-frame budget constructs one directly.
@@ -53,6 +54,8 @@ use git::GitPanel;
 pub(crate) use git::GitSnapshot;
 
 mod commit_dialog;
+mod connect;
+mod connection_dialog;
 mod git;
 mod git_bar;
 mod mutations;
@@ -247,6 +250,9 @@ pub struct Browser {
     /// The commit dialog's state, kept across opens so a message survives an
     /// accidental Escape. `None` until the dialog is opened for the first time.
     commit_dialog: Option<Entity<CommitDialog>>,
+    /// Reused while opening and editing saved SSH endpoints. Input state must
+    /// live in an entity because a dialog builder runs again every frame.
+    connection_dialog: Option<Entity<ConnectionDialog>>,
     /// Re-reads git status when the window comes back to the front. Held here
     /// so it lasts as long as the window does; see
     /// [`Browser::observe_git_activation`] for why the feature needs it.
@@ -378,6 +384,7 @@ impl Browser {
             sidebar_focus: cx.focus_handle(),
             git: GitPanel::new(),
             commit_dialog: None,
+            connection_dialog: None,
             _git_activation: Self::observe_git_activation(window, cx),
         };
         this.push_tab(start_directory(), window, cx);

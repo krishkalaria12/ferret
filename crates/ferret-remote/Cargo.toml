@@ -1,0 +1,29 @@
+[package]
+name = "ferret-remote"
+description = "Saved SSH connections, SFTP mounts and file transfers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferret-vfs.workspace = true
+
+async-channel.workspace = true
+async-trait.workspace = true
+dirs.workspace = true
+futures.workspace = true
+keyring.workspace = true
+parking_lot.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str.workspace = true
+ssh2-config.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+smol.workspace = true

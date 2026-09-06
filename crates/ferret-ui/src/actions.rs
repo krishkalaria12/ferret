@@ -47,6 +47,8 @@ actions!(
         ViewAsIcons,
         ToggleTheme,
         TogglePowerSearch,
+        /// Open the saved SSH connection editor (F-20).
+        NewConnection,
         OpenInTerminal,
         AddToFavorites,
         FocusFilter,
