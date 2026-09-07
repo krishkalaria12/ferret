@@ -27,7 +27,54 @@ rayon.workspace = true
 smallvec.workspace = true
 smol_str.workspace = true
 
-gpui-component.workspace = true
+# The built-in grammars behind F-32, one feature per grammar. Never
+# optional as a set: a code preview with no colour is a broken feature, not
+# a fast build. The extended set (phase 05) lives behind `languages-extended`
+# instead, so iterating on anything else can skip those 30 generated-C
+# crates without losing the core set.
+#
+# Deliberately the per-grammar features rather than the `tree-sitter-languages`
+# umbrella: the umbrella pulls `tree-sitter-sql`, whose `tree-sitter-sequel`
+# pins `cc ~1.2.1` on every 0.3.x — unresolvable against the workspace's
+# `cc 1.4.4`, which `ring`, `libsqlite3-sys` and the rest all need. Downgrading
+# `cc` for one SQL grammar would risk every native build in the tree, so `.sql`
+# previews as labelled plain text until upstream relaxes the pin. 34 of 35.
+gpui-component = { workspace = true, features = [
+    "tree-sitter-astro",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cmake",
+    "tree-sitter-cpp",
+    "tree-sitter-csharp",
+    "tree-sitter-css",
+    "tree-sitter-diff",
+    "tree-sitter-ejs",
+    "tree-sitter-elixir",
+    "tree-sitter-erb",
+    "tree-sitter-go",
+    "tree-sitter-graphql",
+    "tree-sitter-html",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-jsdoc",
+    "tree-sitter-kotlin",
+    "tree-sitter-lua",
+    "tree-sitter-make",
+    "tree-sitter-markdown",
+    "tree-sitter-php",
+    "tree-sitter-proto",
+    "tree-sitter-python",
+    "tree-sitter-ruby",
+    "tree-sitter-rust",
+    "tree-sitter-scala",
+    "tree-sitter-svelte",
+    "tree-sitter-swift",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+    "tree-sitter-zig",
+] }
 gpui-component-assets.workspace = true
 rust-embed.workspace = true
 smol.workspace = true

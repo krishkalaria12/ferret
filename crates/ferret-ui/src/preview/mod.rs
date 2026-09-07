@@ -399,7 +399,7 @@ impl PreviewPane {
             } => {
                 let wrap = self.wrap_override.unwrap_or(wrap);
                 self.editor.update(cx, |editor, cx| {
-                    editor.set_highlighter(gpui::SharedString::from(language.as_str()), cx);
+                    editor.set_highlighter(gpui::SharedString::from(registry_name(&language)), cx);
                     editor.set_soft_wrap(wrap, window, cx);
                     editor.set_value(text, window, cx);
                 });
@@ -675,6 +675,19 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64) -> LoadOutcome {
     }
 }
 
+/// Translate our language name to the registry's.
+///
+/// The two vocabularies agree everywhere except here: the component's
+/// built-in table knows `"csharp"`, not `"c_sharp"`. Unknown names pass
+/// through untouched — the registry resolves them or gracefully declines,
+/// and an unhighlighted file is never an error.
+fn registry_name(language: &SmolStr) -> &str {
+    match language.as_str() {
+        "c_sharp" => "csharp",
+        other => other,
+    }
+}
+
 /// "Showing the first 2 MiB of 4.1 GB." — or `None` for a whole file.
 fn truncation_footer(truncated: &Truncation) -> Option<String> {
     truncated.is_truncated().then(|| {
@@ -767,4 +780,21 @@ fn directory_detail(entry: &Entry) -> String {
         .map(format_date)
         .unwrap_or_else(|| "unknown date".to_string());
     format!("Folder · {modified}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_names_match_the_builtin_table_where_it_differs() {
+        // The component's built-in table knows "csharp", not "c_sharp" — a
+        // C# file that misses this renders with no colour at all.
+        assert_eq!(registry_name(&SmolStr::new("c_sharp")), "csharp");
+        // Everything else passes through: the registry resolves what it
+        // knows and gracefully declines the rest.
+        assert_eq!(registry_name(&SmolStr::new("rust")), "rust");
+        assert_eq!(registry_name(&SmolStr::new("plain")), "plain");
+        assert_eq!(registry_name(&SmolStr::new("nix")), "nix");
+    }
 }

@@ -284,6 +284,87 @@ mod tests {
         assert_eq!(text_on(hex(0xdbeafe), dark_text), dark_text);
     }
 
+    /// Every syntax slot the highlighter can ask for, in every theme.
+    ///
+    /// A slot defined only for dark is a bug by the repo's own rule — and a
+    /// missing slot fails silently at runtime (the capture just renders
+    /// unstyled), so this is a test rather than a review checklist.
+    #[test]
+    fn every_theme_defines_every_syntax_slot() {
+        const SLOTS: &[&str] = &[
+            "attribute",
+            "boolean",
+            "comment",
+            "comment.doc",
+            "constant",
+            "constructor",
+            "embedded",
+            "emphasis",
+            "emphasis.strong",
+            "enum",
+            "function",
+            "hint",
+            "keyword",
+            "label",
+            "link_text",
+            "link_uri",
+            "number",
+            "operator",
+            "predictive",
+            "preproc",
+            "primary",
+            "property",
+            "punctuation",
+            "punctuation.bracket",
+            "punctuation.delimiter",
+            "punctuation.list_marker",
+            "punctuation.special",
+            "string",
+            "string.escape",
+            "string.regex",
+            "string.special",
+            "string.special.symbol",
+            "tag",
+            "tag.doctype",
+            "text.code.span",
+            "text.literal",
+            "title",
+            "type",
+            "variable",
+            "variable.special",
+            "variant",
+        ];
+        assert_eq!(SLOTS.len(), 41);
+
+        let themes: serde_json::Value = serde_json::from_str(include_str!("../themes/ferret.json"))
+            .expect("ferret.json must parse");
+        let themes = themes["themes"].as_array().expect("themes is a list");
+        assert_eq!(themes.len(), 4, "light, dark, and both glass variants");
+        for theme in themes {
+            let name = theme["name"].as_str().unwrap_or("?");
+            let syntax = &theme["highlight"]["syntax"];
+            assert!(
+                syntax.is_object(),
+                "{name} has no highlight.syntax block — captures render unstyled"
+            );
+            let syntax = syntax.as_object().unwrap();
+            let missing: Vec<&&str> = SLOTS
+                .iter()
+                .filter(|slot| !syntax.contains_key(**slot))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{name} is missing syntax slots: {missing:?}"
+            );
+            for key in ["editor.foreground", "editor.background"] {
+                assert!(
+                    theme["highlight"][key].is_string(),
+                    "{name} is missing {key}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn hex_preserves_channels_and_is_opaque() {
         let color: Rgba = hex(0x7aa2f7).into();
