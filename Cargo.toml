@@ -4,6 +4,7 @@ members = [
     "crates/ferret",
     "crates/ferret-git",
     "crates/ferret-platform",
+    "crates/ferret-preview",
     "crates/ferret-search",
     "crates/ferret-searchd",
     "crates/ferret-settings",
@@ -59,6 +60,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 
 ferret-git = { path = "crates/ferret-git" }
 ferret-platform = { path = "crates/ferret-platform" }
+ferret-preview = { path = "crates/ferret-preview" }
 ferret-search = { path = "crates/ferret-search" }
 ferret-searchd = { path = "crates/ferret-searchd" }
 ferret-ui = { path = "crates/ferret-ui" }
@@ -75,6 +77,11 @@ ferret-vfs = { path = "crates/ferret-vfs" }
 # names with no allocation on either side, instead of lowercasing both sides
 # once per entry. It is also the engine search will want when that lands.
 aho-corasick = "1"
+# F-35. RFC 4180 quoting — embedded delimiters, embedded newlines, doubled
+# quotes — is precisely the thing that looks like twenty lines of hand-rolled
+# code and is wrong on real data. Small, no transitive weight; hand-rolling it
+# is the policy violation the policy exists to prevent.
+csv = "1"
 anyhow = "1"
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs" }

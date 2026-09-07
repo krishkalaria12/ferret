@@ -1,0 +1,15 @@
+[package]
+name = "ferret-preview"
+description = "Ferret's preview pipeline: classification, budgets, decoding and parsing. GPUI-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferret-vfs.workspace = true
+csv.workspace = true
+smallvec.workspace = true
+smol_str.workspace = true
+thiserror.workspace = true
