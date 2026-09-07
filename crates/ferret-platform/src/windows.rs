@@ -181,6 +181,26 @@ impl Platform for Windows {
 }
 
 // ---------------------------------------------------------------------------
+// Thumbnails (PV-D07)
+//
+// `IShellItemImageFactory::GetImage` arrives with PDF page rendering
+// (preview-plan step 08), behind typed `windows` COM bindings in a
+// supervised helper with its own COM apartment — never on the UI thread,
+// never with the pane blocked on it. Until then this declines every request
+// and the pane shows metadata with *Open with…*.
+
+/// The Windows thumbnail backend, until the supervised helper is wired up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThumbnailDeclined;
+
+#[async_trait]
+impl crate::thumbnail::ThumbnailProvider for ThumbnailDeclined {
+    async fn thumbnail(&self, _path: &Path, _longest_edge_px: u32) -> Result<Option<IconBitmap>> {
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Icons (D-18)
 
 use crate::icon::{IconBitmap, IconKey, IconProvider};

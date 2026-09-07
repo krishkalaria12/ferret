@@ -21,3 +21,11 @@ pub const VOLUME_EXCLUSIONS: &[&str] = &["Recovery", "Preboot", "VM", "Update"];
 // hazard it guarded no longer reaches a frame: the browser probes volumes from
 // a background timer and render only reads the last known list (A-25). A
 // timeout would now only truncate a slow answer that costs nothing to wait for.
+
+/// Largest file a native thumbnail service is asked about, in bytes.
+///
+/// Native services take a path and may read the whole file internally, so
+/// this is a request limit, not a Rust byte budget — the guarantees do not
+/// transfer to OS APIs. Network shares and known cloud placeholders are
+/// excluded outright, not merely capped.
+pub const NATIVE_THUMBNAIL_INPUT_LIMIT: u64 = 64 * 1024 * 1024;

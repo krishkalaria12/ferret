@@ -178,6 +178,24 @@ impl Platform for MacOs {
 }
 
 // ---------------------------------------------------------------------------
+// Thumbnails (PV-D07)
+//
+// `QLThumbnailGenerator` arrives with PDF page rendering (preview-plan step
+// 08). Until then this declines every request and the pane shows metadata
+// with *Open with…* — a finished state, not a failure state.
+
+/// The macOS thumbnail backend, until `QLThumbnailGenerator` is wired up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThumbnailDeclined;
+
+#[async_trait]
+impl crate::thumbnail::ThumbnailProvider for ThumbnailDeclined {
+    async fn thumbnail(&self, _path: &Path, _longest_edge_px: u32) -> Result<Option<IconBitmap>> {
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Icons (D-18)
 
 use crate::icon::{IconBitmap, IconKey, IconProvider};
