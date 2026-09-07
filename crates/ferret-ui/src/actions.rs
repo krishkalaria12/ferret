@@ -17,6 +17,8 @@ pub mod context {
     pub const SIDEBAR: &str = "Sidebar";
     /// The terminal panel has focus.
     pub const TERMINAL: &str = "Terminal";
+    /// The preview pane has focus.
+    pub const PREVIEW: &str = "Preview";
     /// `gpui-component`'s table installs this inside the file pane. Ferret
     /// rebinds Tab here so focus can leave the pane instead of walking the
     /// table's columns (§8).
@@ -57,6 +59,23 @@ actions!(
         AcceptCompletion,
         FocusNextRegion,
         FocusPrevRegion,
+        /// Toggle the preview pane (F-30). Collapses to zero, remembers the
+        /// last width.
+        TogglePreview,
+        /// Move keyboard focus into the preview body.
+        FocusPreview,
+        /// Return focus to the file pane (also `Esc` inside the preview).
+        FocusFilePane,
+        /// Preview-local: open the previewed file with its default app.
+        PreviewOpen,
+        /// Preview-local: reveal the previewed file in Finder / Explorer.
+        PreviewReveal,
+        /// Preview-local: copy the previewed path as text.
+        PreviewCopyPath,
+        /// Preview-local: toggle soft wrap for this pane.
+        PreviewToggleWrap,
+        /// Preview-local: toggle line numbers (persisted).
+        PreviewToggleLineNumbers,
         /// Open the commit dialog (F-52). A no-op outside a repository, rather
         /// than an error: the shortcut is global and most folders are not
         /// repositories.

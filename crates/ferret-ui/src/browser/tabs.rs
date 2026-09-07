@@ -98,6 +98,18 @@ impl Browser {
                 cx.notify();
             },
         ));
+        // The preview pane follows the selection, and refreshes its cached
+        // directory totals when a load finishes. Only the active tab drives
+        // it — background tabs are ignored inside `sync_preview`.
+        subscriptions.push(cx.subscribe_in(
+            &folder,
+            window,
+            |this, folder, event: &FolderEvent, _, cx| match event {
+                FolderEvent::SelectionChanged => this.sync_preview(folder, false, cx),
+                FolderEvent::LoadFinished => this.sync_preview(folder, true, cx),
+                _ => {}
+            },
+        ));
 
         (folder, pane, mode, subscriptions)
     }
@@ -120,6 +132,8 @@ impl Browser {
         let directory = self.active().folder.read(cx).dir.clone();
         self.sync_terminal_to(&directory, cx);
         self.git_follow(&directory, cx);
+        let folder = self.active().folder.clone();
+        self.sync_preview(&folder, false, cx);
         cx.notify();
     }
 

@@ -1,0 +1,237 @@
+//! The preview body: one arm per state, plus the footer that only exists
+//! when it has something to say.
+//!
+//! `Render` matches on the [`PaneState`] and builds elements. It does not
+//! clone the text, re-derive a language, re-scan for line endings or rebuild
+//! anything proportional to the file — the allocation-budget gate applies to
+//! this pane exactly as it does to the file pane.
+
+use super::*;
+use gpui::{
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
+};
+use gpui_component::{
+    ActiveTheme as _, Icon, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
+
+use crate::actions::context;
+
+impl PreviewPane {
+    /// The whole pane: header, body, and a footer only when it has something
+    /// to say. An always-present status strip becomes furniture nobody reads.
+    pub(super) fn render_pane(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let bg = cx.theme().background;
+        let footer = match &self.state {
+            PaneState::Ready { footer, .. } => footer.clone(),
+            _ => None,
+        };
+        v_flex()
+            .id("preview-pane")
+            .key_context(context::PREVIEW)
+            .size_full()
+            .bg(bg)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(self.render_header(cx))
+            .child(self.render_body(cx))
+            .when_some(footer, |el, footer| {
+                el.child(self.render_footer(footer, cx))
+            })
+    }
+
+    fn render_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.state {
+            PaneState::Empty { rows, bytes, .. } => self.render_centred(
+                match bytes {
+                    Some(bytes) => format!("{rows} items · {}", format_size(*bytes)),
+                    None => format!("{rows} items"),
+                },
+                cx,
+            ),
+            PaneState::Multiple {
+                count,
+                bytes,
+                breakdown,
+            } => {
+                let mut text = format!("{count} items · {}", format_size(*bytes));
+                if let Some(breakdown) = breakdown {
+                    text.push_str(" · ");
+                    text.push_str(breakdown);
+                }
+                self.render_centred(text, cx)
+            }
+            PaneState::Directory { count, .. } => self.render_centred(
+                match count {
+                    Some(count) => format!("{count} items"),
+                    None => "Counting…".to_string(),
+                },
+                cx,
+            ),
+            PaneState::Loading {
+                skeleton, remote, ..
+            } => {
+                if *skeleton {
+                    self.render_skeleton(*remote, cx)
+                } else {
+                    // Under the loading threshold: blank, not flashing.
+                    div().flex_1().into_any_element()
+                }
+            }
+            PaneState::Ready { .. } => div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .px(px(4.))
+                .child(self.editor_element())
+                .into_any_element(),
+            PaneState::Unsupported { entry, message, .. } => {
+                self.render_fallback(entry, message, cx)
+            }
+            PaneState::Error { message, .. } => self.render_error(message, cx),
+        }
+    }
+
+    /// Muted centred line for the states that read nothing.
+    fn render_centred(&self, text: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(16.))
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(text)),
+            )
+            .into_any_element()
+    }
+
+    /// Skeleton in the body only; the header is already populated from the
+    /// `Entry` the list holds.
+    fn render_skeleton(&self, remote: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let bar = cx.theme().secondary;
+        let mut body = v_flex().flex_1().gap(px(8.)).p(px(16.));
+        for (index, width) in [0.9, 0.7, 0.8, 0.55, 0.75].iter().enumerate() {
+            body = body.child(
+                div()
+                    .h(px(10.))
+                    .w(gpui::relative(*width))
+                    .rounded(px(5.))
+                    .bg(bar)
+                    .id(("preview-skeleton", index)),
+            );
+        }
+        if remote {
+            body = body.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Reading over the connection…"),
+            );
+        }
+        body.into_any_element()
+    }
+
+    /// Type icon at large size, the reason, and *Open with…*. A finished
+    /// state, not a failure state.
+    fn render_fallback(
+        &self,
+        entry: &Entry,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let icon = cx.global::<FerretState>().icons.asset_path(entry);
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p(px(24.))
+            .child(
+                Icon::default()
+                    .path(icon)
+                    .with_size(px(48.))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(message.to_string())),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("preview-open")
+                            .small()
+                            .label("Open with…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_current(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-reveal")
+                            .small()
+                            .ghost()
+                            .label("Reveal")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.reveal_current(window, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_error(&self, message: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        h_flex()
+            .flex_1()
+            .items_start()
+            .gap_2()
+            .p(px(16.))
+            .child(
+                Icon::new(gpui_component::IconName::TriangleAlert)
+                    .size_4()
+                    .text_color(cx.theme().warning),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(message.to_string())),
+            )
+            .into_any_element()
+    }
+
+    fn render_footer(&self, footer: String, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_shrink_0()
+            .px(px(12.))
+            .py(px(6.))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .text_size(px(11.5))
+            .text_color(cx.theme().muted_foreground)
+            .child(SharedString::from(footer))
+    }
+}
+
+impl Render for PreviewPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_pane(window, cx)
+    }
+}

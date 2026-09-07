@@ -136,6 +136,27 @@ fn bind_keys(cx: &mut App) {
             browser_actions::TerminalPaste,
             Some(context::TERMINAL),
         ),
+        // Preview pane (F-30). The toggle stays global like the terminal's:
+        // it is how you get the pane back when it has focus nowhere else.
+        KeyBinding::new("cmd-alt-p", browser_actions::TogglePreview, None),
+        KeyBinding::new(
+            "ctrl-alt-p",
+            browser_actions::TogglePreview,
+            OUTSIDE_TERMINAL,
+        ),
+        KeyBinding::new("cmd-alt-right", browser_actions::FocusPreview, None),
+        KeyBinding::new(
+            "ctrl-alt-right",
+            browser_actions::FocusPreview,
+            OUTSIDE_TERMINAL,
+        ),
+        // `Esc` returns focus to the list, but only from inside the preview —
+        // elsewhere it keeps whatever meaning it already had.
+        KeyBinding::new(
+            "escape",
+            browser_actions::FocusFilePane,
+            Some(context::PREVIEW),
+        ),
         // View modes.
         KeyBinding::new("cmd-1", browser_actions::ViewAsList, None),
         KeyBinding::new("ctrl-1", browser_actions::ViewAsList, OUTSIDE_TERMINAL),
@@ -429,7 +450,7 @@ fn open_main_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{KeyBindingContextPredicate, KeyContext};
+    use gpui::{KeyBinding, KeyBindingContextPredicate, KeyContext};
 
     /// `KeyBinding::new` panics on a predicate it cannot parse, and every one
     /// here runs at startup — a typo in `!Terminal` would be a launch crash
@@ -449,5 +470,44 @@ mod tests {
             predicate.depth_of(&context("FilePane")).is_some(),
             "and must still work everywhere else"
         );
+    }
+
+    /// `KeyBinding::new` panics on a keystroke string it cannot parse, and
+    /// every binding here runs at startup — a typo would be a launch crash
+    /// rather than a wrong keystroke. The preview bindings use modifier
+    /// combinations (`cmd-alt-p`) no other binding exercises, so they get
+    /// their own construction test.
+    #[test]
+    fn the_preview_bindings_parse() {
+        use ferret_ui::actions as browser_actions;
+
+        // Construction is the assertion: an unparseable keystroke panics.
+        let _ = KeyBinding::new("cmd-alt-p", browser_actions::TogglePreview, None);
+        let _ = KeyBinding::new(
+            "ctrl-alt-p",
+            browser_actions::TogglePreview,
+            Some("!Terminal"),
+        );
+        let _ = KeyBinding::new("cmd-alt-right", browser_actions::FocusPreview, None);
+        let _ = KeyBinding::new(
+            "ctrl-alt-right",
+            browser_actions::FocusPreview,
+            Some("!Terminal"),
+        );
+        let _ = KeyBinding::new(
+            "escape",
+            browser_actions::FocusFilePane,
+            Some(browser_actions::context::PREVIEW),
+        );
+
+        // And the Preview context itself parses, or the `Esc` binding above
+        // is scoped to a context that never matches.
+        let preview = vec![
+            KeyContext::try_from(browser_actions::context::PREVIEW)
+                .expect("the Preview context must parse"),
+        ];
+        let predicate = KeyBindingContextPredicate::parse(browser_actions::context::PREVIEW)
+            .expect("the Preview predicate must parse");
+        assert!(predicate.depth_of(&preview).is_some());
     }
 }
