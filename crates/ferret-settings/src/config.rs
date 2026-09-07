@@ -45,3 +45,14 @@ pub const MAX_SIDEBAR_WIDTH: f32 = 400.0;
 /// terminal never turns the file manager into only a terminal.
 pub const MIN_TERMINAL_HEIGHT: f32 = 120.0;
 pub const MAX_TERMINAL_HEIGHT: f32 = 420.0;
+
+/// Bounds on the preview pane width (`docs/preview-plan.html` §3).
+///
+/// The default is 42% of the available browser workspace at the 1180 px
+/// window; the clamps keep the pane a reading surface at the small end and
+/// stop it evicting the file pane at the large one. At small window sizes the
+/// preview collapses before the sidebar does, so the minimum here never
+/// squeezes the file pane below its own base minimum.
+pub const MIN_PREVIEW_WIDTH: f32 = 320.0;
+pub const MAX_PREVIEW_WIDTH: f32 = 720.0;
+pub const DEFAULT_PREVIEW_WIDTH: f32 = 400.0;

@@ -34,5 +34,10 @@
     "shell": null,
     "term": "xterm-256color",
     "sync_default": true
+  },
+  "preview": {
+    "visible": false,
+    "width": 400.0,
+    "line_numbers": false
   }
 }

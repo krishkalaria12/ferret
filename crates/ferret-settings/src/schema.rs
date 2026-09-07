@@ -237,6 +237,31 @@ impl Default for Terminal {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preview {
+    /// Whether the right-hand preview pane is visible in a new window.
+    pub visible: bool,
+    /// Width in logical pixels. Clamped on load; see `config`.
+    pub width: f32,
+    /// Line numbers in the code preview. Off by default: a preview is for
+    /// reading, not for citing, and the reference shows none.
+    pub line_numbers: bool,
+    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
+    pub unknown: Map<String, Value>,
+}
+
+impl Default for Preview {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            width: crate::config::DEFAULT_PREVIEW_WIDTH,
+            line_numbers: false,
+            unknown: Map::new(),
+        }
+    }
+}
+
 /// The whole settings file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -245,6 +270,7 @@ pub struct Settings {
     pub browser: Browser,
     pub sidebar: Sidebar,
     pub terminal: Terminal,
+    pub preview: Preview,
     /// Top-level sections this version does not know about, kept verbatim —
     /// which is what a `window` or `keymap` section in an existing file
     /// becomes. Those were removed rather than left declared and unread

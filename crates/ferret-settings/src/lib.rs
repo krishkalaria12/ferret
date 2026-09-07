@@ -23,13 +23,14 @@ mod schema;
 pub use errors::{Result, SettingsError, Warning};
 pub use folder_prefs::{FolderPrefs, FolderView};
 pub use schema::{
-    Appearance, Browser, Settings, Sidebar, SortKey, SortOrder, Terminal, TerminalBackend,
+    Appearance, Browser, Preview, Settings, Sidebar, SortKey, SortOrder, Terminal, TerminalBackend,
     ThemeChoice, ViewMode,
 };
 
 use config::{
-    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_SIDEBAR_WIDTH, MAX_TERMINAL_HEIGHT,
-    MIN_FONT_SIZE, MIN_SIDEBAR_WIDTH, MIN_TERMINAL_HEIGHT, SETTINGS_FILE,
+    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_PREVIEW_WIDTH, MAX_SIDEBAR_WIDTH,
+    MAX_TERMINAL_HEIGHT, MIN_FONT_SIZE, MIN_PREVIEW_WIDTH, MIN_SIDEBAR_WIDTH, MIN_TERMINAL_HEIGHT,
+    SETTINGS_FILE,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -76,6 +77,7 @@ impl Settings {
             browser: take_section(&mut root, "browser", &mut warnings),
             sidebar: take_section(&mut root, "sidebar", &mut warnings),
             terminal: take_section(&mut root, "terminal", &mut warnings),
+            preview: take_section(&mut root, "preview", &mut warnings),
             // Whatever is left is from a version that knows more than this
             // one — or a `window`/`keymap` section from a version that had
             // them declared before D-41 removed them. Either way it is kept
@@ -159,6 +161,26 @@ impl Settings {
                 format!("Using {clamped}."),
             ));
             self.terminal.font_size = clamped;
+        }
+
+        let preview_width = self.preview.width;
+        if !preview_width.is_finite()
+            || !(MIN_PREVIEW_WIDTH..=MAX_PREVIEW_WIDTH).contains(&preview_width)
+        {
+            let clamped = if preview_width.is_finite() {
+                preview_width.clamp(MIN_PREVIEW_WIDTH, MAX_PREVIEW_WIDTH)
+            } else {
+                Preview::default().width
+            };
+            warnings.push(Warning::new(
+                "preview.width",
+                format!(
+                    "{preview_width} is outside the usable range \
+                     {MIN_PREVIEW_WIDTH}–{MAX_PREVIEW_WIDTH}."
+                ),
+                format!("Using {clamped}."),
+            ));
+            self.preview.width = clamped;
         }
 
         if !self.terminal.line_height.is_finite()
@@ -293,6 +315,14 @@ mod tests {
         assert_eq!(settings.terminal.height, MAX_TERMINAL_HEIGHT);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].key, "terminal.height");
+    }
+
+    #[test]
+    fn an_unusable_preview_width_is_clamped_with_a_warning() {
+        let (settings, warnings) = Settings::from_json(r#"{ "preview": { "width": 40 } }"#);
+        assert_eq!(settings.preview.width, MIN_PREVIEW_WIDTH);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].key, "preview.width");
     }
 
     #[test]
