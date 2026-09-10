@@ -22,11 +22,15 @@ mod render;
 
 use std::time::Instant;
 
+use std::path::PathBuf;
+
+use crate::browser::Browser;
 use ferret_preview::{Preview, Truncation};
 use ferret_vfs::{Entry, EntryKind, LocalFs, Vfs as _, VfsError, VfsPath};
 use gpui::{App, AppContext as _, Context, Entity, FocusHandle, Focusable, Task, Window};
 use gpui_component::WindowExt as _;
 use gpui_component::input::{Editor, EditorState};
+use gpui_component::text::{TextView, TextViewState};
 use smol_str::SmolStr;
 
 use crate::format::{format_date, format_size};
@@ -101,6 +105,16 @@ enum PaneState {
         wrap: bool,
         footer: Option<String>,
     },
+    /// Rendered Markdown. The document view holds the sanitized source;
+    /// the editor holds the original for the source toggle.
+    ReadyMd {
+        entry: Entry,
+        detail: String,
+        footer: Option<String>,
+        show_source: bool,
+        base: Option<PathBuf>,
+        remote: bool,
+    },
     Unsupported {
         entry: Entry,
         detail: String,
@@ -118,6 +132,7 @@ impl PaneState {
         match self {
             PaneState::Directory { entry, .. }
             | PaneState::Ready { entry, .. }
+            | PaneState::ReadyMd { entry, .. }
             | PaneState::Unsupported { entry, .. } => Some(entry),
             _ => None,
         }
@@ -126,6 +141,11 @@ impl PaneState {
 
 pub struct PreviewPane {
     editor: Entity<EditorState>,
+    /// One retained document view, reused across selections (F-31).
+    docview: Entity<TextViewState>,
+    /// Navigation lives in the browser: only it owns history and tabs.
+    /// Stored weakly so link clicks can reach it with a window in hand.
+    browser: gpui::WeakEntity<Browser>,
     focus: FocusHandle,
     /// The window, for background tasks to re-enter with a `Window` when
     /// the bytes land (the editor's `set_value` needs one).
@@ -144,7 +164,11 @@ pub struct PreviewPane {
 }
 
 impl PreviewPane {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        browser: gpui::WeakEntity<Browser>,
+    ) -> Self {
         // Deterministic, duplicate-checked, once per process — before any
         // preview, so the first file of a type is already highlighted.
         grammars::ensure_registered();
@@ -155,8 +179,11 @@ impl PreviewPane {
                 .line_number(line_numbers)
                 .soft_wrap(true)
         });
+        let docview = cx.new(|cx| TextViewState::markdown("", cx));
         Self {
             editor,
+            docview,
+            browser,
             focus: cx.focus_handle(),
             window: window.window_handle(),
             state: PaneState::Empty {
@@ -173,8 +200,31 @@ impl PreviewPane {
     }
 
     /// The editor's focus, for the focus-preview shortcut.
+    ///
+    /// The document view exposes no programmatic focus, so a rendered
+    /// Markdown preview focuses the pane itself: Esc still returns to the
+    /// list, and keyboard scrolling inside the document is a follow-up.
     pub fn editor_focus_handle(&self, cx: &App) -> FocusHandle {
-        self.editor.read(cx).focus_handle(cx).clone()
+        match &self.state {
+            PaneState::ReadyMd { show_source, .. } if !show_source => self.focus.clone(),
+            _ => self.editor.read(cx).focus_handle(cx).clone(),
+        }
+    }
+
+    /// Flip between rendered Markdown and its source.
+    pub(crate) fn toggle_source(&mut self, cx: &mut Context<Self>) {
+        if let PaneState::ReadyMd { show_source, .. } = &mut self.state {
+            *show_source = !*show_source;
+            cx.notify();
+        }
+    }
+
+    /// Whether the source toggle is offered right now.
+    fn showing_markdown(&self) -> Option<bool> {
+        match &self.state {
+            PaneState::ReadyMd { show_source, .. } => Some(*show_source),
+            _ => None,
+        }
     }
 
     /// Session word-wrap override from the overflow menu.
@@ -415,6 +465,33 @@ impl PreviewPane {
                 };
                 cx.notify();
             }
+            LoadOutcome::Markdown {
+                entry,
+                detail,
+                original,
+                sanitized,
+                footer,
+                base,
+                remote,
+            } => {
+                self.editor.update(cx, |editor, cx| {
+                    editor.set_highlighter(gpui::SharedString::from("markdown"), cx);
+                    editor.set_soft_wrap(self.wrap_override.unwrap_or(true), window, cx);
+                    editor.set_value(original, window, cx);
+                });
+                self.docview.update(cx, |docview, cx| {
+                    docview.set_text(&sanitized, cx);
+                });
+                self.state = PaneState::ReadyMd {
+                    entry,
+                    detail,
+                    footer,
+                    show_source: false,
+                    base,
+                    remote,
+                };
+                cx.notify();
+            }
             LoadOutcome::Unsupported {
                 entry,
                 detail,
@@ -500,6 +577,17 @@ enum LoadOutcome {
         wrap: bool,
         footer: Option<String>,
     },
+    Markdown {
+        entry: Entry,
+        detail: String,
+        /// The file's own source, for the source toggle.
+        original: String,
+        /// Sanitized source for the document view: no loadable image.
+        sanitized: String,
+        footer: Option<String>,
+        base: Option<PathBuf>,
+        remote: bool,
+    },
     Unsupported {
         entry: Entry,
         detail: String,
@@ -536,7 +624,7 @@ async fn load_single(fs: &LocalFs, entry: &Entry, remote: bool) -> LoadOutcome {
             // A corrupt file must still show its size: fall back to hex over
             // the sniff when there is something to show.
             if !sniff.is_empty() && matches!(kind, ferret_preview::Kind::Binary) {
-                return text_outcome(entry, &path, kind, sniff, known_size);
+                return text_outcome(entry, &path, kind, sniff, known_size, remote);
             }
             return vfs_error(&name, err);
         }
@@ -549,7 +637,7 @@ async fn load_single(fs: &LocalFs, entry: &Entry, remote: bool) -> LoadOutcome {
         None if bytes.len() < budget => None,
         None => fs.metadata(&path).await.ok().map(|md| md.len),
     };
-    text_outcome(entry, &path, kind, bytes, total)
+    text_outcome(entry, &path, kind, bytes, total, remote)
 }
 
 /// Turn a kind plus its budgeted bytes into the outcome the view consumes.
@@ -559,15 +647,16 @@ fn text_outcome(
     kind: ferret_preview::Kind,
     bytes: Vec<u8>,
     total: Option<u64>,
+    remote: bool,
 ) -> LoadOutcome {
     let shown = bytes.len() as u64;
     let total = total.unwrap_or(shown);
     let base = path.parent().unwrap_or_else(|| VfsPath::local("/"));
     let preview = ferret_preview::build(kind, bytes, Some(total), base);
-    preview_outcome(entry, preview, total)
+    preview_outcome(entry, preview, total, remote)
 }
 
-fn preview_outcome(entry: &Entry, preview: Preview, total: u64) -> LoadOutcome {
+fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) -> LoadOutcome {
     let size_label = format_size(entry.metadata.map(|md| md.len).unwrap_or(total));
     let modified = entry
         .metadata
@@ -576,17 +665,19 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64) -> LoadOutcome {
         .unwrap_or_else(|| "unknown date".to_string());
     match preview {
         Preview::Markdown {
-            source, truncated, ..
-        } => LoadOutcome::Text {
-            entry: entry.clone(),
-            detail: format!("Markdown · {size_label} · {modified}"),
-            text: source,
-            language: SmolStr::new("markdown"),
-            // Rendered Markdown arrives with the document view; the source
-            // wraps like prose until then.
-            wrap: true,
-            footer: truncation_footer(&truncated),
-        },
+            source,
+            truncated,
+            base,
+            ..
+        } => markdown_outcome(
+            entry,
+            &size_label,
+            &modified,
+            source,
+            truncated,
+            base,
+            remote,
+        ),
         Preview::Code {
             text,
             language,
@@ -690,6 +781,98 @@ fn registry_name(language: &SmolStr) -> &str {
         "c_sharp" => "csharp",
         other => other,
     }
+}
+
+/// Build the Markdown outcome: sanitize for the document view, keep the
+/// original for the source toggle.
+///
+/// Sanitizing fails safe: any refusal shows the bounded original source
+/// with the reason, never a half-sanitized document.
+fn markdown_outcome(
+    entry: &Entry,
+    size_label: &str,
+    modified: &str,
+    source: String,
+    truncated: Truncation,
+    base: VfsPath,
+    remote: bool,
+) -> LoadOutcome {
+    let detail = format!("Markdown · {size_label} · {modified}");
+    let base_dir: Option<PathBuf> = if remote {
+        None
+    } else {
+        base.as_local().map(std::path::Path::to_path_buf)
+    };
+    let mut footer = truncation_footer(&truncated);
+    match ferret_preview::markdown::sanitize(&source, base_dir.as_deref()) {
+        Ok(sanitized) => {
+            let mut notes = Vec::new();
+            if sanitized.blocked_remote > 0 {
+                notes.push(format!(
+                    "{} remote image{} not loaded",
+                    sanitized.blocked_remote,
+                    plural(sanitized.blocked_remote)
+                ));
+            }
+            if sanitized.blocked_unsafe > 0 {
+                notes.push(format!(
+                    "{} unsafe image{} removed",
+                    sanitized.blocked_unsafe,
+                    plural(sanitized.blocked_unsafe)
+                ));
+            }
+            if !sanitized.local.is_empty() {
+                notes.push(format!(
+                    "{} local image{} shown as text for now",
+                    sanitized.local.len(),
+                    plural(sanitized.local.len())
+                ));
+            }
+            if sanitized.over_count > 0 {
+                notes.push(format!("{} more images omitted", sanitized.over_count));
+            }
+            if !notes.is_empty() {
+                let note = notes.join(" · ") + ".";
+                footer = Some(match footer {
+                    Some(existing) => format!("{existing} {note}"),
+                    None => note,
+                });
+            }
+            LoadOutcome::Markdown {
+                entry: entry.clone(),
+                detail,
+                original: source,
+                sanitized: sanitized.source,
+                footer,
+                base: base_dir,
+                remote,
+            }
+        }
+        Err(reason) => {
+            let why = match reason {
+                ferret_preview::markdown::SanitizeError::Parse => "could not be parsed",
+                ferret_preview::markdown::SanitizeError::Span => "failed its resource check",
+                ferret_preview::markdown::SanitizeError::Limits => "exceeds rendered limits",
+            };
+            let note = format!("Rendered view {why} — showing source.");
+            footer = Some(match footer {
+                Some(existing) => format!("{existing} {note}"),
+                None => note,
+            });
+            LoadOutcome::Text {
+                entry: entry.clone(),
+                detail,
+                text: source,
+                language: SmolStr::new("markdown"),
+                wrap: true,
+                footer,
+            }
+        }
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 /// "Showing the first 2 MiB of 4.1 GB." — or `None` for a whole file.

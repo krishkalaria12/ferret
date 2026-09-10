@@ -18,6 +18,7 @@
 pub mod classify;
 pub mod config;
 pub mod languages;
+pub mod markdown;
 pub mod table;
 pub mod text;
 

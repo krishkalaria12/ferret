@@ -59,6 +59,9 @@ impl PreviewPane {
             PaneState::Ready { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
+            PaneState::ReadyMd { entry, detail, .. } => {
+                (Self::display_name(entry.name()), detail.clone())
+            }
             PaneState::Unsupported { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
@@ -69,6 +72,14 @@ impl PreviewPane {
         } else {
             "Show in Explorer"
         };
+        // Rendered/Source is offered only for Markdown, and labels the
+        // switch by the view it leaves, not the one it enters.
+        let source_toggle =
+            self.showing_markdown().map(
+                |show_source| {
+                    if show_source { "Rendered" } else { "Source" }
+                },
+            );
 
         h_flex()
             .flex_shrink_0()
@@ -104,11 +115,18 @@ impl PreviewPane {
                     .icon(Icon::new(gpui_component::IconName::EllipsisVertical))
                     .tooltip("Preview options")
                     .dropdown_menu(move |menu, _, _| {
-                        menu.menu("Open with…", Box::new(actions::PreviewOpen))
+                        let menu = menu
+                            .menu("Open with…", Box::new(actions::PreviewOpen))
                             .menu(reveal_label, Box::new(actions::PreviewReveal))
                             .menu("Copy path", Box::new(actions::PreviewCopyPath))
-                            .separator()
-                            .menu("Word wrap", Box::new(actions::PreviewToggleWrap))
+                            .separator();
+                        let menu = match source_toggle {
+                            Some(label) => menu
+                                .menu(label, Box::new(actions::PreviewToggleSource))
+                                .separator(),
+                            None => menu,
+                        };
+                        menu.menu("Word wrap", Box::new(actions::PreviewToggleWrap))
                             .menu("Line numbers", Box::new(actions::PreviewToggleLineNumbers))
                     }),
             )

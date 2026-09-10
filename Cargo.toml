@@ -82,6 +82,11 @@ aho-corasick = "1"
 # code and is wrong on real data. Small, no transitive weight; hand-rolling it
 # is the policy violation the policy exists to prevent.
 csv = "1"
+# F-31. The Markdown parser behind preview resource policy (PV-D10): image
+# nodes are found structurally, never by regex. Already in the graph through
+# `gpui-component`, which parses through `markdown::to_mdast` — same crate,
+# same version, same semantics for policy and renderer.
+markdown = "1.0.0"
 # Q-02 / F-32. The tree-sitter runtime behind preview highlighting. The
 # built-in grammars reach it through `gpui-component`; the ~30 extended
 # grammars in `ferret-ui/languages-extended` reach it here, directly (fixture

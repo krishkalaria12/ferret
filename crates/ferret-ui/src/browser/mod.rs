@@ -355,7 +355,8 @@ impl Browser {
             let preview = &cx.global::<FerretState>().settings.preview;
             (preview.visible, preview.width)
         };
-        let preview = cx.new(|cx| PreviewPane::new(window, cx));
+        let browser_handle = cx.weak_entity();
+        let preview = cx.new(|cx| PreviewPane::new(window, cx, browser_handle.clone()));
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,

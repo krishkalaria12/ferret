@@ -265,6 +265,11 @@ impl Render for Browser {
                 }),
             )
             .on_action(
+                cx.listener(|this, _: &actions::PreviewToggleSource, _, cx| {
+                    this.preview_toggle_source(cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &actions::PreviewToggleLineNumbers, window, cx| {
                     this.preview_toggle_line_numbers(window, cx)
                 }),

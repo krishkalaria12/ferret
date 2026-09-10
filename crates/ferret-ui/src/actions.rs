@@ -74,6 +74,8 @@ actions!(
         PreviewCopyPath,
         /// Preview-local: toggle soft wrap for this pane.
         PreviewToggleWrap,
+        /// Preview-local: flip a Markdown preview between rendered and source.
+        PreviewToggleSource,
         /// Preview-local: toggle line numbers (persisted).
         PreviewToggleLineNumbers,
         /// Open the commit dialog (F-52). A no-op outside a repository, rather

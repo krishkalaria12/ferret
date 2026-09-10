@@ -42,6 +42,31 @@ pub const TEXT_BUDGET: usize = 2 * 1024 * 1024;
 /// available past it.
 pub const MARKDOWN_BUDGET: usize = 256 * 1024;
 
+/// Most mdast blocks rendered as a document.
+///
+/// Background parsing does not prove virtualised layout: nested lists, wide
+/// tables, many fences and long paragraphs get benchmarked before this
+/// moves. Past it the bounded source shows with a reason.
+pub const MARKDOWN_MAX_BLOCKS: usize = 4_000;
+
+/// Deepest mdast nesting rendered as a document.
+///
+/// Malformed nesting stays responsive by falling back to source.
+pub const MARKDOWN_MAX_DEPTH: usize = 32;
+
+/// Most document images decided per document.
+///
+/// Covers rendered, deferred and blocked uses together. Past it the extras
+/// become alt text with a count, which is also what bounds the resolver's
+/// filesystem calls per document.
+pub const MARKDOWN_MAX_IMAGES: usize = 16;
+
+/// Largest single image file read for a document image (phase 07 decode).
+pub const MARKDOWN_IMAGE_INPUT: usize = 8 * 1024 * 1024;
+
+/// Largest aggregate decoded document images (phase 07 decode).
+pub const MARKDOWN_IMAGE_DECODED: usize = 32 * 1024 * 1024;
+
 /// Lines handed to the editor, at most.
 ///
 /// Not a preference. Upstream states the editor targets "about 50K lines";

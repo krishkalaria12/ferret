@@ -27,6 +27,20 @@ pub(super) struct PreviewDrag {
 }
 
 impl Browser {
+    /// Follow a Markdown file link clicked in the preview pane.
+    ///
+    /// Relative links were already lexically vetted at the click; a target
+    /// that is gone lands on the existing gone handling, and there is no
+    /// dirty buffer to guard yet — that arrives with F-36.
+    pub(crate) fn navigate_preview_link(
+        &mut self,
+        path: VfsPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(path, window, cx);
+    }
+
     /// Whether the preview column paints right now.
     ///
     /// The setting decides, the window width vetoes. Read in `Render` (an
@@ -230,6 +244,12 @@ impl Browser {
     pub(super) fn preview_toggle_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.preview.update(cx, |pane, cx| {
             pane.toggle_wrap(window, cx);
+        });
+    }
+
+    pub(super) fn preview_toggle_source(&mut self, cx: &mut Context<Self>) {
+        self.preview.update(cx, |pane, cx| {
+            pane.toggle_source(cx);
         });
     }
 

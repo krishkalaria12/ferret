@@ -29,7 +29,7 @@ impl PreviewPane {
     ) -> impl IntoElement {
         let bg = cx.theme().background;
         let footer = match &self.state {
-            PaneState::Ready { footer, .. } => footer.clone(),
+            PaneState::Ready { footer, .. } | PaneState::ReadyMd { footer, .. } => footer.clone(),
             _ => None,
         };
         v_flex()
@@ -91,6 +91,31 @@ impl PreviewPane {
                 .px(px(4.))
                 .child(self.editor_element())
                 .into_any_element(),
+            PaneState::ReadyMd {
+                show_source,
+                base,
+                remote,
+                ..
+            } => {
+                if *show_source {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .px(px(4.))
+                        .child(self.editor_element())
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .px(px(12.))
+                        .py(px(8.))
+                        .child(self.document_element(base.clone(), *remote, cx))
+                        .into_any_element()
+                }
+            }
             PaneState::Unsupported { entry, message, .. } => {
                 self.render_fallback(entry, message, cx)
             }
@@ -217,6 +242,25 @@ impl PreviewPane {
             .into_any_element()
     }
 
+    /// The rendered document: selectable, with the link policy attached.
+    ///
+    /// Copy/select works in text; every click resolves through
+    /// `handle_markdown_link`, never through the component's default
+    /// open-URL path.
+    fn document_element(
+        &self,
+        base: Option<PathBuf>,
+        remote: bool,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let browser = self.browser.clone();
+        TextView::new(&self.docview)
+            .selectable(true)
+            .on_link_click(move |url, _, window, cx| {
+                handle_markdown_link(&browser, base.clone(), remote, url, window, cx);
+            })
+    }
+
     fn render_footer(&self, footer: String, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_shrink_0()
@@ -234,4 +278,84 @@ impl Render for PreviewPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_pane(window, cx)
     }
+}
+
+/// Resolve one Markdown link click (`docs/preview-plan.html` link policy).
+///
+/// * Same-document anchors (`#frag`) are inert: no anchor scrolling exists
+///   yet, and the default would hand the fragment to the OS browser.
+/// * `https`/`http`/`mailto` never open directly: the destination lands on
+///   the clipboard with a visible toast. A confirmation dialog offering Open
+///   is the follow-up; until then no document-chosen URL is fetched or
+///   opened — the strictest honest reading of PV-D10.
+/// * Anything else with a scheme is rejected with its scheme named.
+/// * Relative file links navigate through the browser's normal navigation
+///   (missing targets land on the existing gone handling). No filesystem
+///   calls happen here: the join is lexical, `..` is refused outright, and
+///   remote documents get no file links at all.
+fn handle_markdown_link(
+    browser: &gpui::WeakEntity<crate::Browser>,
+    base: Option<PathBuf>,
+    remote: bool,
+    url: &SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use ferret_preview::markdown::{has_traversal, is_absolute_path, url_scheme};
+    use gpui_component::notification::Notification;
+
+    let url = url.to_string();
+    if url.starts_with('#') {
+        return;
+    }
+    if url.starts_with("//") {
+        copy_link_address(&url, window, cx);
+        return;
+    }
+    if let Some(scheme) = url_scheme(&url) {
+        if matches!(scheme.as_str(), "http" | "https" | "mailto") {
+            copy_link_address(&url, window, cx);
+        } else {
+            window.push_notification(
+                Notification::error(format!("Ferret blocked a {scheme} link.")),
+                cx,
+            );
+        }
+        return;
+    }
+    let path_text = url.split(['?', '#']).next().unwrap_or_default();
+    if remote || base.is_none() {
+        window.push_notification(
+            Notification::error("File links are unavailable for this document."),
+            cx,
+        );
+        return;
+    }
+    if path_text.is_empty() || is_absolute_path(path_text) || has_traversal(path_text) {
+        window.push_notification(
+            Notification::error("Ferret blocked a link leaving the document."),
+            cx,
+        );
+        return;
+    }
+    let joined = base.unwrap_or_default().join(path_text);
+    let _ = browser.update_in(cx, |browser, window, cx| {
+        browser.navigate_preview_link(VfsPath::local(joined), window, cx);
+    });
+}
+
+/// The destination lands on the clipboard with a visible toast: explicit,
+/// inspectable, and never a fetch.
+fn copy_link_address(url: &str, window: &mut Window, cx: &mut App) {
+    use gpui_component::notification::Notification;
+
+    cx.write_to_clipboard(gpui::ClipboardItem {
+        entries: vec![gpui::ClipboardEntry::String(gpui::ClipboardString::new(
+            url.to_string(),
+        ))],
+    });
+    window.push_notification(
+        Notification::info(format!("Link address copied: {url}")),
+        cx,
+    );
 }

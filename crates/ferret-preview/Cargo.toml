@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ferret-vfs.workspace = true
 csv.workspace = true
+markdown.workspace = true
 smallvec.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
