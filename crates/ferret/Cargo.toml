@@ -21,6 +21,11 @@ gpui_platform.workspace = true
 profiling = { workspace = true, optional = true }
 
 [features]
+# Full preview highlighting, forwarded to the UI crate: disabling default
+# features here must also disable them there, or a `--no-default-features`
+# build still pays for 17 generated-C grammars (and disabling them on the
+# workspace root would not, on its own, disable the transitive default).
+default = ["ferret-ui/languages-extended"]
 # Frame, layout and paint spans in the Tracy profiler.
 #
 # Off by default and absent from a release build. Enabling it turns on the

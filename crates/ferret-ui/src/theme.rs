@@ -263,6 +263,57 @@ pub fn text_on(fill: Hsla, dark_text: Hsla) -> Hsla {
     }
 }
 
+/// Every syntax slot the highlighter can ask for.
+///
+/// Shared with the grammar fixture test: a capture whose first dotted
+/// segment is not on this list styles nothing, which is exactly what the
+/// vendored-query adaptations exist to prevent. Test-only: the render path
+/// resolves through the theme, never through this list.
+#[cfg(test)]
+pub(crate) const SYNTAX_SLOTS: &[&str] = &[
+    "attribute",
+    "boolean",
+    "comment",
+    "comment.doc",
+    "constant",
+    "constructor",
+    "embedded",
+    "emphasis",
+    "emphasis.strong",
+    "enum",
+    "function",
+    "hint",
+    "keyword",
+    "label",
+    "link_text",
+    "link_uri",
+    "number",
+    "operator",
+    "predictive",
+    "preproc",
+    "primary",
+    "property",
+    "punctuation",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "punctuation.list_marker",
+    "punctuation.special",
+    "string",
+    "string.escape",
+    "string.regex",
+    "string.special",
+    "string.special.symbol",
+    "tag",
+    "tag.doctype",
+    "text.code.span",
+    "text.literal",
+    "title",
+    "type",
+    "variable",
+    "variable.special",
+    "variant",
+];
+
 /// Rec. 709 luma, which is close enough to perceived brightness for a
 /// two-way choice and far cheaper than a full contrast-ratio computation.
 fn relative_luminance(color: Hsla) -> f32 {
@@ -291,49 +342,7 @@ mod tests {
     /// unstyled), so this is a test rather than a review checklist.
     #[test]
     fn every_theme_defines_every_syntax_slot() {
-        const SLOTS: &[&str] = &[
-            "attribute",
-            "boolean",
-            "comment",
-            "comment.doc",
-            "constant",
-            "constructor",
-            "embedded",
-            "emphasis",
-            "emphasis.strong",
-            "enum",
-            "function",
-            "hint",
-            "keyword",
-            "label",
-            "link_text",
-            "link_uri",
-            "number",
-            "operator",
-            "predictive",
-            "preproc",
-            "primary",
-            "property",
-            "punctuation",
-            "punctuation.bracket",
-            "punctuation.delimiter",
-            "punctuation.list_marker",
-            "punctuation.special",
-            "string",
-            "string.escape",
-            "string.regex",
-            "string.special",
-            "string.special.symbol",
-            "tag",
-            "tag.doctype",
-            "text.code.span",
-            "text.literal",
-            "title",
-            "type",
-            "variable",
-            "variable.special",
-            "variant",
-        ];
+        const SLOTS: &[&str] = super::SYNTAX_SLOTS;
         assert_eq!(SLOTS.len(), 41);
 
         let themes: serde_json::Value = serde_json::from_str(include_str!("../themes/ferret.json"))

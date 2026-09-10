@@ -16,6 +16,7 @@
 //! `edit.rs` (F-36) and `overlay.rs` (F-75). They land here, inside this
 //! module, so a `gpui-component` bump touches one directory (PV-R04).
 
+mod grammars;
 mod header;
 mod render;
 
@@ -144,6 +145,9 @@ pub struct PreviewPane {
 
 impl PreviewPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Deterministic, duplicate-checked, once per process — before any
+        // preview, so the first file of a type is already highlighted.
+        grammars::ensure_registered();
         let line_numbers = cx.global::<FerretState>().settings.preview.line_numbers;
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)

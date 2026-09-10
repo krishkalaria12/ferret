@@ -32,6 +32,122 @@ pub fn filename_language(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Every language name the tables below can emit.
+///
+/// The UI's registry invariant test walks this list: each name must either
+/// resolve in the `LanguageRegistry` or appear in an explicit
+/// `IDENTIFIED_BUT_UNHIGHLIGHTED` list there. Keep in sync with
+/// `filename_language` and `extension_language_lower` below — a name added
+/// to a table but not here silently escapes the invariant.
+pub const ALL_NAMES: &[&str] = &[
+    "actionscript",
+    "ada",
+    "applescript",
+    "arduino",
+    "asm",
+    "astro",
+    "autoit",
+    "awk",
+    "bash",
+    "batch",
+    "c",
+    "c_sharp",
+    "clojure",
+    "cmake",
+    "cobra",
+    "cpp",
+    "crystal",
+    "css",
+    "csv",
+    "d",
+    "dart",
+    "diff",
+    "dockerfile",
+    "dotenv",
+    "ejs",
+    "elixir",
+    "elm",
+    "erb",
+    "erlang",
+    "fish",
+    "forth",
+    "fortran",
+    "gitignore",
+    "gleam",
+    "glsl",
+    "go",
+    "graphql",
+    "groovy",
+    "haskell",
+    "hcl",
+    "html",
+    "ini",
+    "janet",
+    "java",
+    "javascript",
+    "json",
+    "jsonnet",
+    "julia",
+    "just",
+    "kdl",
+    "kotlin",
+    "latex",
+    "lidr",
+    "log",
+    "lua",
+    "make",
+    "markdown",
+    "nginx",
+    "nim",
+    "nix",
+    "nushell",
+    "ocaml",
+    "odin",
+    "pascal",
+    "perl",
+    "php",
+    "plain",
+    "pony",
+    "powershell",
+    "prisma",
+    "proto",
+    "purescript",
+    "python",
+    "r",
+    "racket",
+    "rego",
+    "roc",
+    "ruby",
+    "rust",
+    "scala",
+    "sed",
+    "slang",
+    "sml",
+    "solidity",
+    "sql",
+    "svelte",
+    "swift",
+    "swig",
+    "tcl",
+    "toml",
+    "tsv",
+    "tsx",
+    "typescript",
+    "typst",
+    "v",
+    "vala",
+    "vbscript",
+    "vim",
+    "vue",
+    "wgsl",
+    "wren",
+    "xml",
+    "yaml",
+    "yuck",
+    "zenscript",
+    "zig",
+];
+
 /// Resolve a file name to a language name.
 ///
 /// Lowercases once, the way the icon layer already established: an extension
@@ -297,6 +413,34 @@ mod tests {
         // AppleScript, not as "unsupported binary".
         assert_eq!(language_for("script.applescript"), Some("applescript"));
         assert_eq!(display_name("applescript"), "AppleScript");
+    }
+
+    #[test]
+    fn all_names_covers_the_tables() {
+        // The UI invariant test trusts ALL_NAMES to be the tables' full
+        // output. This ties the two together for a sample across every
+        // region of the tables; extend it when the tables grow.
+        for (file, name) in [
+            ("Makefile", "make"),
+            ("Dockerfile", "dockerfile"),
+            (".gitignore", "gitignore"),
+            ("main.rs", "rust"),
+            ("app.tsx", "tsx"),
+            ("query.sql", "sql"),
+            ("site.vue", "vue"),
+            ("flake.nix", "nix"),
+            ("main.tf", "hcl"),
+            ("notes.md", "markdown"),
+            ("data.csv", "csv"),
+            ("script.applescript", "applescript"),
+            ("photo.png", "plain"),
+        ] {
+            assert_eq!(language_for(file).or(Some("plain")), Some(name));
+            assert!(
+                ALL_NAMES.contains(&name),
+                "{name} (from {file}) is missing from ALL_NAMES"
+            );
+        }
     }
 
     #[test]
