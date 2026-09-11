@@ -4,6 +4,7 @@ members = [
     "crates/ferret",
     "crates/ferret-git",
     "crates/ferret-platform",
+    "crates/ferret-remote",
     "crates/ferret-search",
     "crates/ferret-searchd",
     "crates/ferret-settings",
@@ -59,6 +60,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 
 ferret-git = { path = "crates/ferret-git" }
 ferret-platform = { path = "crates/ferret-platform" }
+ferret-remote = { path = "crates/ferret-remote" }
 ferret-search = { path = "crates/ferret-search" }
 ferret-searchd = { path = "crates/ferret-searchd" }
 ferret-ui = { path = "crates/ferret-ui" }
@@ -158,6 +160,47 @@ rayon = "1"
 # explicit case-sensitive, insensitive and smart-case behavior.
 regex = "1"
 rust-embed = "8"
+# R-D08. SSH transport, authentication, host-key checking and the agent
+# client, in pure Rust — which is the whole reason an SFTP mount needs no
+# FUSE, no macFUSE and no WinFsp (D-06), and builds identically on both
+# targets with no C toolchain. `ring` rather than the default `aws-lc-rs`
+# backend: the latter builds C and CMake, which is precisely the dependency
+# this crate was chosen to avoid.
+russh = { version = "0.63", default-features = false, features = ["ring"] }
+# The SFTP subsystem over `russh`. Listings use its *raw* session — `opendir`
+# plus repeated `readdir` — so one SSH_FXP_NAME response becomes one entry
+# batch; the convenience `read_dir` returns a synchronous iterator, which
+# would collect a whole remote directory before the first row could paint.
+russh-sftp = "2.4"
+# Passwords and key passphrases in the OS credential store — Keychain on
+# macOS, Credential Manager on Windows. Nothing else in the tree may hold a
+# secret, and no file Ferret writes ever contains one.
+keyring = "4"
+# F-20 asks that hosts be imported from `~/.ssh/config` rather than retyped.
+# Parsed permissively and treated as *suggestions that pre-fill the dialog*:
+# a user's ssh config is theirs, and misreading one keyword must never change
+# how Ferret connects.
+ssh2-config = "0.8"
+# `russh` is built on Tokio while Ferret runs GPUI's executors and smol, so
+# the bridge is explicit rather than accidental: one runtime, two worker
+# threads, created on the first connection and confined to `ferret-remote`.
+# Two, fixed — this work is latency-bound, and a fourth core-count-sized pool
+# beside `ferret_vfs::pool`, smol's blocking pool and GPUI's executor would
+# oversubscribe the machine. Already in `Cargo.lock` via `zed-reqwest`, so
+# this is an edge to something the workspace compiles anyway.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    # Transfers read and write the local side of a copy on the remote runtime,
+    # so the local file I/O has to be async there too — a blocking read would
+    # stall one of only two worker threads.
+    "fs",
+    # The session actor's command channel, and the semaphore that caps how many
+    # directory listings one mount may have open at once.
+    "sync",
+] }
 # Bounded collections that never reach the heap: at most four table columns,
 # at most two of them hideable.
 smallvec = "1"

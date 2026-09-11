@@ -42,11 +42,13 @@ mod entry;
 mod errors;
 mod local;
 mod path;
+mod router;
 mod vfs;
 
 pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
 pub use errors::{Result, VfsError};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
+pub use router::Router;
 pub use vfs::{Capabilities, DirEntryBatch, ListingDetail, ReadDirStream, RemoveMode, Vfs};
 pub use watch::{Watch, WatchEvent};

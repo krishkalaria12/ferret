@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Ferret SSH &amp; SCP — implementation plan</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --paper: #ffffff;
+      --paper-2: #edf3fa;
+      --ink: #182331;
+      --muted: #607084;
+      --faint: #8794a5;
+      --line: #d6e0eb;
+      --accent: #0878e8;
+      --accent-soft: #dceeff;
+      --good: #13795b;
+      --warn: #9a5b00;
+      --risk: #b93845;
+      --code: #e7eef7;
+      --shadow: 0 18px 55px rgba(34, 57, 84, .10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10161f;
+        --paper: #161f2a;
+        --paper-2: #1c2835;
+        --ink: #e8eef5;
+        --muted: #a6b4c4;
+        --faint: #7e8b9a;
+        --line: #2b3a49;
+        --accent: #4da3ff;
+        --accent-soft: #173b60;
+        --good: #55c69a;
+        --warn: #f0b35b;
+        --risk: #ff7d89;
+        --code: #213040;
+        --shadow: 0 20px 65px rgba(0, 0, 0, .32);
+      }
+    }
+    :root[data-theme="light"] {
+      --bg: #f4f7fb; --paper: #ffffff; --paper-2: #edf3fa; --ink: #182331;
+      --muted: #607084; --faint: #8794a5; --line: #d6e0eb; --accent: #0878e8;
+      --accent-soft: #dceeff; --good: #13795b; --warn: #9a5b00; --risk: #b93845;
+      --code: #e7eef7; --shadow: 0 18px 55px rgba(34, 57, 84, .10);
+    }
+    :root[data-theme="dark"] {
+      --bg: #10161f; --paper: #161f2a; --paper-2: #1c2835; --ink: #e8eef5;
+      --muted: #a6b4c4; --faint: #7e8b9a; --line: #2b3a49; --accent: #4da3ff;
+      --accent-soft: #173b60; --good: #55c69a; --warn: #f0b35b; --risk: #ff7d89;
+      --code: #213040; --shadow: 0 20px 65px rgba(0, 0, 0, .32);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6; text-rendering: optimizeLegibility;
+    }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    code, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+    code { background: var(--code); border-radius: 4px; padding: .08rem .3rem; font-size: .9em; }
+    button { font: inherit; }
+    .shell { display: grid; grid-template-columns: 17rem minmax(0, 1fr); max-width: 96rem; margin: 0 auto; }
+    .rail {
+      position: sticky; top: 0; height: 100vh; padding: 2rem 1.5rem;
+      border-right: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 92%, transparent);
+      overflow-y: auto;
+    }
+    .brand { display: flex; align-items: center; gap: .7rem; margin-bottom: 1.8rem; }
+    .brand-mark { width: 1.7rem; height: 1.7rem; border: 2px solid var(--accent); border-radius: 50%; position: relative; }
+    .brand-mark::after { content: ""; position: absolute; width: .7rem; height: 2px; right: -.5rem; bottom: .1rem; background: var(--accent); transform: rotate(45deg); }
+    .brand b { letter-spacing: -.02em; }
+    .rail-label { color: var(--faint); font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+    nav ol { list-style: none; margin: .55rem 0 1.5rem; padding: 0; }
+    nav a { display: block; padding: .31rem .4rem; color: var(--muted); text-decoration: none; border-left: 2px solid transparent; }
+    nav a:hover, nav a:focus-visible { color: var(--ink); border-left-color: var(--accent); background: var(--accent-soft); outline: none; }
+    .theme { border: 1px solid var(--line); border-radius: 5px; background: var(--paper); color: var(--ink); padding: .35rem .6rem; cursor: pointer; }
+    .doc { min-width: 0; padding: 4.5rem clamp(1.5rem, 5vw, 5.5rem) 8rem; }
+    .masthead { max-width: 68rem; padding-bottom: 3.2rem; border-bottom: 1px solid var(--line); }
+    .eyebrow, .section-tag { color: var(--accent); font-size: .72rem; font-weight: 760; text-transform: uppercase; letter-spacing: .13em; }
+    h1, h2, h3 { line-height: 1.18; text-wrap: balance; }
+    h1 { max-width: 16ch; margin: .75rem 0 1.2rem; font-size: clamp(2.8rem, 7vw, 6.4rem); letter-spacing: -.065em; font-weight: 780; }
+    h2 { margin: .4rem 0 .9rem; font-size: clamp(1.8rem, 3.3vw, 3rem); letter-spacing: -.04em; }
+    h3 { margin: 2.1rem 0 .65rem; font-size: 1.12rem; letter-spacing: -.018em; }
+    h4 { margin: 1.25rem 0 .35rem; }
+    .lede { max-width: 62ch; color: var(--muted); font-size: 1.18rem; }
+    .facts { display: grid; grid-template-columns: repeat(4, minmax(8rem, 1fr)); gap: 1px; margin-top: 2.3rem; background: var(--line); border: 1px solid var(--line); }
+    .facts div { background: var(--paper); padding: .85rem 1rem; }
+    dt { color: var(--faint); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+    dd { margin: .15rem 0 0; font-weight: 650; }
+    section { max-width: 68rem; padding: 4rem 0 1rem; }
+    .intro { max-width: 65ch; color: var(--muted); font-size: 1.05rem; }
+    .callout { margin: 1.4rem 0; padding: 1rem 1.15rem; border-left: 3px solid var(--accent); background: var(--paper-2); }
+    .callout strong { display: block; margin-bottom: .25rem; }
+    .callout.warn { border-left-color: var(--warn); }
+    .callout.risk { border-left-color: var(--risk); }
+    .callout.good { border-left-color: var(--good); }
+    pre.callout { max-width: 100%; overflow-x: auto; }
+    pre.callout code { display: block; width: max-content; min-width: 100%; background: transparent; padding: 0; }
+    .decision { display: grid; grid-template-columns: 7rem 1fr; border-top: 1px solid var(--line); padding: .9rem 0; gap: 1rem; }
+    .decision b { color: var(--accent); }
+    .decision p { margin: 0; }
+    .scroller { overflow-x: auto; border: 1px solid var(--line); background: var(--paper); }
+    table { width: 100%; min-width: 46rem; border-collapse: collapse; font-size: .9rem; }
+    caption { text-align: left; padding: .75rem 1rem; color: var(--muted); font-weight: 700; }
+    th { background: var(--paper-2); color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; text-align: left; }
+    th, td { padding: .72rem .85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .yes { color: var(--good); font-weight: 720; }
+    .no { color: var(--risk); font-weight: 720; }
+    .hold { color: var(--warn); font-weight: 720; }
+    .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; margin: 1.4rem 0; }
+    .flow div { min-height: 8rem; padding: 1rem; background: var(--paper); border: 1px solid var(--line); box-shadow: var(--shadow); }
+    .flow small { display: block; color: var(--accent); font-weight: 750; margin-bottom: .45rem; }
+    .flow b { display: block; margin-bottom: .35rem; }
+    .flow p { margin: 0; color: var(--muted); font-size: .88rem; }
+    .ui-map { padding: 1rem; border: 1px solid var(--line); background: var(--paper); }
+    .dialog { max-width: 52rem; margin: 1rem auto; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
+    .dialog-row { display: grid; grid-template-columns: 6.5rem 1fr auto; align-items: center; gap: .65rem; padding: .65rem .9rem; border-bottom: 1px solid var(--line); }
+    .dialog-row:last-child { border-bottom: 0; }
+    .fake-input { padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); }
+    .chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+    .chip { padding: .24rem .52rem; background: var(--paper-2); border: 1px solid var(--line); border-radius: 5px; font-size: .82rem; }
+    .chip.active { color: white; background: var(--accent); border-color: var(--accent); }
+    ul, ol { padding-left: 1.3rem; }
+    li + li { margin-top: .4rem; }
+    .phase { display: grid; grid-template-columns: 4.7rem minmax(0, 1fr); gap: 1.2rem; padding: 1.25rem 0; border-top: 1px solid var(--line); }
+    .phase-id { color: var(--accent); font: 740 .78rem ui-monospace, monospace; }
+    .phase h3 { margin: 0 0 .35rem; }
+    .phase p { margin: 0; }
+    details { border-top: 1px solid var(--line); padding: .75rem 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    .sources li { margin-bottom: .55rem; }
+    .foot { max-width: 68rem; margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--faint); font-size: .82rem; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 900px) {
+      .shell { display: block; }
+      .rail { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav ol { columns: 2; }
+      .doc { padding-top: 2.5rem; }
+      .facts { grid-template-columns: repeat(2, 1fr); }
+      .flow { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px) {
+      nav ol { columns: 1; }
+      .facts, .flow { grid-template-columns: 1fr; }
+      .decision, .phase { grid-template-columns: 1fr; gap: .25rem; }
+      .dialog-row { grid-template-columns: 1fr; }
+    }
+    @media print {
+      .rail { display: none; }
+      .shell { display: block; max-width: none; }
+      .doc { padding: 0; }
+      section { break-inside: auto; }
+      a { color: inherit; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><b>ferret/remote</b></div>
+    <span class="rail-label">Plan index</span>
+    <nav aria-label="Plan sections">
+      <ol>
+        <li><a href="#verdict">Executive verdict</a></li>
+        <li><a href="#source">Source &amp; scope</a></li>
+        <li><a href="#experience">Product experience</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#router">The routing change</a></li>
+        <li><a href="#sftp">SFTP backend contract</a></li>
+        <li><a href="#transfers">Send to · transfers</a></li>
+        <li><a href="#terminal">SSH terminal</a></li>
+        <li><a href="#security">Security model</a></li>
+        <li><a href="#libraries">Library decision</a></li>
+        <li><a href="#performance">Performance contract</a></li>
+        <li><a href="#platforms">Platform behavior</a></li>
+        <li><a href="#delivery">Build sequence</a></li>
+        <li><a href="#verification">Verification</a></li>
+        <li><a href="#risks">Risks &amp; questions</a></li>
+        <li><a href="#sources">Research sources</a></li>
+      </ol>
+    </nav>
+    <button class="theme" id="theme" type="button" aria-label="Toggle light and dark theme">Toggle theme</button>
+  </aside>
+
+  <main class="doc">
+    <header class="masthead">
+      <p class="eyebrow">Detailed implementation plan · F-13 · F-20–F-23 · 3 Sep 2026</p>
+      <h1>One click to connect. Drag to transfer.</h1>
+      <p class="lede">Saved SSH connections in the sidebar, an SFTP mount that browses like a local folder, and a guided “Send to” transfer from the context menu — built in-process with <code>russh</code>, with no kernel mount, no second SSH configuration to maintain, and no frame ever blocked on a round trip.</p>
+      <dl class="facts">
+        <div><dt>Owner</dt><dd><code>ferret-remote</code> + <code>ferret-ui</code></dd></div>
+        <div><dt>Mode</dt><dd>In-process SFTP · no FUSE</dd></div>
+        <div><dt>Targets</dt><dd>macOS · Windows</dd></div>
+        <div><dt>Primary gate</dt><dd>Zero network calls on the render path</dd></div>
+      </dl>
+    </header>
+
+    <section id="verdict">
+      <span class="section-tag">Decision summary</span>
+      <h2>Executive verdict</h2>
+      <p class="intro">Build product Phase 7 as one GPUI-free service crate, <code>ferret-remote</code>, holding four things: saved connection records, live SSH sessions, an SFTP <code>Vfs</code> backend, and a transfer queue. The browser reaches all of it through the <code>Vfs</code> trait it already uses, so remote folders arrive as folders rather than as a bolted-on transfer client. Interactive SSH keeps shelling out to the system <code>ssh</code> binary; only file browsing is in-process.</p>
+      <div class="callout good"><strong>Recommended baseline</strong><span><code>russh 0.63</code> + <code>russh-sftp 2.4</code> for transport, authentication and the SFTP subsystem; <code>keyring 4.2</code> for the OS keychain; <code>ssh2-config 0.8</code> to import hosts from <code>~/.ssh/config</code>; the system <code>ssh</code> binary for interactive shells; a two-thread Tokio runtime confined to the remote crate. All Apache-2.0 or MIT — compatible with distributing Ferret under GPL-3.0.</span></div>
+
+      <div class="decision"><b>R-D01</b><p><strong><code>ferret-remote</code> owns everything remote and knows nothing about GPUI.</strong> Connection records, session lifecycle, host-key policy, the SFTP backend and transfers live behind one crate boundary, matching how <code>ferret-git</code>, <code>ferret-search</code> and <code>ferret-terminal</code> are split today. The UI depends on it; it depends on <code>ferret-vfs</code> only.</p></div>
+      <div class="decision"><b>R-D02</b><p><strong>A router in <code>ferret-vfs</code> becomes <code>FerretState.fs</code>.</strong> Today that field is a concrete <code>LocalFs</code>, copied into every task that lists, watches, probes or mutates. A <code>Router</code> that itself implements <code>Vfs</code> and dispatches per <code>VfsPath</code> keeps all of those call sites intact and is the single change that makes a mount browsable. Local paths keep a direct <code>LocalFs</code> call — no dynamic dispatch is added to the hot listing path.</p></div>
+      <div class="decision"><b>R-D03</b><p><strong>One Tokio runtime, two worker threads, owned by <code>ferret-remote</code>.</strong> <code>russh</code> is Tokio-based and Ferret is smol + GPUI executors; the bridge is explicit rather than accidental. The runtime is created on first connect, never used for CPU work, and never grows with the core count — Ferret already runs three pools and the fourth must not size itself like the others (<code>AGENTS.md</code>, “one walker per job”).</p></div>
+      <div class="decision"><b>R-D04</b><p><strong>Listings stream from the raw SFTP handle, not from a collected iterator.</strong> <code>opendir</code> followed by repeated <code>readdir</code> yields one <code>SSH_FXP_NAME</code> response per round trip, and each response becomes exactly one <code>DirEntryBatch</code>. Attributes ride along with the names, so the backend declares <code>metadata_in_listing: true</code> and a 10,000-entry remote directory needs no second pass.</p></div>
+      <div class="decision"><b>R-D05</b><p><strong>“Send to” transfers over SFTP on the already-authenticated session</strong> — not <code>scp(1)</code>, not the legacy SCP wire protocol. OpenSSH 9.0 itself switched <code>scp</code> to use SFTP by default; the old protocol is deprecated, gives no usable progress granularity, and a subprocess would authenticate a second time. The user-facing name stays “Send to…”, the transport is SFTP.</p></div>
+      <div class="decision"><b>R-D06</b><p><strong><code>MountId</code> is persisted per connection record, not handed out per launch.</strong> <code>VfsPath::preference_key()</code> formats remote paths as <code>{mount}:{path}</code>, so a counter reset at startup would silently attach one server’s per-folder view preferences to a different server after a restart. The id is allocated once, stored in the connection record, and never reused.</p></div>
+      <div class="decision"><b>R-D07</b><p><strong>Connections live in their own <code>connections.json</code>; secrets live in the OS keychain; neither ever holds the other’s data.</strong> The settings file stays a small, hand-editable document (D-12/D-21) and gains only the handful of remote tunables that code actually reads (D-41). Passwords and key passphrases are never written to any file Ferret owns.</p></div>
+      <div class="decision"><b>R-D08</b><p><strong>Host keys are verified on every connection against the user’s own <code>known_hosts</code>.</strong> An unknown host raises an explicit fingerprint dialog before anything is sent; a <em>changed</em> host key is refused outright with no “continue anyway” button in the first release. Ferret must never be the SSH client that made key checking optional.</p></div>
+      <div class="decision"><b>R-D09</b><p><strong>Interactive SSH shells out to the system <code>ssh</code> (D-07), and directory sync is off by default for remote sessions.</strong> The remote shell dialect is unknown, so the only line Ferret will ever inject is the POSIX <code> cd -- '…'</code> form, behind the existing alternate-screen and idle guards.</p></div>
+      <div class="decision"><b>R-D10</b><p><strong>Capabilities are negotiated, never assumed.</strong> <code>atomic_rename</code> is declared only when the server advertises <code>posix-rename@openssh.com</code>; <code>watch</code> is always false, because SFTP has no change notification and polling a remote directory on a timer is a cost the user did not ask for.</p></div>
+      <div class="decision"><b>R-D11</b><p><strong>Remote maps use a seeded hasher.</strong> The workspace uses <code>foldhash</code> precisely because folder indices key on names read from the user’s own disk. Directory entries from a remote server are attacker-choosable input; anything keyed on them takes <code>std</code>’s SipHash instead. This is written down in <code>Cargo.toml</code> already — this is the feature that triggers it.</p></div>
+      <div class="decision"><b>R-D12</b><p><strong>Root-enabled mounts (F-23) ship last, or not at all in this phase.</strong> Everything else is reversible; that one hands a GUI unrestricted write access to a remote machine. It stays behind a typed confirmation, a permanent visual marker, and a refusal to restore from session state.</p></div>
+    </section>
+
+    <section id="source">
+      <span class="section-tag">Traceability</span>
+      <h2>Source, scope, and non-goals</h2>
+      <p class="intro">The supplied reference screenshot is a product reference, not an executable instruction. <a href="plan.html">docs/plan.html</a> stays authoritative: F-20 saved connections, F-21 SFTP mounts, F-22 SCP from the context menu, F-23 root mounts, and F-13 the SSH terminal that follows the mounted folder — Phase 7, depending on Phases 1, 2 and 6.</p>
+      <div class="scroller">
+        <table>
+          <caption>Reference-to-plan mapping</caption>
+          <thead><tr><th>Reference element</th><th>Commitment</th><th>Plan treatment</th></tr></thead>
+          <tbody>
+            <tr><td>“New Connection · SSH remote server” sheet, Cancel / Save</td><td>F-20</td><td><code>gpui-component</code> dialog mounted under <code>Root</code>; validation on Save, never on keystroke; Esc cancels without discarding silently.</td></tr>
+            <tr><td>Server: Name, Host, Username, Port</td><td>F-20</td><td>Name is a label only. Host accepts a hostname, IPv4, bracketed IPv6, or a <code>~/.ssh/config</code> alias. Port defaults to 22 and is stored only when it differs.</td></tr>
+            <tr><td>Authentication: SSH Key (“leave blank for default”) + file picker</td><td>F-20</td><td>Blank means agent-first, then the standard identity files. An explicit path pins one key. Encrypted keys prompt for the passphrase at connect time, never at save time.</td></tr>
+            <tr><td>Notes field</td><td>F-20</td><td>Free text on the record, shown in the connection’s tooltip and detail sheet. Never sent anywhere.</td></tr>
+            <tr><td>Live <code>ssh dorien@myserver</code> line with a copy button</td><td>F-20</td><td>Derived from the fields as they are typed, shell-quoted, and identical to the command the SSH terminal will actually run. If they can diverge, the feature is lying.</td></tr>
+            <tr><td>“Connections” sidebar group with a <em>+</em> affordance</td><td>F-04 / F-20</td><td>New sidebar section between Favorites and Volumes, with per-row state: idle, connecting, connected, error. <em>+</em> opens the same dialog.</td></tr>
+            <tr><td>One click connects</td><td>F-20/F-21</td><td>Click mounts and navigates the active tab to the remote home directory. A second click on a connected row navigates without re-dialling.</td></tr>
+            <tr><td>Browse the mount like a folder</td><td>F-21</td><td>Same file pane, same sort, same selection, same rename/delete, with capability-driven disabling instead of failures at the last step.</td></tr>
+            <tr><td>Right-click → Send to → a saved connection</td><td>F-22</td><td>Submenu built from the saved records; destination sheet picks the remote directory; the transfer runs in a queue with progress and cancel.</td></tr>
+            <tr><td>Terminal header network button</td><td>F-13</td><td>Visible while a remote folder is active; opens a real <code>ssh</code> session in the docked panel, landing in the folder being browsed.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Included beyond the reference</h3>
+      <ul>
+        <li>Import from <code>~/.ssh/config</code>, so nobody retypes hosts that already exist (explicit F-20 behaviour).</li>
+        <li>Host-key fingerprint confirmation and a refusal path for changed keys.</li>
+        <li>Connection state that survives navigation: mounts stay warm, and a dropped link reconnects once before it complains.</li>
+        <li>Capability badges — remote folders honestly show what they cannot do (no trash, no watcher, no content search) rather than failing at the end of a gesture.</li>
+        <li>Transfers in both directions. The reference shows local→remote; a remote mount makes remote→local a drag, and refusing it would be arbitrary.</li>
+      </ul>
+      <h3>Non-goals for first delivery</h3>
+      <ul>
+        <li>No kernel-level mount (D-06). Other applications cannot see a Ferret mount, and “Open With” on a remote file is deferred until a download-open-upload cycle is designed properly.</li>
+        <li>No SSH configuration reimplementation. Jump hosts, <code>Match</code> blocks, certificate authorities and MFA prompts belong to the user’s own <code>ssh</code>; where the in-process client cannot honour one, Ferret says so instead of half-supporting it.</li>
+        <li>No port forwarding, no remote command palette, no rsync-style delta sync, no S3/WebDAV (F-24/F-25 are Phase 8).</li>
+        <li>No remote content search in this phase. Filename search over a mount is capability-gated per PS-Q05; content search stays local until a remote <code>grep</code> path is designed.</li>
+        <li>No password-only convenience shortcuts: no “save password” checkbox that writes to disk, no host-key bypass flag, no agent-forwarding by default.</li>
+      </ul>
+    </section>
+
+    <section id="experience">
+      <span class="section-tag">Interaction contract</span>
+      <h2>Product experience</h2>
+      <p class="intro">Three surfaces: the sidebar group, the connection dialog, and the transfer sheet. Everything else is the file pane the user already knows, behaving the same way against a slower disk.</p>
+
+      <div class="ui-map" aria-label="Simplified New Connection dialog layout">
+        <div class="dialog">
+          <div class="dialog-row"><strong>⌾ New Connection</strong><span>SSH remote server</span><span class="chips"><span class="chip">Cancel</span><span class="chip active">Save</span></span></div>
+          <div class="dialog-row"><span>Name</span><span class="fake-input">build-box</span><span></span></div>
+          <div class="dialog-row"><span>Host</span><span class="fake-input">myserver · 197.2.1.23 · alias from ssh_config</span><span class="chip">Port 22</span></div>
+          <div class="dialog-row"><span>Username</span><span class="fake-input">dorien</span><span></span></div>
+          <div class="dialog-row"><span>SSH Key</span><span class="fake-input">~/.ssh/id_ed25519 (leave blank for default)</span><span class="chip">Browse…</span></div>
+          <div class="dialog-row"><span>Notes</span><span class="fake-input">optional, local only</span><span></span></div>
+          <div class="dialog-row"><span>Command</span><span class="mono">ssh -p 22 dorien@myserver</span><span class="chip">Copy</span></div>
+        </div>
+      </div>
+
+      <h3>Sidebar: the Connections group</h3>
+      <p>A fourth section joins Places, Favorites and Volumes in <code>browser/sidebar.rs</code>. It carries state that the existing three do not, so it needs its own row builder rather than another argument on <code>sidebar_place_row</code>:</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Row state</th><th>Appearance</th><th>Click</th><th>Context menu</th></tr></thead>
+          <tbody>
+            <tr><td>Idle</td><td>Muted globe icon, name, host as secondary text.</td><td>Connect, then navigate to the remote home.</td><td>Connect · Edit… · Duplicate · Copy SSH command · Remove</td></tr>
+            <tr><td>Connecting</td><td>Spinner in the icon slot; row stays clickable to cancel.</td><td>Cancel the dial.</td><td>Cancel · Edit…</td></tr>
+            <tr><td>Connected</td><td>Accented icon; selected when the active tab is inside this mount.</td><td>Navigate to the mount root without re-dialling.</td><td>Open in New Tab · Open SSH Terminal · Disconnect · Edit…</td></tr>
+            <tr><td>Error</td><td>Risk-coloured icon; the failure reason is the row tooltip.</td><td>Retry.</td><td>Retry · Show details · Edit…</td></tr>
+            <tr><td>Root-enabled (F-23)</td><td>Permanent badge on the row and in the path bar. Never restored automatically.</td><td>Requires re-confirmation each launch.</td><td>Disable root · Disconnect</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><code>current_place</code> in the sidebar resolves the selected row with <code>as_local()</code> and returns <code>None</code> for every remote path. Connections need the parallel rule: a row is selected when the active tab’s <code>VfsPath</code> is <code>Remote</code> with that record’s <code>MountId</code>. Both rules must run, or clicking into a mount visually deselects everything.</p>
+
+      <h3>States the mount must draw, not infer</h3>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>State</th><th>Visible behavior</th><th>Rule</th></tr></thead>
+          <tbody>
+            <tr><td>Dialling</td><td>Tab shows the destination with a progress indicator; the previous listing stays on screen until the first batch arrives.</td><td>Never blank the pane to show that something is happening.</td></tr>
+            <tr><td>Authenticating</td><td>Passphrase or keyboard-interactive prompt as a dialog under <code>Root</code>, naming the host and the key it is for.</td><td>A prompt that does not say which host asked is a phishing surface.</td></tr>
+            <tr><td>Host unknown</td><td>Fingerprint sheet: host, port, key type, SHA256 fingerprint, and the two buttons — Connect and add to <code>known_hosts</code>, or Cancel.</td><td>Default focus is Cancel.</td></tr>
+            <tr><td>Host key changed</td><td>Hard refusal with the offending fingerprint and the <code>known_hosts</code> line number to inspect.</td><td>No override button in v1.</td></tr>
+            <tr><td>Listing a slow directory</td><td>The existing slow-listing hint, unchanged; batches append as they arrive.</td><td>The pane is already streaming — this is where that pays off.</td></tr>
+            <tr><td>Link dropped</td><td>One silent reconnect attempt, then a banner offering Reconnect; selection, scroll position and expansion state survive.</td><td>A flaky link must not cost the user their place.</td></tr>
+            <tr><td>Capability-gated action</td><td>Menu item disabled with a reason in the tooltip: “This server does not support moving to trash.”</td><td>Disable up front (the <code>Capabilities</code> contract), never fail at the last step.</td></tr>
+            <tr><td>Transfer running</td><td>Status-bar item with per-file progress, bytes/sec, remaining count and Cancel.</td><td>Progress that only counts files is useless for one large file.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Send to · the guided transfer</h3>
+      <p>Right-click a selection → <em>Send to</em> → a submenu of saved connections, built in <code>pane/menu.rs</code> beside Cut/Copy. Choosing one opens a small destination sheet: the connection, a remote directory field pre-filled with the last destination used for that host, a Browse button that lists the remote tree, and the conflict policy for the transfer (Skip · Replace · Keep both). Dropping a local selection onto a connected sidebar row is the same operation with the destination pre-answered — the sidebar already accepts <code>DraggedPaths</code> drops, so this is a new destination kind rather than a new gesture.</p>
+      <div class="callout"><strong>Direction is symmetric.</strong><span>Dragging out of a remote pane to a local folder is a download; dragging in is an upload; dragging between two mounts is refused in v1 with a clear reason (it would need a server-to-server relay through the client, which is a different performance story and belongs with F-05 dual pane).</span></div>
+    </section>
+
+    <section id="architecture">
+      <span class="section-tag">Ownership and data flow</span>
+      <h2>Architecture</h2>
+      <div class="flow" aria-label="Remote data flow">
+        <div><small>01 · ferret-ui</small><b>Paths and intent</b><p>Sidebar rows, the dialog, menus. Holds a <code>VfsPath::Remote</code> and never an SSH type.</p></div>
+        <div><small>02 · ferret-vfs</small><b>Router</b><p>Dispatches each path to <code>LocalFs</code> or to a mounted backend. Rejects cross-backend operations by name.</p></div>
+        <div><small>03 · ferret-remote</small><b>Sessions</b><p>Connection records, auth, host-key policy, reconnect, the SFTP backend, the transfer queue.</p></div>
+        <div><small>04 · russh</small><b>Transport</b><p>One Tokio runtime, one TCP connection per mount, one SFTP channel plus pipelined requests.</p></div>
+      </div>
+
+      <h3>New crate: <code>ferret-remote</code></h3>
+      <pre class="callout"><code>crates/ferret-remote/
+├── src/lib.rs        # ConnectionStore, Mounts, public surface
+├── src/config.rs     # Every tunable: timeouts, pipeline depth, cache TTL, chunk size
+├── src/errors.rs     # RemoteError + Result&lt;T, E = RemoteError&gt;, and the VfsError mapping
+├── src/record.rs     # Connection record: id, mount_id, name, host, port, user, key, notes
+├── src/store.rs      # connections.json — load, save, import from ~/.ssh/config
+├── src/secrets.rs    # keyring access; nothing else in the crate touches a secret
+├── src/host_keys.rs  # known_hosts check, fingerprint formatting, learn-on-accept
+├── src/runtime.rs    # The one Tokio runtime and the smol↔tokio bridge
+├── src/session.rs    # Dial, authenticate, keepalive, reconnect, disconnect
+├── src/sftp/mod.rs   # `Sftp` — the Vfs impl
+├── src/sftp/listing.rs  # opendir/readdir streaming, attrs → Entry
+├── src/sftp/cache.rs    # Short-TTL attribute and listing cache with explicit invalidation
+└── src/transfer.rs   # The interim transfer queue (folded into ferret-ops when F-60 lands)</code></pre>
+      <p>Nothing here depends on <code>gpui</code>, <code>gpui-component</code> or <code>ferret-ui</code>, and its tests run without opening a window — the standard <code>ferret-vfs</code> and <code>ferret-settings</code> already hold. It depends on <code>ferret-vfs</code> for <code>Vfs</code>, <code>VfsPath</code>, <code>Entry</code> and <code>Metadata</code>; those shared domain types stay where they are until a genuine second consumer forces a <code>ferret-core</code>.</p>
+
+      <h3>The runtime bridge</h3>
+      <p><code>russh</code> is built on Tokio; Ferret runs GPUI’s executors and smol. This is the single most important boundary in the crate, because getting it wrong shows up as a deadlock under load rather than as a compile error.</p>
+      <ul>
+        <li><strong>One runtime.</strong> A <code>OnceLock&lt;Runtime&gt;</code> in <code>runtime.rs</code>, built with <code>worker_threads(2)</code> and <code>enable_io</code> + <code>enable_time</code> only. Two threads, fixed: this work is latency-bound, not CPU-bound, and sizing it to the core count would put a fourth core-count-sized pool next to <code>ferret_vfs::pool</code>, smol’s blocking pool and GPUI’s executor.</li>
+        <li><strong>One direction of ownership.</strong> Session objects live <em>inside</em> the runtime. The rest of Ferret holds only a handle that sends requests; no <code>russh</code> type ever crosses the crate boundary (the same rule <code>ferret-terminal</code> applies to its VT engine, D-23).</li>
+        <li><strong>Request/response uses <code>futures::channel::oneshot</code>.</strong> An <code>async fn</code> in the <code>Vfs</code> impl spawns the work onto the runtime with <code>Handle::spawn</code> and awaits the oneshot on whichever executor called it. No <code>block_on</code> anywhere, ever — that is what would freeze a frame.</li>
+        <li><strong>Streams use a bounded <code>async-channel</code>.</strong> <code>read_dir</code> returns a stream fed by a runtime task, with capacity <code>LISTING_BUFFER</code>. Cancel-by-drop falls out for free: the receiver drops, the next send fails, the task returns, and the SFTP handle is closed. That is the <code>Vfs</code> cancellation contract satisfied by construction rather than by a token somebody has to remember to check.</li>
+        <li><strong>Shutdown.</strong> Disconnecting a mount drops its session handle; the runtime task closes the channel and the connection. Quitting drops the runtime after the config flush, with a short bounded wait so an in-flight transfer can abort cleanly.</li>
+      </ul>
+      <div class="callout warn"><strong>Verify this before building on it.</strong><span>Tokio is already in <code>Cargo.lock</code> at 1.53 through <code>zed-reqwest</code>, so the dependency is an edge to something already compiled rather than a new stack — but the <em>features</em> Ferret needs (<code>rt-multi-thread</code>, <code>net</code>, <code>io-util</code>, <code>time</code>) are additive across the graph, and Cargo unions them. Confirm the resulting binary size and startup cost before R-2 closes; a lazily created runtime must cost nothing until the first connection.</span></div>
+
+      <h3>Session model</h3>
+      <p>One connection record can be mounted once. A mount owns: the TCP connection, the authenticated SSH session, one SFTP channel, the attribute cache, and the reconnect state machine.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Transition</th><th>Trigger</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>Idle → Dialling</td><td>Sidebar click, drag-drop onto the row, or a navigation to a path with that <code>MountId</code></td><td>TCP connect with a bounded timeout; host-key check before any authentication attempt.</td></tr>
+            <tr><td>Dialling → Authenticating</td><td>Host key accepted</td><td>Agent identities first, then the configured key, then keyboard-interactive/password if the server offers them. Each attempt is reported so a failure names the method that failed.</td></tr>
+            <tr><td>Authenticating → Mounted</td><td><code>AuthResult</code> success</td><td>Open the SFTP subsystem, read the server’s extension list, canonicalize <code>.</code> to get the home directory, publish <code>Capabilities</code>, register in the router.</td></tr>
+            <tr><td>Mounted → Degraded</td><td>Keepalive miss, channel EOF, or an I/O error on any request</td><td>In-flight requests fail with a disconnect error naming the mount; one automatic re-dial after a short backoff; the UI banner appears only if that fails.</td></tr>
+            <tr><td>Degraded → Mounted</td><td>Re-dial succeeds</td><td>Caches are dropped wholesale — a reconnect proves nothing about what changed on the other side. Open listings refresh; the user keeps their selection and scroll position.</td></tr>
+            <tr><td>Any → Unmounted</td><td>Disconnect, record deleted, or quit</td><td>Tabs inside the mount show an unmounted state with a Reconnect action rather than closing themselves.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Keepalive:</strong> a server-side <code>SSH_MSG_IGNORE</code>-class keepalive every 30 seconds with a 3-miss timeout, so a laptop that slept for an hour discovers a dead link on wake rather than on the user’s next click. Machine sleep is the common case, not the exotic one.</p>
+    </section>
+
+    <section id="router">
+      <span class="section-tag">The one structural change</span>
+      <h2>The routing change</h2>
+      <p class="intro">Everything else in this plan is additive. This part touches existing code, so it is specified precisely.</p>
+      <p>Today <code>FerretState.fs</code> is a <code>LocalFs</code> — a zero-sized <code>Copy</code> type — read out of the global and moved into background tasks in <code>folder/listing.rs</code> (listing, watching, probing), <code>folder/expansion.rs</code> (subtree listing and metadata batches) and <code>browser/mutations.rs</code> (create, rename, copy, remove). Replacing the field’s type with a <code>Router</code> that is itself <code>Vfs</code> keeps every one of those call sites compiling and gives them remote support in the same change.</p>
+      <pre class="callout"><code>// crates/ferret-vfs/src/router.rs
+#[derive(Clone, Default)]
+pub struct Router {
+    local: LocalFs,
+    mounts: Arc&lt;ArcSwap&lt;HashMap&lt;MountId, Arc&lt;dyn Vfs&gt;&gt;&gt;&gt;,   // read-mostly; swapped on mount/unmount
+}
+
+impl Router {
+    pub fn mount(&amp;self, id: MountId, backend: Arc&lt;dyn Vfs&gt;);
+    pub fn unmount(&amp;self, id: MountId);
+    pub fn backend(&amp;self, path: &amp;VfsPath) -&gt; Option&lt;BackendRef&lt;'_&gt;&gt;;
+}
+
+#[async_trait]
+impl Vfs for Router {
+    fn read_dir(&amp;self, dir: &amp;VfsPath, detail: ListingDetail) -&gt; ReadDirStream {
+        match dir {
+            VfsPath::Local(_) =&gt; self.local.read_dir(dir, detail),          // no dyn dispatch
+            VfsPath::Remote { mount, .. } =&gt; match self.lookup(*mount) {
+                Some(fs) =&gt; fs.read_dir(dir, detail),
+                None =&gt; once(Err(VfsError::NotMounted { mount: *mount })),
+            },
+        }
+    }
+    // rename/copy additionally require both sides to resolve to the same backend
+}</code></pre>
+      <h3>Rules the router enforces</h3>
+      <ul>
+        <li><strong>Local is not slowed down.</strong> The <code>Local</code> arm calls <code>LocalFs</code> directly. The <code>ArcSwap</code> load happens only on the remote arm, so the 200,000-entry listing benchmark is unaffected — and <code>cargo xtask bench</code> must confirm that, not assume it.</li>
+        <li><strong>Two-path operations must agree.</strong> <code>rename</code> and <code>copy</code> take a source and a destination; if they resolve to different backends the router returns a new <code>VfsError::CrossBackend</code> naming both sides, and the UI routes the gesture to the transfer queue instead. Silently copying byte-by-byte through the <code>Vfs</code> trait would be a hidden network transfer with no progress and no cancel.</li>
+        <li><strong>Capabilities are the mount’s, not the router’s.</strong> <code>Router::capabilities()</code> answers for local disk; the pane asks the backend for the folder it is actually showing. That is a small change at the two call sites that read capabilities today (<code>folder/listing.rs</code> and the sort profile).</li>
+        <li><strong>An unmounted id is an ordinary error, not a panic.</strong> Session restore, a stale tab and a deleted record all produce paths whose mount no longer exists.</li>
+      </ul>
+
+      <h3>The nineteen local assumptions already in the tree</h3>
+      <p>Nineteen call sites currently guard on <code>as_local()</code>. That is the good news: the base already refuses remote paths cleanly rather than misbehaving. The remote work is to turn each guard into a deliberate decision.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Site</th><th>Today</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td><code>folder/listing.rs</code> watcher + <code>probe</code></td><td>Local-only; builds <code>VfsPath::local</code> from watcher paths.</td><td>Stays local-only. Remote mounts declare <code>watch: false</code>, so the watcher is never attached and the probe path is never reached.</td></tr>
+            <tr><td><code>browser/mutations.rs</code> create/rename/copy/remove</td><td>Some paths go through <code>Vfs</code>; trash and “open with” bail out on non-local.</td><td>Create, rename, delete-permanently and copy-within-a-mount go through the router. <strong>Trash stays local</strong> — SFTP has no trash, and the gate “trash before delete” means a remote delete is explicitly permanent, confirmed, and labelled as such.</td></tr>
+            <tr><td><code>browser/mutations.rs</code> open-with / open-in-terminal</td><td>Notifies “only local folders”.</td><td>Unchanged in this phase (D-06 consequence). The message gains the reason.</td></tr>
+            <tr><td><code>browser/git.rs</code></td><td>Repo discovery skips non-local dirs.</td><td>Unchanged. A mount shows no branch segment and no per-file status.</td></tr>
+            <tr><td><code>browser/path_bar.rs</code></td><td>Breadcrumb and completion are local paths.</td><td>Extended: the breadcrumb renders the mount name as the root crumb, and the editable field accepts <code>sftp://host/path</code>, which F-03 already anticipates.</td></tr>
+            <tr><td><code>browser/sidebar.rs</code> <code>current_place</code></td><td>Returns <code>None</code> for remote.</td><td>Add the mount-id rule for Connections rows; the local rule is untouched.</td></tr>
+            <tr><td><code>browser/terminal_panel.rs</code> restart + sync</td><td>Refuses non-local with a message; <code>terminal_synced_to</code> is a <code>PathBuf</code>.</td><td>Becomes the SSH terminal path (F-13). Both fields widen to <code>VfsPath</code>.</td></tr>
+            <tr><td><code>pane/drag.rs</code></td><td>OS drag payload filters to local paths.</td><td>Correct as-is: a remote file has no local path to hand the OS. Dragging a remote selection <em>out</em> of Ferret is refused; dragging it to a local pane is a download.</td></tr>
+            <tr><td><code>pane/list.rs</code>, <code>pane/mod.rs</code> git status lookup</td><td><code>as_local()?</code> per row.</td><td>Correct as-is, and on the render path — leave it alone.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout risk"><strong><code>MountId</code> stability is a data-corruption bug if it is got wrong.</strong><span><code>preference_key()</code> renders a remote path as <code>{mount.0}:{path}</code>. If ids are allocated from a per-launch counter, then mounting server B first on Tuesday gives it the id server A had on Monday, and the per-folder view store hands B the views recorded for A. Persist the id on the record (R-D06), allocate as <code>max + 1</code>, never recycle a deleted record’s id, and add the round-trip test with the plan document’s name attached to it.</span></div>
+    </section>
+
+    <section id="sftp">
+      <span class="section-tag">Backend contract</span>
+      <h2>SFTP backend contract</h2>
+      <p class="intro">The <code>Vfs</code> trait was designed for this moment: async throughout so a slow call is a slow call rather than a frozen window, listings that stream so a large remote directory paints immediately, and capabilities declared up front so the UI can disable rather than fail (D-17). What follows is what each method actually does over SFTP v3.</p>
+
+      <h3>Declared capabilities</h3>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Capability</th><th>Value</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td><code>symlinks</code></td><td class="yes">true</td><td><code>readlink</code>/<code>symlink</code> exist; <code>lstat</code> distinguishes the link from its target, so broken links render as broken.</td></tr>
+            <tr><td><code>permissions</code></td><td class="yes">true</td><td>POSIX mode arrives in the attribute block on every listing.</td></tr>
+            <tr><td><code>atomic_rename</code></td><td class="hold">negotiated</td><td>SFTP v3 <code>SSH_FXP_RENAME</code> fails when the destination exists and is not atomic-overwrite. True only when the server advertises <code>posix-rename@openssh.com</code> at handshake; otherwise false, and the UI’s overwrite path asks first.</td></tr>
+            <tr><td><code>watch</code></td><td class="no">false</td><td>SFTP has no change notification. Listings refresh on navigation, on explicit Refresh, after any mutation Ferret itself made, and when the window regains focus after a configurable idle period. No background polling timer.</td></tr>
+            <tr><td><code>metadata_in_listing</code></td><td class="yes">true</td><td>Each <code>SSH_FXP_NAME</code> response carries an attribute block per name. A second round trip per entry would be catastrophic at 80 ms RTT; this is the single biggest reason to use the raw handle rather than a convenience wrapper.</td></tr>
+            <tr><td><code>hidden_in_listing</code></td><td class="yes">true</td><td>“Hidden” on a POSIX server means a leading dot, which is in the name already. The backend fills <code>Metadata::hidden</code> itself so <code>Entry::is_hidden</code> never has to fall back.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Method by method</h3>
+      <div class="scroller">
+        <table>
+          <thead><tr><th><code>Vfs</code> method</th><th>SFTP realisation</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>read_dir</code></td><td><code>opendir</code> → repeated <code>readdir</code> → <code>close</code></td><td>One response = one <code>DirEntryBatch</code>, sent over a bounded channel. <code>.</code> and <code>..</code> are dropped. Any name containing <code>/</code> or equal to <code>.</code>/<code>..</code> after that is a malformed server response and is discarded with a warning, never joined onto a path.</td></tr>
+            <tr><td><code>metadata</code> / <code>metadata_batch</code></td><td><code>lstat</code>, pipelined</td><td>Rarely needed given <code>metadata_in_listing</code>. The batch form issues up to <code>PIPELINE_DEPTH</code> requests concurrently on the one channel and collects per-path results, so one permission error does not withhold the rest.</td></tr>
+            <tr><td><code>probe</code></td><td><code>lstat</code> + one <code>stat</code> when the entry is a link</td><td>Used by mutation paths to refresh a single row without re-listing.</td></tr>
+            <tr><td><code>exists</code></td><td><code>lstat</code>, error mapped</td><td>A broken symlink exists. <code>NO_SUCH_FILE</code> is the only false.</td></tr>
+            <tr><td><code>canonicalize</code></td><td><code>realpath</code></td><td>Also how the home directory is resolved at mount time (<code>realpath(".")</code>). The result is the preference key’s basis, so it must be stable.</td></tr>
+            <tr><td><code>read</code></td><td><code>open</code> → pipelined <code>read</code> up to <code>budget</code> → <code>close</code></td><td>The budget cap is enforced before the first request, not after: previews must never pull a multi-gigabyte remote file.</td></tr>
+            <tr><td><code>create_dir</code> / <code>create_file</code></td><td><code>mkdir</code> / <code>open</code> with <code>EXCL</code></td><td><code>EXCL</code> is what makes “New File” incapable of blanking an existing one.</td></tr>
+            <tr><td><code>rename</code></td><td><code>posix-rename@openssh.com</code> when advertised, else <code>rename</code></td><td>Cross-mount renames never reach here — the router refuses them first.</td></tr>
+            <tr><td><code>copy</code></td><td>Server-side when <code>copy-data</code> is advertised; otherwise refused</td><td>A client-side copy is a download plus an upload — that is a transfer, and it belongs in the queue with progress and cancel, not behind a silent trait method.</td></tr>
+            <tr><td><code>remove(Trash)</code></td><td class="no">Unsupported</td><td>Honest: there is no remote trash. The UI shows “Delete Permanently…” for remote selections and confirms every time, regardless of the local confirmation setting.</td></tr>
+            <tr><td><code>remove(Permanent)</code></td><td><code>remove</code> / <code>rmdir</code>, recursive by explicit walk</td><td>The recursive walk is depth-first, cancellable, and reports the first failure with its path rather than continuing blindly.</td></tr>
+            <tr><td><code>watch</code></td><td class="no">Unsupported</td><td>Already the trait’s default. Leave it.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Caching, and why it is small</h3>
+      <ul>
+        <li><strong>Attribute cache:</strong> <code>(MountId, path) → Metadata</code>, short TTL (default 5 s), invalidated by any mutation Ferret performs on that path or its parent. It exists to stop the column view and the path bar from re-stat-ing what the listing just delivered — not to pretend the server is local.</li>
+        <li><strong>Listing cache:</strong> the most recent N directories per mount (default 16), used for back/forward navigation and column-view ancestors. Dropped wholesale on reconnect, on Refresh, and on any mutation inside that directory.</li>
+        <li><strong>What is never cached:</strong> file contents. Previews re-read; there is no shadow copy of the remote tree on disk in this phase.</li>
+        <li><strong>Column view is the pressure test.</strong> It opens several directories at once; over a high-latency link that is several concurrent <code>opendir</code> sequences. Cap concurrent listings per mount (default 3) and let the cache absorb the rest, or the mode becomes unusable at 150 ms RTT.</li>
+      </ul>
+
+      <h3>Error mapping</h3>
+      <p><code>RemoteError</code> is the crate’s own <code>thiserror</code> enum, and every variant names its subject. At the trait boundary it maps into <code>VfsError</code>, which needs two new variants — both carrying enough to be shown to a person unedited:</p>
+      <pre class="callout"><code>VfsError::NotMounted   { mount: MountId }                 // "That server isn't connected."
+VfsError::CrossBackend { from: VfsPath, to: VfsPath }     // routed to the transfer queue instead
+
+SSH_FX_NO_SUCH_FILE        -&gt; VfsError::NotFound
+SSH_FX_PERMISSION_DENIED   -&gt; VfsError::PermissionDenied
+SSH_FX_FILE_ALREADY_EXISTS -&gt; VfsError::AlreadyExists
+SSH_FX_NO_SUCH_PATH/…      -&gt; VfsError::Io { action, path, source }   // verb + path preserved
+disconnect / auth loss     -&gt; VfsError::Io with a message naming the host, then a mount-level banner</code></pre>
+      <div class="callout warn"><strong>Do not reuse <code>CrossVolume</code> for a remote destination.</strong><span>Its text says the item “has to be copied rather than moved”, which is true for two local volumes and misleading for a server: the copy is a network transfer that can take an hour. That is why <code>CrossBackend</code> is its own variant.</span></div>
+    </section>
+
+    <section id="transfers">
+      <span class="section-tag">F-22</span>
+      <h2>Send to · transfers</h2>
+      <p class="intro">F-22 depends on F-60, the operations queue, which does not exist yet. Rather than block Phase 7 on Phase 6, this plan ships a deliberately small queue inside <code>ferret-remote</code> with the interfaces F-60 will need, and states plainly that it is temporary.</p>
+      <div class="callout warn"><strong>A stated deviation from D-09.</strong><span>“All bulk mutation goes through the operations queue” exists so no feature grows its own private copy loop. The interim queue here is one job type (transfer), one progress shape and one cancel path, deliberately shaped so that when <code>ferret-ops</code> lands it absorbs this as a job kind and this module is deleted rather than adapted. If F-60 is built first, skip this entirely — that is the better order if both are in scope.</span></div>
+
+      <h3>What a transfer does</h3>
+      <ol>
+        <li><strong>Plan.</strong> Walk the local selection with <code>jwalk</code> (D-34: bulk file work, no ignore semantics) to a file list with sizes. A remote source walks over SFTP with the same concurrency cap as a listing. The plan is shown before anything is sent: <em>n</em> files, total bytes, destination.</li>
+        <li><strong>Resolve conflicts up front.</strong> One <code>lstat</code> per destination path, pipelined. The chosen policy — Skip, Replace, Keep both — applies to the whole job, decided before the first byte moves, not per file mid-flight.</li>
+        <li><strong>Create directories, then stream files.</strong> Uploads open the destination as <code>name.ferret-part</code>, write pipelined 32 KB chunks with a window of 16 outstanding requests, <code>fsync</code> if the server advertises <code>fsync@openssh.com</code>, then rename into place. A cancelled or failed transfer leaves the part file, which the next attempt overwrites — never a truncated file under the real name.</li>
+        <li><strong>Preserve what can be preserved.</strong> Modification time via <code>setstat</code>; the executable bit; nothing else. Ownership is not attempted.</li>
+        <li><strong>Report.</strong> Per-file and total progress, throughput, ETA, and a final summary listing anything skipped and why. Errors on one file do not abandon the job unless the user asks.</li>
+      </ol>
+
+      <h3>Rules</h3>
+      <ul>
+        <li><strong>Two concurrent files per mount</strong> by default, each with its own pipelined window. More connections do not make one link faster and do make the server’s logs worse.</li>
+        <li><strong>Never write outside the destination directory.</strong> When downloading, every remote name is validated before it is joined onto a local path: no separators, no <code>..</code>, no absolute component, no Windows reserved name (<code>CON</code>, <code>NUL</code>, <code>COM1</code>), no trailing dot or space. A malicious or broken server must not be able to place a file anywhere it likes on the user’s disk.</li>
+        <li><strong>Symlinks are copied as links, not followed,</strong> unless the user asks — following turns a link loop into an infinite transfer.</li>
+        <li><strong>Cancel is immediate and observable:</strong> dropping the job closes the file handles and the in-flight requests stop within one round trip.</li>
+        <li><strong>The queue survives navigation</strong> and does not hold the window thread. Its state lives beside the mount, not on a view.</li>
+      </ul>
+    </section>
+
+    <section id="terminal">
+      <span class="section-tag">F-13</span>
+      <h2>The SSH terminal that follows the mount</h2>
+      <p class="intro">D-07 is unchanged: interactive sessions run the user’s own <code>ssh</code>. Jump hosts, MFA, agent forwarding config, <code>Match</code> blocks and password prompts then work exactly as they do in their terminal, because it <em>is</em> their <code>ssh</code>.</p>
+      <ul>
+        <li><strong>Spawn.</strong> <code>TerminalSession::spawn</code> currently builds a shell command with a local cwd. It gains a sibling that takes an explicit program and argument list, so the PTY, engine, reader thread and snapshot machinery are shared and only the command differs. The command is exactly what the dialog’s copy button shows.</li>
+        <li><strong>Landing directory.</strong> <code>ssh -t host -- cd '&lt;dir&gt;' &amp;&amp; exec "$SHELL" -l</code> lands in the browsed folder. If that fails, the session still opens at the remote home — a shell that opened in the wrong directory is far better than one that did not open.</li>
+        <li><strong>Sync.</strong> <code>terminal_synced_to</code> and <code>terminal_pending_sync</code> widen from <code>PathBuf</code> to <code>VfsPath</code>. A remote sync only ever emits the POSIX form <code> cd -- '…'</code> — leading space, single-quote escaping, <code>--</code> guard — because the remote shell dialect is genuinely unknown. <code>ShellKind::detect</code> classifies a local executable path and must not be asked about a remote host.</li>
+        <li><strong>Safety.</strong> The existing guards hold unchanged: nothing is injected while the alternate screen is active, and only after an idle window. A remote session adds one more: sync defaults to <strong>off</strong>, because injecting text into a session the user may have <code>su</code>-ed or opened an editor in deserves an explicit opt-in.</li>
+        <li><strong>Availability.</strong> The network button is disabled with a reason when <code>ssh</code> is not on <code>PATH</code>. On Windows that is a real case — OpenSSH Client is an optional feature — so the message points at how to install it rather than saying “failed”.</li>
+      </ul>
+    </section>
+
+    <section id="security">
+      <span class="section-tag">Non-negotiable</span>
+      <h2>Security model</h2>
+      <p class="intro">This is the feature where a mistake costs someone their server, not their afternoon. Every item here is a requirement, not a preference.</p>
+
+      <h3>Host keys</h3>
+      <ul>
+        <li>Every connection verifies the server key against the user’s <code>known_hosts</code> (<code>~/.ssh/known_hosts</code>, and <code>%USERPROFILE%\.ssh\known_hosts</code> on Windows) via <code>russh::keys::known_hosts</code>. Hashed entries are supported by that module and must keep working.</li>
+        <li><strong>Unknown host:</strong> a dialog showing host, port, key algorithm and the SHA256 fingerprint in the same format OpenSSH prints, so it can be compared against what the administrator published. Accepting writes the entry with <code>learn_known_hosts_path</code>. Default focus is Cancel.</li>
+        <li><strong>Changed key:</strong> refuse. Show the stored fingerprint, the offered one, and the file and line to inspect. No override control ships in v1; the user can edit their own <code>known_hosts</code> if they genuinely rekeyed, which is the same friction OpenSSH imposes and for the same reason.</li>
+        <li>Verification happens <em>before</em> any authentication attempt, so a password or an agent signature is never offered to an unverified host.</li>
+      </ul>
+
+      <h3>Credentials</h3>
+      <ul>
+        <li><strong>Agent first.</strong> <code>SSH_AUTH_SOCK</code> on macOS; the <code>\\.\pipe\openssh-ssh-agent</code> named pipe on Windows. Agent support on Windows is the item most likely to need a fallback — confirm it in R-1 and, if it is not usable, fall back to key files and say so in the UI rather than silently failing.</li>
+        <li><strong>Key files.</strong> The record’s explicit path, else the standard identities. Encrypted keys prompt for the passphrase at connect time. “Remember” is opt-in and stores the passphrase in the OS keychain (<code>keyring 4.2</code>: Keychain on macOS, Credential Manager on Windows) under a service name that names Ferret and the connection.</li>
+        <li><strong>Passwords</strong> are prompted per connection and never written anywhere by default. If “remember” is checked, keychain only.</li>
+        <li><strong>Never in a file Ferret writes.</strong> Not <code>settings.json</code>, not <code>connections.json</code>, not a log line, not an error message. The record stores a <em>reference</em> to a keychain item, never a secret.</li>
+        <li><strong>Never in a panic.</strong> <code>Debug</code> is implemented by hand for anything holding a secret so a backtrace cannot print one.</li>
+      </ul>
+
+      <h3>Treating the server as untrusted input</h3>
+      <ul>
+        <li>Directory entry names are validated before they become paths (see <a href="#transfers">Transfers</a>) — and before they become map keys, which is where R-D11’s seeded hasher applies.</li>
+        <li>Names are UTF-8-checked; invalid sequences are shown with replacement characters and the raw bytes preserved for the protocol, never round-tripped lossily into a request.</li>
+        <li>Attribute blocks are bounds-checked: a size or timestamp far outside a sane range is displayed as unknown, not used to size an allocation.</li>
+        <li>Response sizes are capped. A server that answers a 4 KB read with 400 MB gets its channel closed.</li>
+      </ul>
+
+      <h3>Root mounts (F-23)</h3>
+      <p>Kept exactly as the product plan describes, and last in the sequence: an unmistakable typed confirmation, a permanent marker on the mount and in the path bar, no automatic enablement from restored state, and documentation that says plainly it needs passwordless <code>sudo</code> for the SFTP subsystem on the remote host. If the schedule slips, this is the item to drop — F-20 through F-22 are complete without it.</p>
+    </section>
+
+    <section id="libraries">
+      <span class="section-tag">Dependency research</span>
+      <h2>Library decision</h2>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Candidate</th><th>Use</th><th>Decision</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr><td><code>russh 0.63.1</code></td><td>SSH transport, auth, channels, known_hosts, agent client</td><td class="yes">Adopt</td><td>Pure Rust, no C toolchain, identical on both targets — the whole reason D-06 works. Actively maintained (0.63.1, Aug 2026), Rust 2024, Apache-2.0. Requires one crypto backend feature: use <code>ring</code> unless <code>aws-lc-rs</code> proves necessary, since <code>aws-lc-rs</code> pulls a C build.</td></tr>
+            <tr><td><code>russh-sftp 2.4.0</code></td><td>SFTP v3 client subsystem</td><td class="yes">Adopt</td><td>The matching client for <code>russh</code>, concurrent by request id, exposes a raw session with <code>opendir</code>/<code>readdir</code>/<code>lstat</code>/<code>read</code>/<code>write</code> — which is what makes the streaming contract in R-D04 possible. Apache-2.0.</td></tr>
+            <tr><td><code>keyring 4.2</code></td><td>Passwords and key passphrases in the OS keychain</td><td class="yes">Adopt</td><td>One API over Keychain and Credential Manager, with the Linux secret-service backend already there for when D-19 is revisited. MIT OR Apache-2.0.</td></tr>
+            <tr><td><code>ssh2-config 0.8</code></td><td>Import hosts from <code>~/.ssh/config</code></td><td class="hold">Adopt for import only</td><td>Parses <code>Host</code> patterns, <code>HostName</code>, <code>User</code>, <code>Port</code>, <code>IdentityFile</code>, <code>ProxyJump</code> and <code>Include</code>. It validates strictly, so parse with unknown fields allowed and treat the result as <em>suggestions that pre-fill the dialog</em> — never as the authoritative connection config. A user’s config is theirs; misreading one keyword must not change how Ferret connects.</td></tr>
+            <tr><td><code>tokio</code> (features <code>rt-multi-thread, net, io-util, time</code>)</td><td>Runtime <code>russh</code> requires</td><td class="hold">Adopt, contained</td><td>Already in <code>Cargo.lock</code> at 1.53 via <code>zed-reqwest</code>, so this is an edge to something already compiled. Confined to <code>ferret-remote</code>; two worker threads; never used for CPU work. No other crate may take a Tokio dependency on the back of this.</td></tr>
+            <tr><td>system <code>ssh</code> binary</td><td>Interactive shells (F-13)</td><td class="yes">Adopt (D-07)</td><td>Same reasoning as D-04 for git: the user’s config, agent, jump hosts and MFA all work unchanged, and none of it is reimplemented.</td></tr>
+            <tr><td><code>ssh2</code> / <code>libssh2-sys</code></td><td>SSH + SFTP via C</td><td class="no">Reject</td><td>C toolchain and vendored OpenSSL on both platforms, blocking API that would need a thread per operation, and a Windows build story Ferret does not want. This is what <code>russh</code> exists to avoid.</td></tr>
+            <tr><td><code>openssh</code> crate</td><td>Drive the <code>ssh</code> binary with multiplexing</td><td class="no">Reject for browsing</td><td>Relies on <code>ControlMaster</code> multiplexing, which is Unix-only — it would leave Windows without file browsing entirely. Correct tool for a different product.</td></tr>
+            <tr><td><code>scp</code> subprocess / SCP wire protocol</td><td>Transfers</td><td class="no">Reject</td><td>OpenSSH 9.0 switched <code>scp</code> to SFTP by default and the old protocol is deprecated. A subprocess re-authenticates, gives coarse progress at best, and cannot be cancelled cleanly mid-file. Keep the user-facing name, use SFTP (R-D05).</td></tr>
+            <tr><td>FUSE / macFUSE / WinFsp</td><td>Kernel mounts</td><td class="no">Reject (D-06)</td><td>Driver installs, elevated privileges and three implementations, for a benefit — other apps seeing the mount — that is not this phase’s promise.</td></tr>
+            <tr><td><code>russh-sftp</code>’s <code>SftpSession::read_dir</code></td><td>Convenience listing</td><td class="no">Not for listings</td><td>It yields a synchronous iterator, so entries must be fully fetched before the first row is available — the exact “collect before yielding” mistake <code>cargo xtask bench</code> exists to catch. Use it in tests and one-shot paths only.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Proposed Cargo edges</h3>
+      <p>Workspace dependencies for <code>russh</code>, <code>russh-sftp</code>, <code>keyring</code>, <code>ssh2-config</code> and <code>tokio</code>, each with the comment the repository convention asks for — the job it does, and what would justify removing it. Then a path dependency on <code>ferret-remote</code> from <code>ferret-ui</code>. Reuse <code>async-channel</code>, <code>futures</code>, <code>jwalk</code>, <code>parking_lot</code>, <code>serde</code>, <code>thiserror</code>, <code>dirs</code> and <code>arc-swap</code>, all already present.</p>
+      <div class="callout"><strong>Licensing</strong><span>Every crate above is Apache-2.0 or MIT/Apache-2.0 — permissive, and compatible with distributing Ferret under GPL-3.0-or-later (D-11). Re-check with <code>cargo deny</code> when the edges land, and record the crypto backend choice explicitly, since <code>aws-lc-rs</code> and <code>ring</code> carry different notice requirements.</span></div>
+    </section>
+
+    <section id="performance">
+      <span class="section-tag">Hard gates</span>
+      <h2>Performance contract</h2>
+      <p class="intro">“Fast” over a network means “never blocked and honest about waiting”. Budgets are stated against a simulated 80 ms RTT link, because that is what a real server across a country feels like, and separately at 5 ms for a LAN.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Metric</th><th>Target</th><th>Condition</th><th>Failure response</th></tr></thead>
+          <tbody>
+            <tr><td>Any network call on the render path</td><td class="yes">Zero</td><td>Every remote view state</td><td>Stop. This is the gate the whole phase rests on — no <code>Render</code> impl, table delegate or sort comparator may touch a mount.</td></tr>
+            <tr><td>Frame time while a mount is listing</td><td>p95 &lt; 16.7 ms</td><td>10,000-entry remote directory, 80 ms RTT</td><td>Increase batch coalescing; check that batches are applied, not re-sorted per batch.</td></tr>
+            <tr><td>Connect → first row</td><td>&lt; 1.8 s p95 @ 80 ms · &lt; 500 ms @ 5 ms</td><td>Agent auth, cold mount</td><td>Profile handshake round trips; overlap SFTP open with home resolution.</td></tr>
+            <tr><td>Navigate into a directory (warm mount)</td><td>&lt; 3 RTT to first batch</td><td>Uncached directory</td><td>Check that <code>opendir</code> and the first <code>readdir</code> are not serialised behind a stat.</td></tr>
+            <tr><td>Navigate to a cached directory</td><td>&lt; 16 ms, zero requests</td><td>Back/forward within the TTL</td><td>Cache key or invalidation bug.</td></tr>
+            <tr><td>10,000-entry remote listing, complete</td><td>&lt; 6 s @ 80 ms</td><td>Default pipeline depth</td><td>Raise <code>readdir</code> pipelining; verify one response is not costing two round trips.</td></tr>
+            <tr><td>Upload throughput, 1 GB single file</td><td>≥ 80% of <code>scp</code> over the same link</td><td>32 KB chunks, 16 outstanding</td><td>Tune window and chunk size; measure, do not guess.</td></tr>
+            <tr><td>Cancel a transfer</td><td>Observable stop &lt; 1 RTT + 100 ms; no file under its final name</td><td>Mid-file, large upload</td><td>Fix handle closing order and the part-file rename.</td></tr>
+            <tr><td>Idle mount cost</td><td>~0% CPU; one keepalive per 30 s</td><td>Connected, not browsing</td><td>Remove polling; a mount nobody is using must be silent.</td></tr>
+            <tr><td>Local listing regression</td><td>Within noise of the current numbers</td><td><code>cargo xtask bench</code>, 200,000 entries</td><td>The router’s local arm is doing something it should not.</td></tr>
+            <tr><td>Allocations per frame</td><td>Unchanged</td><td><code>just budget</code></td><td>Remote entry construction is leaking into the render path.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Test link conditions</h3>
+      <ul>
+        <li>Loopback <code>sshd</code> in a container for correctness; 5 ms and 80 ms RTT with 1% loss for behaviour; a 500 ms satellite-class profile once, to find anything that assumed a request returns.</li>
+        <li>Directory shapes: 10, 1,000, 10,000 and 100,000 entries; deep nesting; long UTF-8 and emoji names; names that are invalid UTF-8; a directory the user cannot read; a symlink loop.</li>
+        <li>Server variety: OpenSSH’s <code>sftp-server</code> (the reference), an OpenSSH build without <code>posix-rename</code>, and one non-OpenSSH implementation to prove nothing depends on a vendor extension without checking for it.</li>
+      </ul>
+    </section>
+
+    <section id="platforms">
+      <span class="section-tag">macOS + Windows</span>
+      <h2>Platform behavior</h2>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Concern</th><th>macOS</th><th>Windows</th><th>Shared rule</th></tr></thead>
+          <tbody>
+            <tr><td>SSH agent</td><td><code>SSH_AUTH_SOCK</code>, usually present.</td><td><code>\\.\pipe\openssh-ssh-agent</code>; may be disabled. Pageant is a separate protocol and is out of scope.</td><td>Agent is tried first and its absence is never an error — fall through to keys.</td></tr>
+            <tr><td><code>known_hosts</code></td><td><code>~/.ssh/known_hosts</code></td><td><code>%USERPROFILE%\.ssh\known_hosts</code>, may not exist</td><td>Create with correct permissions on first accept; never widen an existing file’s permissions.</td></tr>
+            <tr><td>Secret storage</td><td>Keychain</td><td>Credential Manager</td><td><code>keyring</code>’s error is surfaced, and a failure to store is not a failure to connect.</td></tr>
+            <tr><td>Interactive <code>ssh</code></td><td>Always present.</td><td>OpenSSH Client is an optional feature; may be missing.</td><td>Detect on <code>PATH</code>; disable the button with an actionable message rather than spawning and failing.</td></tr>
+            <tr><td>Remote paths</td><td>POSIX both sides — easy to conflate.</td><td>Local paths have drive letters, UNC and UTF-16; remote paths do not.</td><td><code>VfsPath::Remote</code> is always <code>/</code>-separated UTF-8. Never build one from a <code>Path</code>, and never build a <code>Path</code> from a remote name without validating it first.</td></tr>
+            <tr><td>Downloaded names</td><td>NFD normalisation quirks.</td><td>Reserved names, trailing dots and spaces, case-insensitive collisions.</td><td>Sanitise on download with the platform’s rules; report renames rather than performing them silently.</td></tr>
+            <tr><td>Link target display</td><td><code>Arc&lt;Path&gt;</code> holds a POSIX target fine.</td><td>Same field holds a POSIX string on a Windows client.</td><td><code>Entry::link_target</code> is display-only for remote entries — never join it onto a local path.</td></tr>
+            <tr><td>Shortcut</td><td><span class="mono">⌘⇧K</span> New Connection</td><td><span class="mono">Ctrl+Shift+K</span></td><td>Both bound at once, per the platform gate; the menu item shows the shortcut.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="delivery">
+      <span class="section-tag">Gated build order</span>
+      <h2>Delivery sequence</h2>
+      <p class="intro">Each stage leaves the workspace runnable and each gate is checkable by reading a diff or running a command. Do not advance past a failing gate.</p>
+      <div class="phase"><span class="phase-id">R-0</span><div><h3>Router and mount identity</h3><p>Add <code>ferret_vfs::Router</code>, the <code>NotMounted</code> and <code>CrossBackend</code> variants, and persistent <code>MountId</code> allocation. Switch <code>FerretState.fs</code> to the router with no backends registered. <strong>Gate:</strong> <code>just test</code> and <code>cargo xtask bench</code> show no local regression; <code>just budget</code> unchanged; a test proves a remote preference key is stable across a simulated restart.</p></div></div>
+      <div class="phase"><span class="phase-id">R-1</span><div><h3>Crate skeleton, runtime bridge, connect</h3><p>Create <code>ferret-remote</code> with its <code>errors.rs</code>/<code>config.rs</code>, the single Tokio runtime, the session state machine, host-key verification and agent/key authentication. No UI. <strong>Gate:</strong> an integration test connects to a containerised <code>sshd</code>, refuses an unknown host, refuses a changed key, and drops the runtime cleanly; nothing calls <code>block_on</code>.</p></div></div>
+      <div class="phase"><span class="phase-id">R-2</span><div><h3>SFTP backend: read-only</h3><p><code>read_dir</code> streaming from the raw handle, <code>metadata</code>, <code>probe</code>, <code>exists</code>, <code>canonicalize</code>, <code>read</code>, negotiated capabilities, the attribute and listing caches. <strong>Gate:</strong> a 10,000-entry remote directory streams its first batch in under 3 RTT and never materialises before yielding; capability negotiation is asserted against a server without <code>posix-rename</code>.</p></div></div>
+      <div class="phase"><span class="phase-id">R-3</span><div><h3>Connections: store, dialog, sidebar (F-20)</h3><p><code>connections.json</code>, keychain access, <code>~/.ssh/config</code> import, the New Connection dialog under <code>Root</code>, the Connections sidebar group with its five states, and the live <code>ssh …</code> command line. <strong>Gate:</strong> both themes at default and minimum window size; keyboard-only creation and editing; the generated command is byte-identical to what F-13 will spawn; deleting the app’s config directory loses no secrets and breaks nothing.</p></div></div>
+      <div class="phase"><span class="phase-id">R-4</span><div><h3>Browse a mount end to end (F-21)</h3><p>Click-to-connect, navigation, path bar and breadcrumb for remote paths, capability-driven menu disabling, the unmounted and reconnecting tab states, per-folder view preferences keyed correctly. <strong>Gate:</strong> browse a real server over an 80 ms link for ten minutes without a frame drop or a blocked window; sleep the machine and confirm the mount detects and recovers.</p></div></div>
+      <div class="phase"><span class="phase-id">R-5</span><div><h3>Remote mutations</h3><p>Create folder/file, rename, delete-permanently with its own confirmation, copy within a mount where the server supports it. Cache invalidation on every path. <strong>Gate:</strong> every mutation refreshes exactly the affected rows without a full re-list; “Move to Trash” is absent rather than failing; a permission error names the path and the operation.</p></div></div>
+      <div class="phase"><span class="phase-id">R-6</span><div><h3>Send to · transfers (F-22)</h3><p>The interim queue, the context-menu submenu, the destination sheet, sidebar-row drop, both directions, part-file atomicity, conflict policy, progress and cancel, name sanitisation on download. <strong>Gate:</strong> a cancelled 1 GB upload leaves no file under its final name; a hostile-name test suite cannot write outside the destination; throughput meets the budget.</p></div></div>
+      <div class="phase"><span class="phase-id">R-7</span><div><h3>SSH terminal (F-13)</h3><p>The command-spawning session variant, the terminal header button, <code>VfsPath</code>-based sync with the POSIX-only injection rule and sync defaulting to off, missing-<code>ssh</code> detection on Windows. <strong>Gate:</strong> nothing is ever injected into an alternate-screen session; the spawned command matches the dialog’s copy button; the panel degrades with a reason when <code>ssh</code> is absent.</p></div></div>
+      <div class="phase"><span class="phase-id">R-8</span><div><h3>Root mounts, hardening, docs (F-23)</h3><p>The root switch with its typed confirmation and permanent marker; fuzzing malformed server responses; <code>cargo deny</code>; the settings-crate test that every new key is read by something; user documentation for host keys, keychain use and the <code>sudo</code> requirement. <strong>Gate:</strong> <code>just lint</code>, <code>just test</code>, <code>just build</code>, the remote integration suite, and manual verification on both platforms.</p></div></div>
+      <div class="callout risk"><strong>Ordering constraint</strong><span>This is product Phase 7 and depends on Phases 1 and 2, both complete. It nominally depends on Phase 6 for F-22; R-6 carries the interim queue so that dependency does not block the rest. If <code>ferret-ops</code> is scheduled first, build it first and delete R-6’s queue from this plan.</span></div>
+    </section>
+
+    <section id="verification">
+      <span class="section-tag">Acceptance</span>
+      <h2>Verification checklist</h2>
+      <h3>Automated</h3>
+      <ul>
+        <li><strong>Unit:</strong> path validation (separators, <code>..</code>, absolute, reserved Windows names, trailing dot/space), SFTP status → <code>VfsError</code> mapping, attribute → <code>Metadata</code> conversion including implausible values, capability negotiation from an extension list, connection record round trip, <code>~/.ssh/config</code> import including unknown keywords and <code>Include</code>, the generated <code>ssh</code> command line, <code>MountId</code> allocation and preference-key stability.</li>
+        <li><strong>Integration against a containerised <code>sshd</code>:</strong> connect, unknown host accept and refuse, changed host key refusal, agent and key auth, encrypted key with and without passphrase, listing at every directory shape, unreadable directory, symlink loop, invalid-UTF-8 names, mutation round trips, transfer in both directions, cancellation mid-file, part-file recovery, disconnect mid-listing and mid-transfer, reconnect.</li>
+        <li><strong>Router:</strong> local dispatch unchanged, unmounted id errors, cross-backend rename and copy refused with both paths named, capabilities answered per mount.</li>
+        <li><strong>Cancellation and lifetime:</strong> dropping a listing stream closes the handle within one round trip; dropping a mount ends its tasks; no task outlives the runtime; no <code>block_on</code> in the crate (a grep test is fine and is the kind that keeps being true).</li>
+        <li><strong>Hostile-server suite:</strong> malformed packets, oversized responses, names with separators, a <code>readdir</code> that never ends, a server that accepts and then stops responding.</li>
+        <li><strong>Performance:</strong> the budgets above, checked in as a runnable target with machine-readable output, plus the existing <code>cargo xtask bench</code> and <code>just budget</code> as regression guards.</li>
+      </ul>
+      <h3>Manual, on both targets</h3>
+      <ul>
+        <li>Create, edit, duplicate and delete a connection by keyboard alone; verify light and dark at 1180×760 and at the minimum window size.</li>
+        <li>Connect to a real server; browse a large directory; sort by every column; switch to column and icon views; rename and delete; confirm nothing blocks.</li>
+        <li>Pull the network cable mid-listing and mid-transfer; sleep and wake the machine; confirm the recovery path and that selection and scroll survive.</li>
+        <li>Send a folder of mixed files to a server and back again; compare checksums; confirm timestamps and the executable bit.</li>
+        <li>Open the SSH terminal, navigate the pane, confirm the session follows only when sync is enabled and never during a full-screen program.</li>
+        <li>Quit with a transfer running; confirm it aborts cleanly and the config flush still happens.</li>
+      </ul>
+      <div class="callout good"><strong>Feature-level done condition</strong><span>A saved connection mounts in one click; a remote folder browses, sorts, renames and deletes like a local one over a high-latency link with no frame ever blocked; “Send to” moves a directory of files in either direction with real progress and a clean cancel; the SSH terminal lands in the folder being browsed; and no secret, host key or hostile filename can leave the boundary this plan draws around it.</span></div>
+    </section>
+
+    <section id="risks">
+      <span class="section-tag">Honest uncertainty</span>
+      <h2>Risks and open questions</h2>
+      <details open><summary>R-Q01 · Is Windows SSH-agent support usable through <code>russh</code>?</summary><p>The agent client is written for Unix sockets; Windows uses a named pipe. <strong>Resolve in R-1</strong> by testing against the OpenSSH agent service. If it does not work, key files cover the common case, the UI says agent authentication is unavailable on Windows, and this becomes a tracked follow-up — not a silent difference between platforms.</p></details>
+      <details open><summary>R-Q02 · What happens to <code>ProxyJump</code> and <code>Match</code> blocks?</summary><p>Interactive SSH honours them for free (it is the user’s <code>ssh</code>). The in-process browser does not. <strong>Recommendation:</strong> import <code>ProxyJump</code> into the record, and in v1 mark such a connection “terminal only” with the reason stated, rather than half-implementing a jump host. A <code>direct-tcpip</code> channel through an intermediate session is the correct implementation later, and <code>russh</code>’s <code>connect_stream</code> is the hook for it.</p></details>
+      <details open><summary>R-Q03 · Should a mount be restored at startup?</summary><p><strong>Recommendation:</strong> restore the tab and its path, but do not dial until the user acts. A file manager that opens three password prompts on launch trains people to type passwords without reading the dialog. Root mounts never restore at all (R-D12).</p></details>
+      <details open><summary>R-Q04 · How does search behave on a mount?</summary><p>PS-Q05 left this open. <strong>Recommendation for this phase:</strong> the scope badge says “filename only, live” and the walk runs over SFTP with a hard depth and result cap; content search is disabled with a reason. A remote <code>grep</code> over an exec channel is a real option and is a separate decision with its own security surface.</p></details>
+      <details open><summary>R-Q05 · Where does the interim transfer queue live if F-60 lands mid-phase?</summary><p><strong>Recommendation:</strong> build R-6 against the job/progress/cancel shape <code>ferret-ops</code> will need, so absorbing it is a move rather than a rewrite. If F-60 is already in flight when R-6 starts, skip R-6’s queue entirely.</p></details>
+      <h3>Primary risks</h3>
+      <ul>
+        <li><strong>Latency leaking into the frame.</strong> The single failure that would make this feature feel broken. Mitigated by the zero-network-calls-on-render gate, by capabilities that disable rather than fail, and by testing at 80 ms rather than on loopback.</li>
+        <li><strong>Runtime bridge deadlock.</strong> Two executors and a channel between them is where a hang hides. Mitigated by one direction of ownership, no <code>block_on</code>, bounded channels everywhere, and a test that drops mounts under load.</li>
+        <li><strong>Silent security downgrade.</strong> A “continue anyway” button, a remembered password in a JSON file, or a fingerprint dialog nobody reads. Mitigated by R-D08, by keychain-only secrets, and by defaulting destructive dialogs to Cancel.</li>
+        <li><strong>Hostile or broken server responses.</strong> Path traversal on download, unbounded allocations, hash-collision floods. Mitigated by validation before any join, response caps, and R-D11.</li>
+        <li><strong>Scope creep into a full SSH client.</strong> Port forwarding, jump hosts, tunnels and remote execution are each a feature. The line: Ferret browses and transfers files, and hands everything interactive to <code>ssh</code>.</li>
+        <li><strong>Dependency surface.</strong> <code>russh</code> is well maintained but young relative to OpenSSH, and a crypto library is a serious dependency. Pin deliberately, watch advisories, and keep <code>cargo deny</code> in the release gate.</li>
+        <li><strong>Two ways to reach one server.</strong> The in-process client and the user’s <code>ssh</code> can disagree — different key, different host, different jump. Mitigated by generating the terminal command from the same record the browser dialled with, and by showing it in the dialog so a divergence is visible rather than mysterious.</li>
+      </ul>
+    </section>
+
+    <section id="sources">
+      <span class="section-tag">Primary research</span>
+      <h2>Research sources</h2>
+      <ul class="sources">
+        <li><a href="plan.html">Ferret product plan</a> — F-13, F-20–F-23, decisions D-06, D-07, D-09, D-17, D-19, and the Phase 7 acceptance condition. Authoritative.</li>
+        <li><a href="ui-base.html">Base UI specification</a> — sidebar geometry, focus and theme gates the Connections group inherits.</li>
+        <li><a href="terminal.html">Terminal plan</a> — session ownership, the alternate-screen and idle injection guards, and the quoting rules F-13 reuses.</li>
+        <li><a href="power-search-plan.html">Power Search plan</a> — PS-Q05, the remote search capability question this plan answers only provisionally.</li>
+        <li><a href="https://docs.rs/russh/latest/russh/client/index.html">russh client documentation</a> and <a href="https://docs.rs/russh/latest/russh/keys/known_hosts/index.html"><code>russh::keys::known_hosts</code></a> — connect/connect_stream, the <code>Handler</code> host-key hook, authentication methods and <code>AuthResult</code>, host-key checking and learning.</li>
+        <li><a href="https://docs.rs/russh-sftp/latest/russh_sftp/client/rawsession/struct.RawSftpSession.html">russh-sftp <code>RawSftpSession</code></a> and <a href="https://docs.rs/russh-sftp/latest/russh_sftp/client/struct.SftpSession.html"><code>SftpSession</code></a> — the raw <code>opendir</code>/<code>readdir</code>/<code>lstat</code> handles that make streaming listings possible, and the convenience API that does not.</li>
+        <li><a href="https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02">SFTP protocol draft (version 3)</a> and OpenSSH’s <code>PROTOCOL</code> extension notes — <code>posix-rename@openssh.com</code>, <code>fsync@openssh.com</code>, and what version 3 does and does not guarantee about rename.</li>
+        <li><a href="https://www.openssh.com/releasenotes.html">OpenSSH release notes</a> — 9.0 switching <code>scp</code> to the SFTP protocol by default, the basis for R-D05.</li>
+        <li><a href="https://docs.rs/keyring/latest/keyring/">keyring documentation</a> and <a href="https://docs.rs/ssh2-config/latest/ssh2_config/">ssh2-config documentation</a> — platform credential stores, and the config keywords available for import.</li>
+      </ul>
+      <p class="callout"><strong>Research boundary</strong><span>Versions cited — <code>russh 0.63.1</code>, <code>russh-sftp 2.4.0</code>, <code>keyring 4.2.0</code>, <code>ssh2-config 0.8.0</code> — were current on 3 Sep 2026 and should be re-resolved by Cargo when implementation begins. The locked dependency graph and the compiler remain authoritative, as does the observed behaviour of a real <code>sshd</code> over any documentation.</span></p>
+    </section>
+
+    <footer class="foot">Ferret SSH &amp; SCP plan · branch <code>feat/ssh-scp</code> · source commitments F-13, F-20, F-21, F-22, F-23 · decisions R-D01–R-D12</footer>
+  </main>
+</div>
+<script>
+  const button = document.querySelector("#theme");
+  button.addEventListener("click", () => {
+    const root = document.documentElement;
+    const current = root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    root.dataset.theme = current === "dark" ? "light" : "dark";
+  });
+</script>
+</body>
+</html>

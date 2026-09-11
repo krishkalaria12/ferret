@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferret_platform::Platform;
+use ferret_remote::ConnectionStore;
 use ferret_settings::{FolderPrefs, FolderView, Settings};
-use ferret_vfs::{LocalFs, VfsPath};
+use ferret_vfs::{Router, VfsPath};
 
 use crate::icons::{FileIcons, RenderedIconCache};
 
@@ -19,7 +20,18 @@ use crate::icons::{FileIcons, RenderedIconCache};
 pub struct FerretState {
     pub settings: Settings,
     pub prefs: FolderPrefs,
-    pub fs: LocalFs,
+    /// Saved SSH endpoints. Secrets are referenced by id and remain in the OS
+    /// keychain; this store contains only non-secret connection metadata.
+    pub connections: ConnectionStore,
+    /// Which of those are connected, and the live sessions holding them open.
+    ///
+    /// Here rather than on a view because dropping a session closes the SSH
+    /// connection: a mount has to outlive the tab that opened it.
+    pub mounts: crate::mounts::Mounts,
+    /// Local disk plus whatever is mounted. Cloned into every task that lists,
+    /// watches, probes or mutates; the clone is a refcount bump, and local
+    /// paths still go straight to `LocalFs` inside it.
+    pub fs: Router,
     pub platform: Arc<dyn Platform>,
     /// The bundled fallback set: always answers, never blocks (D-18).
     pub icons: &'static FileIcons,
@@ -126,10 +138,17 @@ pub fn load_state() -> FerretState {
         .map(|text| FolderPrefs::from_json(&text))
         .unwrap_or_default();
 
+    let (connections, connection_warning) = ConnectionStore::load();
+    if let Some(warning) = connection_warning {
+        eprintln!("connections: {warning}");
+    }
+
     FerretState {
         settings,
         prefs,
-        fs: LocalFs::new(),
+        connections,
+        mounts: crate::mounts::Mounts::default(),
+        fs: Router::new(),
         platform: ferret_platform::platform(),
         icons: FileIcons::embedded(),
         os_icons: ferret_platform::icon_provider(),
@@ -210,6 +229,9 @@ impl FerretState {
             pending.push((path, self.prefs.to_json()));
             self.prefs.mark_saved();
         }
+        if let Some(save) = self.connections.take_pending_save() {
+            pending.push(save);
+        }
         pending
     }
 
@@ -265,7 +287,7 @@ pub(crate) fn write_config(path: &std::path::Path, contents: &str) -> bool {
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
-        eprintln!("settings: can't create {}: {err}", parent.display());
+        eprintln!("config: can't create {}: {err}", parent.display());
         return false;
     }
 
@@ -273,11 +295,11 @@ pub(crate) fn write_config(path: &std::path::Path, contents: &str) -> bool {
     // and is therefore atomic.
     let tmp = path.with_extension("json.tmp");
     if let Err(err) = std::fs::write(&tmp, contents) {
-        eprintln!("settings: can't write {}: {err}", tmp.display());
+        eprintln!("config: can't write {}: {err}", tmp.display());
         return false;
     }
     if let Err(err) = std::fs::rename(&tmp, path) {
-        eprintln!("settings: can't replace {}: {err}", path.display());
+        eprintln!("config: can't replace {}: {err}", path.display());
         let _ = std::fs::remove_file(&tmp);
         return false;
     }
