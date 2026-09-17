@@ -1259,7 +1259,7 @@ fn directory_detail(entry: &Entry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferret_preview::{Pages, RenderedBy};
+    use ferret_preview::Pages;
 
     fn pdf_entry() -> Entry {
         Entry::new(

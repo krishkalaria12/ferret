@@ -147,7 +147,7 @@ pub fn sanitize(source: &str, doc_dir: Option<&Path>) -> Result<Sanitized, Sanit
         // ones, until the image pipeline renders them in phase 07.
         edits.push(placeholder(source, use_)?);
     }
-    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
     let mut sanitized = source.to_string();
     let mut floor = usize::MAX;
     for (start, end, replacement) in edits {
@@ -286,18 +286,16 @@ fn collect_uses(
             // A reference without a definition renders as literal text and
             // loads nothing — no policy needed.
         }
-        Node::Html(html) => {
-            if contains_img_tag(&html.value) {
-                let Some(span) = position_span(&html.position) else {
-                    return Err(SanitizeError::Span);
-                };
-                uses.push(ImageUse {
-                    alt: String::new(),
-                    url: String::new(),
-                    span,
-                    is_html_block: true,
-                });
-            }
+        Node::Html(html) if contains_img_tag(&html.value) => {
+            let Some(span) = position_span(&html.position) else {
+                return Err(SanitizeError::Span);
+            };
+            uses.push(ImageUse {
+                alt: String::new(),
+                url: String::new(),
+                span,
+                is_html_block: true,
+            });
         }
         _ => {}
     }

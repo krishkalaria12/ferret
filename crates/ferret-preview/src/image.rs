@@ -256,7 +256,7 @@ fn probe_webp(bytes: &[u8]) -> Option<(u32, u32)> {
 /// JPEG dimensions by scanning markers for the first SOF, skipping
 /// standalone markers. Stops at SOS: past compressed data lies only entropy.
 fn probe_jpeg(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 4 || &bytes[..2] != &[0xFF, 0xD8] {
+    if bytes.len() < 4 || bytes[..2] != [0xFF, 0xD8] {
         return None;
     }
     let mut index = 2;
@@ -408,7 +408,7 @@ fn decode_animated(
         let bitmap = frames
             .first()
             .map(|frame| downscale_frame(frame, natural))
-            .unwrap_or_else(|| placeholder_bitmap());
+            .unwrap_or_else(placeholder_bitmap);
         return Ok(DecodedImage {
             natural,
             format_name,
