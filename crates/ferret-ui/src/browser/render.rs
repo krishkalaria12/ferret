@@ -270,6 +270,17 @@ impl Render for Browser {
                 }),
             )
             .on_action(
+                cx.listener(|this, _: &actions::PreviewZoomIn, _, cx| this.preview_zoom(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewZoomOut, _, cx| this.preview_zoom(-1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewZoomReset, _, cx| {
+                    this.preview_zoom_reset(cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &actions::PreviewToggleLineNumbers, window, cx| {
                     this.preview_toggle_line_numbers(window, cx)
                 }),

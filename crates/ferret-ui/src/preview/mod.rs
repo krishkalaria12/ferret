@@ -120,6 +120,17 @@ enum PaneState {
         detail: String,
         message: String,
     },
+    /// A decoded image. The `RenderImage` is built once, at apply time:
+    /// rebuilding it per frame would re-upload the texture every frame.
+    /// `zoom` of 0 means fit-to-pane; anything else is a fixed scale.
+    Image {
+        entry: Entry,
+        detail: String,
+        render_image: std::sync::Arc<gpui::RenderImage>,
+        bitmap_size: (u32, u32),
+        zoom: f32,
+        footer: Option<String>,
+    },
     Error {
         name: String,
         message: String,
@@ -133,6 +144,7 @@ impl PaneState {
             PaneState::Directory { entry, .. }
             | PaneState::Ready { entry, .. }
             | PaneState::ReadyMd { entry, .. }
+            | PaneState::Image { entry, .. }
             | PaneState::Unsupported { entry, .. } => Some(entry),
             _ => None,
         }
@@ -224,6 +236,31 @@ impl PreviewPane {
         match &self.state {
             PaneState::ReadyMd { show_source, .. } => Some(*show_source),
             _ => None,
+        }
+    }
+
+    /// Zoom the previewed image. Either direction leaves fit-to-pane for
+    /// actual size first, then steps ×1.25 to 8× (in) or ÷1.25 to ⅛×
+    /// (out). Resets on selection change: zoom is per-preview, never
+    /// carried across files.
+    pub(crate) fn zoom_image(&mut self, direction: i32, cx: &mut Context<Self>) {
+        if let PaneState::Image { zoom, .. } = &mut self.state {
+            if *zoom <= 0.0 {
+                *zoom = 1.0;
+            } else if direction > 0 {
+                *zoom = (*zoom * 1.25).min(8.0);
+            } else {
+                *zoom = (*zoom / 1.25).max(0.125);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Back to fit-to-pane.
+    pub(crate) fn zoom_image_reset(&mut self, cx: &mut Context<Self>) {
+        if let PaneState::Image { zoom, .. } = &mut self.state {
+            *zoom = 0.0;
+            cx.notify();
         }
     }
 
@@ -492,6 +529,63 @@ impl PreviewPane {
                 };
                 cx.notify();
             }
+            LoadOutcome::Image {
+                entry,
+                detail,
+                image,
+            } => {
+                let Some(first) = image.frames.first() else {
+                    self.state = PaneState::Error {
+                        name: entry.name().to_string(),
+                        message: format!(
+                            "Ferret can't preview {} — nothing decoded.",
+                            entry.name()
+                        ),
+                    };
+                    cx.notify();
+                    return;
+                };
+                match render_image(&image) {
+                    Some(render_image) => {
+                        let mut footer =
+                            if (first.bitmap.width, first.bitmap.height) != image.natural {
+                                Some(format!(
+                                    "Scaled from {} × {}.",
+                                    image.natural.0, image.natural.1
+                                ))
+                            } else {
+                                None
+                            };
+                        if image.frames_capped {
+                            let note =
+                                format!("Animation shortened to {} frames.", image.frames.len());
+                            footer = Some(match footer {
+                                Some(existing) => format!("{existing} {note}"),
+                                None => note,
+                            });
+                        }
+                        self.state = PaneState::Image {
+                            entry,
+                            detail,
+                            bitmap_size: (first.bitmap.width, first.bitmap.height),
+                            render_image,
+                            zoom: 0.0,
+                            footer,
+                        };
+                        cx.notify();
+                    }
+                    None => {
+                        self.state = PaneState::Error {
+                            name: entry.name().to_string(),
+                            message: format!(
+                                "Ferret can't preview {} — the decoded pixels didn't fit their frame.",
+                                entry.name()
+                            ),
+                        };
+                        cx.notify();
+                    }
+                }
+            }
             LoadOutcome::Unsupported {
                 entry,
                 detail,
@@ -592,6 +686,11 @@ enum LoadOutcome {
         entry: Entry,
         detail: String,
         message: String,
+    },
+    Image {
+        entry: Entry,
+        detail: String,
+        image: ferret_preview::DecodedImage,
     },
     Error {
         name: String,
@@ -737,6 +836,11 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
                 )
             }),
         },
+        Preview::Image { image, .. } => LoadOutcome::Image {
+            entry: entry.clone(),
+            detail: format!("{} image · {size_label} · {modified}", image.format_name),
+            image,
+        },
         Preview::Directory { .. } | Preview::Multiple { .. } => LoadOutcome::Error {
             name: entry.name().to_string(),
             message: "Ferret can't preview this selection here.".to_string(),
@@ -873,6 +977,35 @@ fn markdown_outcome(
 
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+/// Build one `RenderImage` per preview, once, at apply time.
+///
+/// The frames carry our BGRA bytes inside `RgbaImage` shells: the renderer
+/// uploads the bytes opaquely as a BGRA texture, which is exactly the layout
+/// the pipeline produced. Multi-frame images animate through the element's
+/// own frame advance — no timer task, no per-frame allocation.
+fn render_image(image: &ferret_preview::DecodedImage) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let frames: Option<Vec<::image::Frame>> = image
+        .frames
+        .iter()
+        .map(|frame| {
+            ::image::RgbaImage::from_raw(
+                frame.bitmap.width,
+                frame.bitmap.height,
+                frame.bitmap.bgra.clone(),
+            )
+            .map(|buffer| {
+                ::image::Frame::from_parts(
+                    buffer,
+                    0,
+                    0,
+                    ::image::Delay::from_numer_denom_ms(frame.delay_ms, 1),
+                )
+            })
+        })
+        .collect();
+    frames.map(|frames| std::sync::Arc::new(gpui::RenderImage::new(frames)))
 }
 
 /// "Showing the first 2 MiB of 4.1 GB." — or `None` for a whole file.

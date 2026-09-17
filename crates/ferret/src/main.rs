@@ -157,6 +157,18 @@ fn bind_keys(cx: &mut App) {
             browser_actions::FocusFilePane,
             Some(context::PREVIEW),
         ),
+        // Image/PDF zoom. Cmd pairs stay global like the terminal toggle;
+        // Ctrl pairs stay out of the terminal, where they belong to the shell.
+        KeyBinding::new("cmd-=", browser_actions::PreviewZoomIn, None),
+        KeyBinding::new("ctrl-=", browser_actions::PreviewZoomIn, OUTSIDE_TERMINAL),
+        KeyBinding::new("cmd--", browser_actions::PreviewZoomOut, None),
+        KeyBinding::new("ctrl--", browser_actions::PreviewZoomOut, OUTSIDE_TERMINAL),
+        KeyBinding::new("cmd-0", browser_actions::PreviewZoomReset, None),
+        KeyBinding::new(
+            "ctrl-0",
+            browser_actions::PreviewZoomReset,
+            OUTSIDE_TERMINAL,
+        ),
         // View modes.
         KeyBinding::new("cmd-1", browser_actions::ViewAsList, None),
         KeyBinding::new("ctrl-1", browser_actions::ViewAsList, OUTSIDE_TERMINAL),
@@ -499,6 +511,9 @@ mod tests {
             browser_actions::FocusFilePane,
             Some(browser_actions::context::PREVIEW),
         );
+        let _ = KeyBinding::new("cmd-=", browser_actions::PreviewZoomIn, None);
+        let _ = KeyBinding::new("cmd--", browser_actions::PreviewZoomOut, None);
+        let _ = KeyBinding::new("cmd-0", browser_actions::PreviewZoomReset, None);
 
         // And the Preview context itself parses, or the `Esc` binding above
         // is scoped to a context that never matches.

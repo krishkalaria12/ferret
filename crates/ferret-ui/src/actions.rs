@@ -76,6 +76,10 @@ actions!(
         PreviewToggleWrap,
         /// Preview-local: flip a Markdown preview between rendered and source.
         PreviewToggleSource,
+        /// Preview-local: zoom the previewed image in, out, or back to fit.
+        PreviewZoomIn,
+        PreviewZoomOut,
+        PreviewZoomReset,
         /// Preview-local: toggle line numbers (persisted).
         PreviewToggleLineNumbers,
         /// Open the commit dialog (F-52). A no-op outside a repository, rather

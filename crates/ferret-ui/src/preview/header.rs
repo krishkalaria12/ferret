@@ -62,6 +62,9 @@ impl PreviewPane {
             PaneState::ReadyMd { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
+            PaneState::Image { entry, detail, .. } => {
+                (Self::display_name(entry.name()), detail.clone())
+            }
             PaneState::Unsupported { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
@@ -80,6 +83,7 @@ impl PreviewPane {
                     if show_source { "Rendered" } else { "Source" }
                 },
             );
+        let is_image = matches!(self.state, PaneState::Image { .. });
 
         h_flex()
             .flex_shrink_0()
@@ -125,6 +129,14 @@ impl PreviewPane {
                                 .menu(label, Box::new(actions::PreviewToggleSource))
                                 .separator(),
                             None => menu,
+                        };
+                        let menu = if is_image {
+                            menu.menu("Zoom in", Box::new(actions::PreviewZoomIn))
+                                .menu("Zoom out", Box::new(actions::PreviewZoomOut))
+                                .menu("Reset zoom", Box::new(actions::PreviewZoomReset))
+                                .separator()
+                        } else {
+                            menu
                         };
                         menu.menu("Word wrap", Box::new(actions::PreviewToggleWrap))
                             .menu("Line numbers", Box::new(actions::PreviewToggleLineNumbers))

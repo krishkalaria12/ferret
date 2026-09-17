@@ -8,8 +8,8 @@
 
 use super::*;
 use gpui::{
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -29,7 +29,9 @@ impl PreviewPane {
     ) -> impl IntoElement {
         let bg = cx.theme().background;
         let footer = match &self.state {
-            PaneState::Ready { footer, .. } | PaneState::ReadyMd { footer, .. } => footer.clone(),
+            PaneState::Ready { footer, .. }
+            | PaneState::ReadyMd { footer, .. }
+            | PaneState::Image { footer, .. } => footer.clone(),
             _ => None,
         };
         v_flex()
@@ -116,10 +118,63 @@ impl PreviewPane {
                         .into_any_element()
                 }
             }
+            PaneState::Image {
+                render_image,
+                bitmap_size,
+                zoom,
+                ..
+            } => self.render_image(render_image, *bitmap_size, *zoom, cx),
             PaneState::Unsupported { entry, message, .. } => {
                 self.render_fallback(entry, message, cx)
             }
             PaneState::Error { message, .. } => self.render_error(message, cx),
+        }
+    }
+
+    /// Fit-to-pane by default at any window size and pixel density; fixed
+    /// scales scroll. Transparent pixels composite over the secondary
+    /// surface — a neutral backdrop rather than a true checkerboard, which
+    /// is the follow-up, not a silent omission.
+    fn render_image(
+        &self,
+        render_image: &std::sync::Arc<gpui::RenderImage>,
+        bitmap_size: (u32, u32),
+        zoom: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // Multi-frame images animate through the element's own frame
+        // advance: no timer task, no per-frame allocation in the pane.
+        let image = gpui::img(gpui::ImageSource::from(render_image.clone()));
+        if zoom <= 0.0 {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_hidden()
+                .bg(cx.theme().secondary)
+                .p(px(12.))
+                .child(image.w_full().max_h_full())
+                .into_any_element()
+        } else {
+            div()
+                .id("preview-image-scroll")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_x_scroll()
+                .overflow_y_scroll()
+                .bg(cx.theme().secondary)
+                .p(px(12.))
+                .child(
+                    image
+                        .w(px(bitmap_size.0 as f32 * zoom))
+                        .h(px(bitmap_size.1 as f32 * zoom)),
+                )
+                .into_any_element()
         }
     }
 

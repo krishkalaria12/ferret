@@ -253,6 +253,18 @@ impl Browser {
         });
     }
 
+    pub(super) fn preview_zoom(&mut self, direction: i32, cx: &mut Context<Self>) {
+        self.preview.update(cx, |pane, cx| {
+            pane.zoom_image(direction, cx);
+        });
+    }
+
+    pub(super) fn preview_zoom_reset(&mut self, cx: &mut Context<Self>) {
+        self.preview.update(cx, |pane, cx| {
+            pane.zoom_image_reset(cx);
+        });
+    }
+
     pub(super) fn preview_toggle_line_numbers(
         &mut self,
         window: &mut Window,
