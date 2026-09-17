@@ -271,6 +271,35 @@ objc2-app-kit = { version = "0.2", features = [
     "NSBitmapImageRep",
     "NSGraphicsContext",
 ] }
+# Second generation of the same frameworks, for Quick Look thumbnails only.
+# The 0.5 pair above stays for the icon code; the two generations never mix
+# in one module — each Rust wrapper type belongs to exactly one `objc2`
+# runtime generation, and passing one generation's `NSString` to the other's
+# method does not compile. Both generations are already in the graph through
+# `gpui`, so this adds the small binding crate, not a second ObjC runtime.
+block2 = "0.6"
+objc2-06 = { package = "objc2", version = "0.6", default-features = false }
+objc2-foundation-06 = { package = "objc2-foundation", version = "0.3", features = [
+    "NSString",
+    "NSGeometry",
+    "NSURL",
+    "NSError",
+] }
+objc2-app-kit-06 = { package = "objc2-app-kit", version = "0.3", features = [
+    "NSImage",
+    "NSImageRep",
+    "NSGraphics",
+    "NSBitmapImageRep",
+    "NSGraphicsContext",
+] }
+objc2-quick-look-thumbnailing = { version = "0.3", default-features = false, features = [
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "QLThumbnailGenerator",
+    "QLThumbnailGenerationRequest",
+    "QLThumbnailRepresentation",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -3,6 +3,8 @@
 //! Deliberately small: most of this crate is a thin wrapper over one OS call
 //! each. The values here exist because they encode *policy*, not mechanics.
 
+use std::time::Duration;
+
 /// How many entries `volumes()` will list before stopping.
 ///
 /// A user with more than this many mounted volumes has bigger problems than a
@@ -29,3 +31,12 @@ pub const VOLUME_EXCLUSIONS: &[&str] = &["Recovery", "Preboot", "VM", "Update"];
 /// transfer to OS APIs. Network shares and known cloud placeholders are
 /// excluded outright, not merely capped.
 pub const NATIVE_THUMBNAIL_INPUT_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Longest a native thumbnail request may take before it is abandoned.
+///
+/// Quick Look generation runs out of process, so a malformed file kills
+/// Apple's helper and returns an error rather than hanging us — but "returns"
+/// is a promise, not a proof, and a hung third-party thumbnail agent must not
+/// park a warm task forever. Past this the request is a miss and the tile
+/// keeps its glyph.
+pub const NATIVE_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(5);

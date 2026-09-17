@@ -42,14 +42,15 @@ pub trait ThumbnailProvider: Send + Sync + 'static {
 
 /// The backend for the platform Ferret was built for.
 ///
-/// Every backend currently declines; the macOS (`QLThumbnailGenerator`) and
-/// Windows (`IShellItemImageFactory` in a supervised helper) implementations
-/// arrive with step 08. The constructor exists now so the pane wires one
-/// call path from the start instead of growing a second one later.
+/// macOS serves Quick Look thumbnails today. Windows still declines: its
+/// path runs third-party COM in a supervised helper (PV-R05), and until that
+/// isolation exists a metadata fallback ships instead of an uncontained
+/// native call. The constructor exists so the pane wires one call path from
+/// the start instead of growing a second one later.
 pub fn thumbnail_provider() -> Arc<dyn ThumbnailProvider> {
     #[cfg(target_os = "macos")]
     {
-        Arc::new(super::macos::ThumbnailDeclined)
+        Arc::new(super::macos::MacThumbnails)
     }
     #[cfg(target_os = "windows")]
     {

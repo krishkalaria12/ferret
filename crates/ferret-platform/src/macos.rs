@@ -6,7 +6,9 @@
 //! would silently break on a different volume and would not record the
 //! original path for "Put Back".
 
-use crate::config::{MAX_VOLUMES, VOLUME_EXCLUSIONS};
+use crate::config::{
+    MAX_VOLUMES, NATIVE_THUMBNAIL_INPUT_LIMIT, NATIVE_THUMBNAIL_TIMEOUT, VOLUME_EXCLUSIONS,
+};
 use crate::errors::{PlatformError, Result};
 use crate::{Place, PlaceKind, Platform, validate_terminal_directory};
 use async_trait::async_trait;
@@ -180,18 +182,185 @@ impl Platform for MacOs {
 // ---------------------------------------------------------------------------
 // Thumbnails (PV-D07)
 //
-// `QLThumbnailGenerator` arrives with PDF page rendering (preview-plan step
-// 08). Until then this declines every request and the pane shows metadata
-// with *Open with…* — a finished state, not a failure state.
+// Best-effort Quick Look thumbnails: PDF posters, HEIC, RAW, Office, video
+// frames — everything the in-process decoders cannot draw. Generation runs
+// outside our address space, so a malformed file kills Apple's helper and
+// returns an error, not a crash. A decline (`Ok(None)`) is the ordinary
+// answer for anything without a handler; the pane falls through to metadata
+// with *Open with…*, and an icon dressed as a preview is never returned.
+//
+// This uses the second-generation (0.6-family) ObjC bindings, while the icon
+// code above stays on the 0.5 pair. The generations never mix in one
+// function: each Rust wrapper type belongs to exactly one `objc2` runtime
+// generation, and the compiler rejects passing one generation's `NSString`
+// to the other's method — which is the property that keeps the two blocks
+// below honest.
 
-/// The macOS thumbnail backend, until `QLThumbnailGenerator` is wired up.
+/// The macOS thumbnail backend, via `QLThumbnailGenerator`.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ThumbnailDeclined;
+pub struct MacThumbnails;
 
 #[async_trait]
-impl crate::thumbnail::ThumbnailProvider for ThumbnailDeclined {
-    async fn thumbnail(&self, _path: &Path, _longest_edge_px: u32) -> Result<Option<IconBitmap>> {
-        Ok(None)
+impl crate::thumbnail::ThumbnailProvider for MacThumbnails {
+    async fn thumbnail(&self, path: &Path, longest_edge_px: u32) -> Result<Option<IconBitmap>> {
+        // Synchronous gates, cheapest first. Cloud placeholders are refused
+        // by extension: asking Quick Look about an `.icloud` stub hydrates
+        // the download, which a thumbnail must never trigger.
+        if path.extension().is_some_and(|ext| ext == "icloud") {
+            return Ok(None);
+        }
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => meta,
+            _ => return Ok(None),
+        };
+        if meta.len() > NATIVE_THUMBNAIL_INPUT_LIMIT {
+            return Ok(None);
+        }
+        // Absurd requests clamp rather than fail: the service scales anyway,
+        // and a caller passing 0 must not divide by it below.
+        let edge = longest_edge_px.clamp(16, 2048);
+        let owned = path.to_path_buf();
+        // The wait is out-of-process I/O with a hard timeout, not CPU: it
+        // parks a blocking-pool thread the way `run_open` already does.
+        Ok(smol::unblock(move || request_thumbnail(&owned, edge)).await)
+    }
+}
+
+/// Largest bitmap the provider will construct, in pixels per edge.
+///
+/// The service is asked for `edge` and usually obliges; the clamp below is
+/// for the handler that ignores the request and returns full resolution.
+/// Past this a tile is a GPU liability, not a preview.
+const THUMB_MAX_EDGE: u32 = 2048;
+
+/// Ask Quick Look for one thumbnail, blocking up to the timeout.
+///
+/// Best-effort to the bone: every failure mode — no handler, corrupt file,
+/// timed-out agent — is `None`, never an error. Callers already treat a miss
+/// as "draw the glyph".
+fn request_thumbnail(path: &Path, edge: u32) -> Option<IconBitmap> {
+    use block2::RcBlock;
+    use objc2_06::AnyThread as _;
+    use objc2_foundation_06::{NSSize, NSString, NSURL};
+    use objc2_quick_look_thumbnailing::{
+        QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes,
+        QLThumbnailGenerator, QLThumbnailRepresentation,
+    };
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<IconBitmap>>(1);
+    // Heap block: the generator retains the handler and calls it exactly
+    // once on its own queue, after this frame returns — a stack block would
+    // dangle. The closure moves only the sender and a `u32`, so it is
+    // `Send + Sync` as the cross-thread call requires.
+    let completion = RcBlock::new(
+        move |rep: *mut QLThumbnailRepresentation, _error: *mut objc2_foundation_06::NSError| {
+            // A nil representation with or without an error is the service
+            // declining: no handler, corrupt file, unsupported type.
+            let bitmap = if rep.is_null() {
+                None
+            } else {
+                // SAFETY: non-nil for the duration of this call by the sole-
+                // ownership contract of a completion handler argument, and every
+                // message below is an ordinary AppKit/QuickLook read on objects
+                // this call owns. Drawing into a private bitmap context off the
+                // main thread is the documented exception to AppKit's thread
+                // confinement, and the same one the icon path relies on.
+                unsafe { representation_to_bitmap(&*rep, edge) }
+            };
+            let _ = tx.send(bitmap);
+        },
+    );
+
+    // SAFETY: ordinary framework messages on owned objects. `sharedGenerator`
+    // is documented thread-safe; the request is consumed by the submit call;
+    // the block is heap-retained by the generator until its single call.
+    unsafe {
+        let generator = QLThumbnailGenerator::sharedGenerator();
+        let ns_path = NSString::from_str(&path.to_string_lossy());
+        let url = NSURL::fileURLWithPath_isDirectory(&ns_path, false);
+        let side = f64::from(edge);
+        let request =
+            QLThumbnailGenerationRequest::initWithFileAtURL_size_scale_representationTypes(
+                QLThumbnailGenerationRequest::alloc(),
+                &url,
+                NSSize::new(side, side),
+                1.0,
+                QLThumbnailGenerationRequestRepresentationTypes::Thumbnail,
+            );
+        // `Thumbnail` only, never `Icon`: a generic document icon handed back
+        // as a preview is the lie the trait docs forbid.
+        generator.generateBestRepresentationForRequest_completionHandler(&request, &completion);
+    }
+    // The generator guarantees one call, but guarantees are tested: a hung
+    // agent abandons here and the tile keeps its glyph.
+    rx.recv_timeout(NATIVE_THUMBNAIL_TIMEOUT).ok().flatten()
+}
+
+/// Draw a thumbnail representation into a validated BGRA bitmap.
+///
+/// The representation arrives at roughly the requested size; the draw caps
+/// it at `edge` anyway, preserving aspect, because a handler that returns
+/// full resolution must not become a full-resolution texture upload.
+unsafe fn representation_to_bitmap(
+    rep: &objc2_quick_look_thumbnailing::QLThumbnailRepresentation,
+    edge: u32,
+) -> Option<IconBitmap> {
+    use objc2_06::AnyThread as _;
+    use objc2_app_kit_06::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext};
+    use objc2_foundation_06::{NSPoint, NSRect, NSSize};
+
+    // SAFETY: same contract as the caller — owned objects, private context.
+    unsafe {
+        let image = rep.NSImage();
+        let size: NSSize = image.size();
+        if !(size.width > 0.0 && size.height > 0.0) {
+            return None;
+        }
+        let fit = (f64::from(edge) / size.width).min(f64::from(edge) / size.height);
+        let width = (size.width * fit).round() as usize;
+        let height = (size.height * fit).round() as usize;
+        if width == 0 || height == 0 || width > THUMB_MAX_EDGE as usize {
+            return None;
+        }
+
+        let rep = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            width as isize,
+            height as isize,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            (width * 4) as isize,
+            32,
+        )?;
+
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+        NSGraphicsContext::saveGraphicsState_class();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        image.drawInRect(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(width as f64, height as f64),
+        ));
+        NSGraphicsContext::restoreGraphicsState_class();
+
+        let data = rep.bitmapData();
+        if data.is_null() {
+            return None;
+        }
+        let len = width * height * 4;
+        let rgba = std::slice::from_raw_parts(data, len);
+        let bgra = rgba_to_bgra(rgba);
+        let bitmap = IconBitmap {
+            width: width as u32,
+            height: height as u32,
+            bgra,
+        };
+        // Guarded rather than trusted: the bytes crossed an `unsafe`
+        // boundary, and a wrong stride here would be painted as pixels.
+        bitmap.is_well_formed().then_some(bitmap)
     }
 }
 
