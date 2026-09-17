@@ -291,14 +291,14 @@ impl FilePane {
                 if entry.is_dir_like() {
                     continue;
                 }
-                // Anything without an in-process decoder keeps its glyph —
-                // a tile is never worth an error surface.
-                if entry
-                    .extension()
-                    .is_none_or(|ext| !ferret_preview::is_tileable_extension(ext))
-                {
-                    continue;
-                }
+                // In-process decoders generate; everything the OS covers
+                // (HEIC, PDF, video posters) asks the service. Anything else
+                // keeps its glyph — a tile is never worth an error surface.
+                let native = match entry.extension() {
+                    Some(ext) if ferret_preview::is_tileable_extension(ext) => false,
+                    Some(ext) if ferret_preview::thumbs::is_native_tileable_extension(ext) => true,
+                    _ => continue,
+                };
                 let Some(local) = entry.path.as_local() else {
                     continue;
                 };
@@ -335,9 +335,11 @@ impl FilePane {
                     });
                     continue;
                 }
-                // Disk miss: one bounded read, the pane's capped decode,
-                // first frame only — then store for the next visit.
-                let Some(small) = generated_tile(&fs, &entry, &cache, &key).await else {
+                let Some(small) = (if native {
+                    native_tile(&entry, &cache, &key, len).await
+                } else {
+                    generated_tile(&fs, &entry, &cache, &key).await
+                }) else {
                     continue;
                 };
                 if let Some(thumb) = crate::thumbs::render_thumb(&small, len, secs, nanos) {
@@ -616,3 +618,31 @@ async fn generated_tile(
     Some(small)
 }
 
+/// Disk miss for an OS-covered format: one best-effort service question.
+/// Declines at any stage are `None` and keep the glyph.
+async fn native_tile(
+    entry: &ferret_vfs::Entry,
+    cache: &ferret_preview::ThumbCache,
+    key: &str,
+    len: u64,
+) -> Option<ferret_preview::Bitmap> {
+    let local = entry.path.as_local()?;
+    if len > ferret_platform::config::NATIVE_THUMBNAIL_INPUT_LIMIT {
+        return None;
+    }
+    let bitmap = ferret_platform::thumbnail_provider()
+        .thumbnail(local, ferret_preview::config::THUMB_PX)
+        .await
+        .ok()??;
+    if !bitmap.is_well_formed() {
+        return None;
+    }
+    let bitmap = ferret_preview::Bitmap {
+        width: bitmap.width,
+        height: bitmap.height,
+        has_transparency: ferret_preview::image::detect_transparency(&bitmap.bgra),
+        bgra: bitmap.bgra,
+    };
+    cache.store(key, &bitmap);
+    Some(bitmap)
+}

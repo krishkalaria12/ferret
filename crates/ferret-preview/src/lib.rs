@@ -68,9 +68,10 @@ pub enum Unsupported {
     /// Past even the head budget for a kind that cannot be partially
     /// rendered (image, PDF). Never an attempted decode.
     TooLarge { size: u64, budget: usize },
-    /// No provider in this build: image and PDF rendering, and the OS
-    /// thumbnail service, land in later steps. Metadata and *Open with…*
-    /// instead — a finished state, not a failure state.
+    /// No provider in this build: the OS thumbnail service declined (or is
+    /// absent, as on Windows pending its supervised helper) and no bundled
+    /// renderer covers the kind. Metadata and *Open with…* instead — a
+    /// finished state, not a failure state.
     NoRenderer,
 }
 
@@ -78,9 +79,9 @@ pub enum Unsupported {
 ///
 /// Carries source identity where the renderer needs it (Markdown's document
 /// directory, which is what makes relative image links resolvable — and,
-/// per PV-D10, resolvable only downward from there). Image and paged-PDF
-/// bitmap variants arrive with their decoders in later steps; until then
-/// those kinds map to [`Preview::Unsupported`].
+/// per PV-D10, resolvable only downward from there). Kinds no in-process
+/// decoder covers reach [`Preview::Rendered`] through the OS thumbnail
+/// service where one answers, else [`Preview::Unsupported`].
 #[derive(Clone, Debug)]
 pub enum Preview {
     /// F-31, source form. Rendered Markdown arrives with the document view;
@@ -114,6 +115,18 @@ pub enum Preview {
         image: DecodedImage,
         truncated: Truncation,
     },
+
+    /// F-34 and everything the OS knows how to draw. `by` records which
+    /// path produced it, because "Quick Look" and "pdfium" fail differently.
+    /// `pages` is `Some` once a paged backend (Pdfium) knows the document;
+    /// a native thumbnail is one bitmap with no page model.
+    Rendered {
+        bitmap: Bitmap,
+        kind: Kind,
+        pages: Option<Pages>,
+        by: RenderedBy,
+    },
+
     /// The floor. Hex plus printable ASCII for the head of the file.
     Binary {
         head: Vec<u8>,
@@ -132,6 +145,25 @@ pub enum Preview {
         kind: Kind,
         reason: Unsupported,
     },
+}
+
+/// Which renderer produced a [`Preview::Rendered`] bitmap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderedBy {
+    /// The OS thumbnail service (PV-D07): best-effort, capability-dependent,
+    /// one bitmap, no page model.
+    NativeThumbnail,
+    /// The bundled Pdfium backend (PV-D08): paged, isolated, guaranteed on
+    /// official builds.
+    Pdfium,
+}
+
+/// Page position inside a paged document. Carried once the backend knows
+/// the document; the pane shows "Page 1 of N" from this, not from pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pages {
+    pub current: u32,
+    pub total: u32,
 }
 
 /// The byte budget for a kind, scaled down on remote backends.

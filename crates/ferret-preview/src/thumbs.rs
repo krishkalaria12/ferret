@@ -49,6 +49,36 @@ pub fn is_tileable_extension(ext: &str) -> bool {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "tif" | "tiff" | "bmp" | "ico" | "qoi"
     )
 }
+
+/// Whether an already-lowercased extension may have an OS thumbnail behind
+/// it, worth one best-effort native request.
+///
+/// The service declines gracefully for anything without a handler, so this
+/// list only bounds *what we ask about*, not what can appear: HEIC/AVIF/RAW
+/// (no in-process decoder), PDF (page one), and video posters (PV-D07).
+/// Office documents stay glyphs until handler coverage is verified on both
+/// platforms — claimed coverage without a test machine is the failure the
+/// plan's acceptance table exists to prevent.
+pub fn is_native_tileable_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "heic"
+            | "heif"
+            | "avif"
+            | "pdf"
+            | "cr2"
+            | "nef"
+            | "arw"
+            | "dng"
+            | "rw2"
+            | "orf"
+            | "raf"
+            | "mp4"
+            | "mov"
+            | "m4v"
+    )
+}
+
 /// The cache key: FNV-1a over length-prefixed fields, hex-encoded.
 ///
 /// `std`'s hasher is randomly seeded per process, which is exactly wrong for
@@ -409,6 +439,32 @@ mod tests {
             "heic", "heif", "avif", "psd", "cr2", "nef", "arw", "pdf", "mp4",
         ] {
             assert!(!is_tileable_extension(ext), "{ext} must keep its glyph");
+        }
+    }
+
+    #[test]
+    fn native_worthy_extensions_are_exactly_the_undecodable_ones() {
+        // Every image format the classifier recognises without a decoder
+        // behind it must be asked about — otherwise a whole camera roll
+        // keeps glyphs while the service sits idle.
+        for ext in [
+            "heic", "heif", "avif", "pdf", "cr2", "nef", "arw", "dng", "rw2", "orf", "raf", "mp4",
+            "mov", "m4v",
+        ] {
+            assert!(
+                is_native_tileable_extension(ext),
+                "{ext} must reach the service"
+            );
+            assert!(
+                !is_tileable_extension(ext),
+                "{ext} must not reach the decoder"
+            );
+        }
+        // And nothing decodable double-dips: one path per tile per visit.
+        for ext in [
+            "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "ico", "qoi",
+        ] {
+            assert!(!is_native_tileable_extension(ext), "{ext} already decodes");
         }
     }
 

@@ -25,7 +25,7 @@ use std::time::Instant;
 use std::path::PathBuf;
 
 use crate::browser::Browser;
-use ferret_preview::{Preview, Truncation};
+use ferret_preview::{DecodedImage, Frame, Preview, Truncation};
 use ferret_vfs::{Entry, EntryKind, LocalFs, Vfs as _, VfsError, VfsPath};
 use gpui::{App, AppContext as _, Context, Entity, FocusHandle, Focusable, Task, Window};
 use gpui_component::WindowExt as _;
@@ -442,13 +442,14 @@ impl PreviewPane {
         cx.notify();
 
         let fs = cx.global::<FerretState>().fs;
+        let thumbs = cx.global::<FerretState>().thumb_cache.clone();
         let window_handle = self.window;
         // The read, after the debounce: one settled request per sweep.
         self.tasks.push(cx.spawn(async move |pane, cx| {
             cx.background_executor()
                 .timer(ferret_preview::config::PREVIEW_DEBOUNCE)
                 .await;
-            let outcome = load_single(&fs, &entry, remote).await;
+            let outcome = load_single(&fs, &thumbs, &entry, remote).await;
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = pane.update(cx, |pane, cx| {
                     if pane.generation != generation {
@@ -533,6 +534,7 @@ impl PreviewPane {
                 entry,
                 detail,
                 image,
+                footer: note,
             } => {
                 let Some(first) = image.frames.first() else {
                     self.state = PaneState::Error {
@@ -562,6 +564,12 @@ impl PreviewPane {
                             footer = Some(match footer {
                                 Some(existing) => format!("{existing} {note}"),
                                 None => note,
+                            });
+                        }
+                        if let Some(trailing) = note {
+                            footer = Some(match footer {
+                                Some(existing) => format!("{existing} {trailing}"),
+                                None => trailing,
                             });
                         }
                         self.state = PaneState::Image {
@@ -691,6 +699,9 @@ enum LoadOutcome {
         entry: Entry,
         detail: String,
         image: ferret_preview::DecodedImage,
+        /// A note the pipeline already phrased ("First page."): appended
+        /// after the decode footnotes the view derives itself.
+        footer: Option<String>,
     },
     Error {
         name: String,
@@ -700,7 +711,12 @@ enum LoadOutcome {
 
 /// Read, classify and build one file's preview. Blocking work stays inside
 /// `Vfs` (which unblocks internally); nothing here touches a window.
-async fn load_single(fs: &LocalFs, entry: &Entry, remote: bool) -> LoadOutcome {
+async fn load_single(
+    fs: &LocalFs,
+    thumbs: &ferret_preview::ThumbCache,
+    entry: &Entry,
+    remote: bool,
+) -> LoadOutcome {
     let name = entry.name().to_string();
     let path = entry.path.clone();
 
@@ -723,7 +739,7 @@ async fn load_single(fs: &LocalFs, entry: &Entry, remote: bool) -> LoadOutcome {
             // A corrupt file must still show its size: fall back to hex over
             // the sniff when there is something to show.
             if !sniff.is_empty() && matches!(kind, ferret_preview::Kind::Binary) {
-                return text_outcome(entry, &path, kind, sniff, known_size, remote);
+                return text_outcome(entry, kind, sniff, known_size, remote, fs, thumbs).await;
             }
             return vfs_error(&name, err);
         }
@@ -736,23 +752,120 @@ async fn load_single(fs: &LocalFs, entry: &Entry, remote: bool) -> LoadOutcome {
         None if bytes.len() < budget => None,
         None => fs.metadata(&path).await.ok().map(|md| md.len),
     };
-    text_outcome(entry, &path, kind, bytes, total, remote)
+    text_outcome(entry, kind, bytes, total, remote, fs, thumbs).await
 }
 
 /// Turn a kind plus its budgeted bytes into the outcome the view consumes.
-fn text_outcome(
+async fn text_outcome(
     entry: &Entry,
-    path: &VfsPath,
     kind: ferret_preview::Kind,
     bytes: Vec<u8>,
     total: Option<u64>,
     remote: bool,
+    fs: &LocalFs,
+    thumbs: &ferret_preview::ThumbCache,
 ) -> LoadOutcome {
     let shown = bytes.len() as u64;
     let total = total.unwrap_or(shown);
-    let base = path.parent().unwrap_or_else(|| VfsPath::local("/"));
+    let base = entry.path.parent().unwrap_or_else(|| VfsPath::local("/"));
     let preview = ferret_preview::build(kind, bytes, Some(total), base);
+    // Kinds with no in-process decoder get one best-effort native question —
+    // a local PDF or HEIC answered by the OS — before falling through to
+    // metadata. Anything the service declines keeps its `Unsupported`.
+    let preview = if wants_native(&preview) {
+        native_preview(fs, thumbs, entry, total)
+            .await
+            .unwrap_or(preview)
+    } else {
+        preview
+    };
     preview_outcome(entry, preview, total, remote)
+}
+
+/// Whether a built preview deserves one native question before it settles.
+///
+/// Only the kinds with no in-process decoder that the OS may cover: an
+/// in-budget PDF, or an image format we recognise but cannot rasterise.
+/// `TooLarge` never asks — past even the head budget is metadata, never an
+/// attempted anything — and neither do text kinds, which already rendered.
+fn wants_native(preview: &Preview) -> bool {
+    matches!(
+        preview,
+        Preview::Unsupported {
+            kind: ferret_preview::Kind::Pdf | ferret_preview::Kind::Image,
+            reason: ferret_preview::Unsupported::NoRenderer,
+        }
+    )
+}
+
+/// One best-effort OS thumbnail for the docked pane, cached on disk.
+///
+/// Order: memory is the pane's own (populated on apply), so disk first, the
+/// service second, each once. Misses at any stage are `None` and the caller
+/// keeps the `Unsupported` — a tile that cannot be drawn is a glyph, and a
+/// pane that cannot be drawn is metadata, both finished states.
+async fn native_preview(
+    fs: &LocalFs,
+    thumbs: &ferret_preview::ThumbCache,
+    entry: &Entry,
+    total: u64,
+) -> Option<Preview> {
+    use ferret_preview::config::NATIVE_PANE_PX;
+
+    let local = entry.path.as_local()?;
+    if total > ferret_platform::config::NATIVE_THUMBNAIL_INPUT_LIMIT {
+        return None;
+    }
+    // The disk key needs freshness. The listing usually knows it; a point
+    // `stat` fills the gap when it does not. Unknown stays unknown — a tile
+    // that cannot be invalidated is future staleness, so no key, no cache.
+    let modified = match entry.metadata.and_then(|md| md.modified) {
+        Some(modified) => Some(modified),
+        None => fs
+            .metadata(&entry.path)
+            .await
+            .ok()
+            .and_then(|md| md.modified),
+    };
+    let (len, secs, nanos) = ferret_preview::fingerprint(total, modified)?;
+    let canonical = std::fs::canonicalize(local).ok()?;
+    let key = ferret_preview::thumb_key(&canonical, len, secs, nanos, NATIVE_PANE_PX);
+    if let Some(bitmap) = thumbs.lookup(&key) {
+        return Some(rendered_preview(entry, bitmap));
+    }
+    let bitmap = ferret_platform::thumbnail_provider()
+        .thumbnail(local, NATIVE_PANE_PX)
+        .await
+        .ok()??;
+    if !bitmap.is_well_formed() {
+        return None;
+    }
+    let bitmap = ferret_preview::Bitmap {
+        width: bitmap.width,
+        height: bitmap.height,
+        has_transparency: ferret_preview::image::detect_transparency(&bitmap.bgra),
+        bgra: bitmap.bgra,
+    };
+    // A failed store still returns the bitmap for this viewing: the disk
+    // being unwritable must not cost a service round-trip every selection.
+    thumbs.store(&key, &bitmap);
+    Some(rendered_preview(entry, bitmap))
+}
+
+/// Wrap a native bitmap in the kind it was requested for, so the header
+/// reads "PDF document" rather than "PDF image".
+fn rendered_preview(entry: &Entry, bitmap: ferret_preview::Bitmap) -> Preview {
+    let kind = if entry.extension() == Some("pdf") {
+        ferret_preview::Kind::Pdf
+    } else {
+        ferret_preview::Kind::Image
+    };
+    Preview::Rendered {
+        bitmap,
+        kind,
+        pages: None,
+        by: ferret_preview::RenderedBy::NativeThumbnail,
+    }
 }
 
 fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) -> LoadOutcome {
@@ -840,7 +953,48 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
             entry: entry.clone(),
             detail: format!("{} image · {size_label} · {modified}", image.format_name),
             image,
+            footer: None,
         },
+        Preview::Rendered {
+            bitmap,
+            kind,
+            pages,
+            by,
+        } => {
+            // Native bitmaps ride the image state: fit-to-pane, zoom, and
+            // animation-free stills all come along. The kind labels the
+            // header, so a PDF reads "PDF document", never "PDF image".
+            let detail = format!("{} · {size_label} · {modified}", kind.display_name());
+            let footer = match (pages, by) {
+                (Some(pages), _) => Some(format!("Page {} of {}.", pages.current, pages.total)),
+                // The service's best representation of a PDF is its first
+                // page; saying so keeps nobody mistaking the poster for the
+                // document. Other kinds are what they are: one bitmap.
+                (None, ferret_preview::RenderedBy::NativeThumbnail)
+                    if matches!(kind, ferret_preview::Kind::Pdf) =>
+                {
+                    Some("First page.".to_string())
+                }
+                _ => None,
+            };
+            LoadOutcome::Image {
+                entry: entry.clone(),
+                detail,
+                image: DecodedImage {
+                    natural: (bitmap.width, bitmap.height),
+                    format_name: match kind {
+                        ferret_preview::Kind::Pdf => "PDF",
+                        _ => "Image",
+                    },
+                    frames: vec![Frame {
+                        bitmap,
+                        delay_ms: 0,
+                    }],
+                    frames_capped: false,
+                },
+                footer,
+            }
+        }
         Preview::Directory { .. } | Preview::Multiple { .. } => LoadOutcome::Error {
             name: entry.name().to_string(),
             message: "Ferret can't preview this selection here.".to_string(),
@@ -1105,6 +1259,206 @@ fn directory_detail(entry: &Entry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferret_preview::{Pages, RenderedBy};
+
+    fn pdf_entry() -> Entry {
+        Entry::new(
+            VfsPath::local("/docs/report.pdf"),
+            "report.pdf",
+            EntryKind::File,
+        )
+    }
+
+    fn unsupported(kind: ferret_preview::Kind, reason: ferret_preview::Unsupported) -> Preview {
+        Preview::Unsupported { kind, reason }
+    }
+
+    #[test]
+    fn only_decoderless_kinds_earn_a_native_question() {
+        // An in-budget PDF and an undecodable image: the service may cover
+        // both, so both ask exactly once.
+        assert!(wants_native(&unsupported(
+            ferret_preview::Kind::Pdf,
+            ferret_preview::Unsupported::NoRenderer
+        )));
+        assert!(wants_native(&unsupported(
+            ferret_preview::Kind::Image,
+            ferret_preview::Unsupported::NoRenderer
+        )));
+        // Everything else already has its answer: too large is metadata by
+        // policy, text rendered, corruption fell to hex.
+        assert!(!wants_native(&unsupported(
+            ferret_preview::Kind::Pdf,
+            ferret_preview::Unsupported::TooLarge { size: 1, budget: 1 }
+        )));
+        assert!(!wants_native(&Preview::Binary {
+            head: vec![0],
+            size: 1
+        }));
+        assert!(!wants_native(&Preview::Directory { entries: None }));
+    }
+
+    #[test]
+    fn a_rendered_pdf_reads_as_a_document_with_a_first_page_footer() {
+        let outcome = preview_outcome(
+            &pdf_entry(),
+            Preview::Rendered {
+                bitmap: ferret_preview::Bitmap {
+                    width: 100,
+                    height: 80,
+                    bgra: vec![255; 100 * 80 * 4],
+                    has_transparency: false,
+                },
+                kind: ferret_preview::Kind::Pdf,
+                pages: None,
+                by: ferret_preview::RenderedBy::NativeThumbnail,
+            },
+            1024,
+            false,
+        );
+        let LoadOutcome::Image {
+            detail,
+            image,
+            footer,
+            ..
+        } = outcome
+        else {
+            panic!("a rendered bitmap must ride the image state");
+        };
+        assert!(
+            detail.starts_with("PDF document · "),
+            "never 'PDF image': {detail}"
+        );
+        assert_eq!(footer.as_deref(), Some("First page."));
+        assert_eq!(image.frames.len(), 1);
+        assert!(!image.frames_capped);
+    }
+
+    #[test]
+    fn a_rendered_image_carries_no_footer() {
+        let outcome = preview_outcome(
+            &pdf_entry(),
+            Preview::Rendered {
+                bitmap: ferret_preview::Bitmap {
+                    width: 64,
+                    height: 64,
+                    bgra: vec![255; 64 * 64 * 4],
+                    has_transparency: false,
+                },
+                kind: ferret_preview::Kind::Image,
+                pages: None,
+                by: ferret_preview::RenderedBy::NativeThumbnail,
+            },
+            512,
+            false,
+        );
+        let LoadOutcome::Image { footer, .. } = outcome else {
+            panic!("a rendered bitmap must ride the image state");
+        };
+        assert_eq!(footer, None);
+    }
+
+    #[test]
+    fn paged_renderers_report_their_position() {
+        let outcome = preview_outcome(
+            &pdf_entry(),
+            Preview::Rendered {
+                bitmap: ferret_preview::Bitmap {
+                    width: 100,
+                    height: 80,
+                    bgra: vec![255; 100 * 80 * 4],
+                    has_transparency: false,
+                },
+                kind: ferret_preview::Kind::Pdf,
+                pages: Some(Pages {
+                    current: 3,
+                    total: 9,
+                }),
+                by: ferret_preview::RenderedBy::Pdfium,
+            },
+            1024,
+            false,
+        );
+        let LoadOutcome::Image { footer, .. } = outcome else {
+            panic!("a rendered bitmap must ride the image state");
+        };
+        assert_eq!(footer.as_deref(), Some("Page 3 of 9."));
+    }
+
+    /// One hand-made single-page PDF: base-14 Helvetica, no embedding,
+    /// byte-exact xref. `qlmanage -t` renders it, which is what makes it a
+    /// probe of the native path rather than of our patience.
+    const MINIMAL_PDF: &[u8] = b"\
+        %PDF-1.4\n\
+        1 0 obj\n\
+        << /Type /Catalog /Pages 2 0 R >>\n\
+        endobj\n\
+        2 0 obj\n\
+        << /Type /Pages /Kids [3 0 R] /Count 1 >>\n\
+        endobj\n\
+        3 0 obj\n\
+        << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\n\
+        endobj\n\
+        4 0 obj\n\
+        << /Length 45 >>\n\
+        stream\n\
+        BT /F1 18 Tf 50 120 Td (Hello thumbnail) Tj ET\n\
+        endstream\n\
+        endobj\n\
+        5 0 obj\n\
+        << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n\
+        endobj\n\
+        xref\n\
+        0 6\n\
+        0000000000 65535 f \n\
+        0000000009 00000 n \n\
+        0000000058 00000 n \n\
+        0000000115 00000 n \n\
+        0000000241 00000 n \n\
+        0000000337 00000 n \n\
+        trailer\n\
+        << /Size 6 /Root 1 0 R >>\n\
+        startxref\n\
+        407\n\
+        %%EOF\n\
+        ";
+
+    /// The native path end to end, where the OS answers.
+    ///
+    /// Writes the fixture to a temp dir, asks for a pane preview, and
+    /// requires a `Rendered` bitmap — then asks again and requires
+    /// byte-identical pixels, which is the disk cache proving itself.
+    /// Where the service is absent (Windows pending its helper, headless
+    /// CI) the provider declines and the test skips with its reason on
+    /// record: the OS renderer is verified manually per the plan, never
+    /// asserted blindly here.
+    #[test]
+    fn a_pdf_round_trips_the_native_path_and_its_cache() {
+        let dir = std::env::temp_dir().join(format!("ferret-native-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("report.pdf");
+        std::fs::write(&file, MINIMAL_PDF).unwrap();
+        let entry = Entry::new(VfsPath::local(&file), "report.pdf", EntryKind::File);
+        let len = MINIMAL_PDF.len() as u64;
+        let cache = ferret_preview::ThumbCache::new(dir.join("cache"));
+        let fs = LocalFs::new();
+        let first = futures::executor::block_on(native_preview(&fs, &cache, &entry, len));
+        let Some(Preview::Rendered { bitmap, kind, .. }) = first else {
+            eprintln!("SKIP: the native thumbnail service declined the probe PDF");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        assert_eq!(kind, ferret_preview::Kind::Pdf);
+        assert!(bitmap.is_well_formed());
+        // Second visit: identical pixels without touching the service.
+        let second = futures::executor::block_on(native_preview(&fs, &cache, &entry, len));
+        let Some(Preview::Rendered { bitmap: cached, .. }) = second else {
+            panic!("a stored tile must hit its own cache entry");
+        };
+        assert_eq!(cached.bgra, bitmap.bgra);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn registry_names_match_the_builtin_table_where_it_differs() {

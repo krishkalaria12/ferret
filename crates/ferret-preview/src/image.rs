@@ -525,6 +525,16 @@ fn rgba_to_bgra(mut bytes: Vec<u8>) -> (Vec<u8>, bool) {
     }
     (bytes, transparent)
 }
+
+/// Whether any pixel of an already-BGRA buffer is non-opaque.
+///
+/// For bitmaps that arrive BGRA from elsewhere (the OS thumbnail service),
+/// where no swizzle pass ran to notice. One linear scan, off the render
+/// path, so the view knows when the checkerboard matters.
+pub fn detect_transparency(bgra: &[u8]) -> bool {
+    bgra.chunks_exact(4).any(|pixel| pixel[3] != 255)
+}
+
 /// Last-resort 1×1 so an animation with no usable frame still has a body.
 /// Unreachable through `decode` (empty frame lists refuse first); kept so
 /// the frame path below cannot produce a zero-frame image by construction.
@@ -719,6 +729,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transparency_is_detected_per_pixel() {
+        assert!(!detect_transparency(&[0, 0, 0, 255, 255, 255, 255, 255]));
+        assert!(detect_transparency(&[0, 0, 0, 255, 0, 0, 0, 0]));
+        assert!(!detect_transparency(&[]));
+    }
+
+    #[test]
     fn foreign_formats_are_undecodable() {
         assert_eq!(
             decode(b"%PDF-1.7....").unwrap_err(),

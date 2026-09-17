@@ -123,6 +123,14 @@ pub const IMAGE_SOURCE_PIXEL_CAP: u64 = 16_000_000;
 /// the window gets.
 pub const IMAGE_TARGET_LONG_EDGE: u32 = 4096;
 
+/// Long edge requested from the OS thumbnail service for the docked pane.
+///
+/// Deliberately below [`IMAGE_TARGET_LONG_EDGE`]: native pixels arrive over
+/// XPC plus a texture upload, so the pane asks for display resolution at 2x
+/// rather than headroom it cannot use. Tiles use [`THUMB_PX`] under separate
+/// cache keys, so the two never share entries.
+pub const NATIVE_PANE_PX: u32 = 1024;
+
 /// Long edge of an icon-view thumbnail tile.
 ///
 /// The tile glyph box is 48 logical px, so 128 covers 2x displays with room
