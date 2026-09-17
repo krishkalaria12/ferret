@@ -247,6 +247,10 @@ pub struct Preview {
     /// Line numbers in the code preview. Off by default: a preview is for
     /// reading, not for citing, and the reference shows none.
     pub line_numbers: bool,
+    /// Photo thumbnails in icon view. Off draws the kind glyph for every
+    /// tile; on resolves bounded 128 px tiles off the render path and caches
+    /// them on disk.
+    pub thumbnails: bool,
     #[serde(flatten, skip_serializing_if = "Map::is_empty")]
     pub unknown: Map<String, Value>,
 }
@@ -257,6 +261,7 @@ impl Default for Preview {
             visible: false,
             width: crate::config::DEFAULT_PREVIEW_WIDTH,
             line_numbers: false,
+            thumbnails: true,
             unknown: Map::new(),
         }
     }

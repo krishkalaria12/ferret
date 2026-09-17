@@ -123,6 +123,25 @@ pub const IMAGE_SOURCE_PIXEL_CAP: u64 = 16_000_000;
 /// the window gets.
 pub const IMAGE_TARGET_LONG_EDGE: u32 = 4096;
 
+/// Long edge of an icon-view thumbnail tile.
+///
+/// The tile glyph box is 48 logical px, so 128 covers 2x displays with room
+/// for the overlay's larger reuse. Tiles fit *inside* this square; aspect is
+/// preserved, never cropped.
+pub const THUMB_PX: u32 = 128;
+
+/// Most bytes the on-disk thumbnail cache may hold.
+///
+/// Lossless 128 px entries run tens of kilobytes; this holds tens of
+/// thousands of tiles. Evicted oldest-first past the cap, never on the
+/// render path.
+pub const THUMB_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Age past which a cached thumbnail is dropped.
+///
+/// A directory not visited in a month should not still be costing disk.
+pub const THUMB_CACHE_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+
 /// Most animation frames retained.
 ///
 /// Ten seconds at 24 fps. Past it, the first frame and a footer note. Memory

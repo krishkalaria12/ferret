@@ -30,10 +30,18 @@ impl FilePane {
     pub(super) fn render_icon_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let n = self.folder.read(cx).row_count();
         let rows = n.div_ceil(self.tiles_per_row());
+        self.maybe_warm_thumbs(n, rows, cx);
 
+        let height_probe = self.pane_height.clone();
         div()
-            .id("icon-area")
             .size_full()
+            .on_children_prepainted(move |children: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                let Some(bounds) = children.first() else {
+                    return;
+                };
+                height_probe.store(f32::from(bounds.size.height) as usize, Ordering::Relaxed);
+            })
+            .id("icon-area")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -118,11 +126,17 @@ impl FilePane {
         // The badge rides on the glyph rather than beside the label: a tile's
         // label is centred and wraps to two lines, so anything appended to it
         // moves with the text instead of staying where the eye expects it.
+        // A resolved photo tile takes the glyph's place; the badge rides it
+        // the same way.
+        let inner = match self.thumb_tile(&entry, cx) {
+            Some(tile) => tile,
+            None => entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx),
+        };
         let tile_icon = match self.git_status(&entry) {
             Some(status) => div()
                 .relative()
                 .flex_shrink_0()
-                .child(entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx))
+                .child(inner)
                 .child(
                     div()
                         .absolute()
@@ -131,7 +145,7 @@ impl FilePane {
                         .child(super::git_badge(status, entry.is_dir_like(), &palette)),
                 )
                 .into_any_element(),
-            None => entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx),
+            None => inner,
         };
         let dragged: Arc<[VfsPath]> = if selected {
             self.folder.read(cx).selected_paths_shared()
@@ -209,6 +223,133 @@ impl FilePane {
                     .child(label),
             )
             .into_any_element()
+    }
+
+    /// A resolved photo tile, fitted inside the glyph box with aspect
+    /// preserved — or `None`, in which case the tile draws the kind glyph.
+    ///
+    /// Memory-cache only: one lock-free lookup and no I/O, which is what
+    /// keeps the render path O(visible tiles). Warming happens in
+    /// [`Self::maybe_warm_thumbs`], off the path.
+    fn thumb_tile(&self, entry: &ferret_vfs::Entry, cx: &gpui::App) -> Option<gpui::AnyElement> {
+        if !cx.global::<FerretState>().settings.preview.thumbnails {
+            return None;
+        }
+        let cached = cx.global::<FerretState>().rendered_thumbs.get(entry)?;
+        let scale =
+            (Self::TILE_GLYPH / cached.width as f32).min(Self::TILE_GLYPH / cached.height as f32);
+        Some(
+            gpui::img(gpui::ImageSource::Render(cached.image))
+                .w(px(cached.width as f32 * scale))
+                .h(px(cached.height as f32 * scale))
+                .flex_shrink_0()
+                .into_any_element(),
+        )
+    }
+
+    /// Resolve tiles for the visible range plus one viewport of lookahead.
+    ///
+    /// Runs once per range change, never per frame: the range is arithmetic
+    /// on the scroll offset and the probed height, and a new range replaces
+    /// the previous task, which is what cancels the stale one. Each tile is
+    /// memory-hit, disk-hit, or one bounded generate; failures keep the
+    /// glyph silently — a tile is never worth an error surface.
+    fn maybe_warm_thumbs(&mut self, n: usize, rows: usize, cx: &mut Context<Self>) {
+        if self.view_mode != ViewMode::Icons
+            || !cx.global::<FerretState>().settings.preview.thumbnails
+        {
+            self.thumb_task = None;
+            return;
+        }
+        let height = self.pane_height.load(Ordering::Relaxed) as f32;
+        if height <= 0.0 || n == 0 {
+            return;
+        }
+        let per_row = self.tiles_per_row();
+        let stride = Self::TILE_H + Self::GAP;
+        let offset = gpui_component::scroll::ScrollbarHandle::offset(&self.icon_scroll).y;
+        let first_row = (f32::from(offset) / stride).floor().max(0.0) as usize;
+        let visible_rows = (height / stride).ceil() as usize;
+        // One viewport of lookahead: the next scroll step finds warm tiles.
+        let last_row = (first_row + visible_rows * 2).min(rows.saturating_sub(1));
+        let range = first_row * per_row..(last_row * per_row + per_row).min(n);
+        let dir = self.folder.read(cx).dir.clone();
+        if range == self.thumb_range && Some(&dir) == self.thumb_dir.as_ref() {
+            return;
+        }
+        self.thumb_range = range.clone();
+        self.thumb_dir = Some(dir);
+
+        let entries: Vec<ferret_vfs::Entry> = range
+            .filter_map(|ix| self.folder.read(cx).entry_at(ix).cloned())
+            .collect();
+        let fs = cx.global::<FerretState>().fs;
+        let cache = cx.global::<FerretState>().thumb_cache.clone();
+        let rendered = Arc::clone(&cx.global::<FerretState>().rendered_thumbs);
+        self.thumb_task = Some(cx.spawn(async move |pane, cx| {
+            for entry in entries.into_iter().take(crate::thumbs::THUMB_WARM_CAP) {
+                if entry.is_dir_like() {
+                    continue;
+                }
+                // Anything without an in-process decoder keeps its glyph —
+                // a tile is never worth an error surface.
+                if entry
+                    .extension()
+                    .is_none_or(|ext| !ferret_preview::is_tileable_extension(ext))
+                {
+                    continue;
+                }
+                let Some(local) = entry.path.as_local() else {
+                    continue;
+                };
+                let Some(meta) = entry.metadata else {
+                    continue;
+                };
+                let Some((len, secs, nanos)) = ferret_preview::fingerprint(meta.len, meta.modified)
+                else {
+                    continue;
+                };
+                if rendered.get(&entry).is_some() {
+                    continue;
+                }
+                // Blocking syscalls and the decode stay in this background
+                // task; the window thread only sees the insert plus notify.
+                let Ok(canonical) = std::fs::canonicalize(local) else {
+                    continue;
+                };
+                let key = ferret_preview::thumb_key(
+                    &canonical,
+                    len,
+                    secs,
+                    nanos,
+                    ferret_preview::config::THUMB_PX,
+                );
+                if let Some(bitmap) = cache.lookup(&key)
+                    && let Some(thumb) = crate::thumbs::render_thumb(&bitmap, len, secs, nanos)
+                {
+                    let path = entry.path.clone();
+                    let rendered = Arc::clone(&rendered);
+                    let _ = pane.update(cx, |_, cx| {
+                        rendered.insert(path, thumb);
+                        cx.notify();
+                    });
+                    continue;
+                }
+                // Disk miss: one bounded read, the pane's capped decode,
+                // first frame only — then store for the next visit.
+                let Some(small) = generated_tile(&fs, &entry, &cache, &key).await else {
+                    continue;
+                };
+                if let Some(thumb) = crate::thumbs::render_thumb(&small, len, secs, nanos) {
+                    let path = entry.path.clone();
+                    let rendered = Arc::clone(&rendered);
+                    let _ = pane.update(cx, |_, cx| {
+                        rendered.insert(path, thumb);
+                        cx.notify();
+                    });
+                }
+            }
+        }));
     }
 
     /// Pointer selection on a tile: plain replaces, Cmd/Ctrl toggles,
@@ -450,3 +591,28 @@ impl FilePane {
             .into_any_element()
     }
 }
+
+/// Disk miss for an in-process format: one bounded read, the pane's capped
+/// decode, first frame only — then store for the next visit.
+///
+/// A failed store still returns the bitmap for this session: the disk being
+/// unwritable must not cost a re-decode every scroll.
+async fn generated_tile(
+    fs: &ferret_vfs::LocalFs,
+    entry: &ferret_vfs::Entry,
+    cache: &ferret_preview::ThumbCache,
+    key: &str,
+) -> Option<ferret_preview::Bitmap> {
+    let bytes = fs
+        .read(&entry.path, ferret_preview::config::IMAGE_BUDGET)
+        .await
+        .ok()?;
+    let decoded = ferret_preview::image::decode(&bytes).ok()?;
+    let small = ferret_preview::ThumbCache::make(
+        &decoded.frames.first()?.bitmap,
+        ferret_preview::config::THUMB_PX,
+    )?;
+    cache.store(key, &small);
+    Some(small)
+}
+

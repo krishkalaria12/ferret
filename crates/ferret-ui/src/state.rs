@@ -14,6 +14,7 @@ use ferret_settings::{FolderPrefs, FolderView, Settings};
 use ferret_vfs::{LocalFs, VfsPath};
 
 use crate::icons::{FileIcons, RenderedIconCache};
+use crate::thumbs::RenderedThumbCache;
 
 /// Everything global, in one struct.
 pub struct FerretState {
@@ -30,6 +31,14 @@ pub struct FerretState {
     /// platform cache: it preserves texture identity across frames and keeps
     /// byte-to-image conversion out of the steady-state render path.
     pub rendered_os_icons: RenderedIconCache,
+    /// The on-disk thumbnail tile cache (F-33): bounded WebP under the
+    /// platform cache directory, keyed by canonical path, mtime, size and
+    /// target pixels. Best-effort — a missing entry draws the glyph.
+    pub thumb_cache: ferret_preview::ThumbCache,
+    /// Decoded tiles keyed by path, with the fingerprint each was built
+    /// from. Shared with the icon view's warm tasks, which resolve and
+    /// insert off the render path.
+    pub rendered_thumbs: Arc<RenderedThumbCache>,
     /// Whether `settings` has changed since it last reached disk.
     ///
     /// `FolderPrefs` tracks its own dirtiness; the settings file has no
@@ -134,6 +143,8 @@ pub fn load_state() -> FerretState {
         icons: FileIcons::embedded(),
         os_icons: ferret_platform::icon_provider(),
         rendered_os_icons: RenderedIconCache::default(),
+        thumb_cache: ferret_preview::ThumbCache::new(ferret_preview::ThumbCache::default_dir()),
+        rendered_thumbs: Arc::new(RenderedThumbCache::default()),
         settings_dirty: false,
         save_task: None,
         outstanding: Arc::default(),

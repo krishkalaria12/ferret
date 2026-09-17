@@ -23,6 +23,7 @@ mod pane;
 mod preview;
 mod state;
 mod theme;
+mod thumbs;
 
 pub use assets::Assets;
 pub use browser::{Browser, TITLE_BAR_HEIGHT, TRAFFIC_LIGHT_DIAMETER};
@@ -30,6 +31,7 @@ pub use format::{format_date, format_size, natural_compare};
 pub use preview::{BREAKDOWN_CAP, PreviewInput, PreviewPane, SelectedInput};
 pub use state::{FerretState, load_state};
 pub use theme::{BrowserPalette, TerminalPalette, register as register_theme};
+pub use thumbs::THUMB_EVICT_INTERVAL;
 
 /// Write any settings or folder preferences the debounce has not flushed yet.
 ///

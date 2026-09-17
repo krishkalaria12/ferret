@@ -38,6 +38,7 @@
   "preview": {
     "visible": false,
     "width": 400.0,
-    "line_numbers": false
+    "line_numbers": false,
+    "thumbnails": true
   }
 }

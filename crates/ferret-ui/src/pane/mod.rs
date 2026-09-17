@@ -111,6 +111,16 @@ pub struct FilePane {
     /// Latest known pane width, shared with the delegate so the Name column
     /// can absorb the spare width the way §4 demands.
     pane_width: Arc<AtomicUsize>,
+    /// Latest known icon-view height, probed the same way: the visible tile
+    /// range (and its one-viewport lookahead) is arithmetic on this and the
+    /// scroll offset, which is what bounds thumbnail warming.
+    pane_height: Arc<AtomicUsize>,
+    /// Tile range the warm task was last asked for, and the directory it
+    /// belonged to. A scroll or a navigation that moves the range replaces
+    /// the task, which is what cancels the stale one.
+    thumb_range: std::ops::Range<usize>,
+    thumb_dir: Option<VfsPath>,
+    thumb_task: Option<gpui::Task<()>>,
     /// The browser's git status snapshot, for the badge each view draws
     /// (F-51). One atomic load per read; the browser swaps it per refresh.
     git: GitHandle,
@@ -258,6 +268,10 @@ impl FilePane {
             anchor_chain_right: false,
             marquee: None,
             pane_width,
+            pane_height: Arc::new(AtomicUsize::new(0)),
+            thumb_range: 0..0,
+            thumb_dir: None,
+            thumb_task: None,
             git,
             pane_origin: Arc::new(Mutex::new(gpui::point(px(0.), px(0.)))),
             space_menu: None,

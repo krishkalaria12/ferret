@@ -25,6 +25,25 @@ fn main() {
             // Global app state before any view reads it.
             cx.set_global(ferret_ui_state());
 
+            // The thumbnail cache is bounded off the render path: a sweep on
+            // startup, then daily. Eviction failures stay silent — a cache
+            // that cannot be read stays big, which is not an error the user
+            // can act on.
+            {
+                use ferret_ui::THUMB_EVICT_INTERVAL;
+                let thumbs = cx.global::<FerretState>().thumb_cache.clone();
+                let exec = cx.background_executor().clone();
+                exec.clone()
+                    .spawn(async move {
+                        thumbs.evict();
+                        loop {
+                            exec.timer(THUMB_EVICT_INTERVAL).await;
+                            thumbs.evict();
+                        }
+                    })
+                    .detach();
+            }
+
             register_actions(cx);
             bind_keys(cx);
             apply_startup_theme(cx);

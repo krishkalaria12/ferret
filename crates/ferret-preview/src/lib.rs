@@ -22,6 +22,7 @@ pub mod languages;
 pub mod markdown;
 pub mod table;
 pub mod text;
+pub mod thumbs;
 
 mod errors;
 
@@ -29,6 +30,7 @@ pub use classify::Kind;
 pub use errors::{PreviewError, Result};
 pub use image::{Bitmap, DecodedImage, Frame, ImageError};
 pub use table::{ParsedTable, Row};
+pub use thumbs::{ThumbCache, fingerprint, is_tileable_extension, thumb_key};
 
 use ferret_vfs::VfsPath;
 use smallvec::SmallVec;
