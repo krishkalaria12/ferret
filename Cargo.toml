@@ -235,8 +235,20 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 # `RenderImage` is built from `image::Frame`, so the OS icon path needs the
-# same `image` version gpui itself uses. No codecs: only the buffer types.
-image = { version = "0.25", default-features = false }
+# same `image` version gpui itself uses. Codecs are preview decoders (F-33):
+# raster formats ferret decodes itself, bounded, off-thread — never through
+# GPUI's whole-file asset loader. HEIC/RAW stay out (OS thumbnails cover
+# them); AVIF stays out until decoder-level subsampling is proven.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "qoi",
+    "tiff",
+    "webp",
+] }
 
 # macOS icon lookup (D-18). All three crates are already in the tree via gpui,
 # so these are direct edges to something already compiled rather than a new

@@ -17,6 +17,7 @@
 
 pub mod classify;
 pub mod config;
+pub mod image;
 pub mod languages;
 pub mod markdown;
 pub mod table;
@@ -26,6 +27,7 @@ mod errors;
 
 pub use classify::Kind;
 pub use errors::{PreviewError, Result};
+pub use image::{Bitmap, DecodedImage, Frame, ImageError};
 pub use table::{ParsedTable, Row};
 
 use ferret_vfs::VfsPath;
@@ -102,6 +104,14 @@ pub enum Preview {
         truncated: Truncation,
     },
 
+    /// F-33. Already decoded, already downscaled, in the BGRA layout
+    /// `RenderImage` wants. `natural` is the size before scaling, so the
+    /// footer can be honest about it. `frames_capped` carries the animation
+    /// fallback ("first frame shown") into the footer.
+    Image {
+        image: DecodedImage,
+        truncated: Truncation,
+    },
     /// The floor. Hex plus printable ASCII for the head of the file.
     Binary {
         head: Vec<u8>,
@@ -205,7 +215,39 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
             head: bytes[..bytes.len().min(config::HEX_BUDGET)].to_vec(),
             size: total,
         },
-        Kind::Image | Kind::Pdf => {
+        Kind::Image => {
+            let shown = bytes.len() as u64;
+            match image::decode(&bytes) {
+                Ok(image) => Preview::Image {
+                    image,
+                    truncated: Truncation { shown, total },
+                },
+                // A corrupt image must still show its size: the hex floor.
+                Err(image::ImageError::Undecodable) => Preview::Binary {
+                    head: bytes[..bytes.len().min(config::HEX_BUDGET)].to_vec(),
+                    size: total,
+                },
+                // A valid image with no in-process decoder (HEIC, AVIF):
+                // metadata and Open.
+                Err(image::ImageError::UnsupportedFormat) => Preview::Unsupported {
+                    kind,
+                    reason: Unsupported::NoRenderer,
+                },
+                // Past even the head budget for a kind that cannot be
+                // partially rendered: metadata, never an attempted decode.
+                Err(image::ImageError::TooLarge { .. }) => {
+                    let budget = budget_for(&kind, false);
+                    Preview::Unsupported {
+                        kind,
+                        reason: Unsupported::TooLarge {
+                            size: total,
+                            budget,
+                        },
+                    }
+                }
+            }
+        }
+        Kind::Pdf => {
             let budget = budget_for(&kind, false);
             if total > budget as u64 {
                 Preview::Unsupported {
@@ -288,10 +330,46 @@ mod tests {
     }
 
     #[test]
-    fn images_report_no_renderer_rather_than_an_attempted_decode() {
+    fn images_decode_to_bitmaps() {
+        let encoded = {
+            let img = ::image::DynamicImage::ImageRgba8(::image::RgbaImage::from_pixel(
+                2,
+                2,
+                ::image::Rgba([1, 2, 3, 255]),
+            ));
+            let mut bytes = Vec::new();
+            img.write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+            bytes
+        };
+        let Preview::Image { image, .. } = build_named("photo.png", &encoded, Some(100)) else {
+            panic!("a real PNG must decode");
+        };
+        assert_eq!(image.natural, (2, 2));
+    }
+
+    #[test]
+    fn corrupt_images_fall_back_to_hex_with_their_size() {
         let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
-        let Preview::Unsupported { kind, reason } = build_named("photo.png", &png, Some(12)) else {
-            panic!("images have no decoder yet");
+        let Preview::Binary { size, .. } = build_named("photo.png", &png, Some(12)) else {
+            panic!("a corrupt PNG must fall back to binary");
+        };
+        assert_eq!(size, 12);
+    }
+
+    #[test]
+    fn heic_builds_unsupported_metadata_not_hex() {
+        // Valid photo, no in-process decoder: metadata and Open — never a
+        // hex dump of a good file.
+        let mut bytes = b"....ftypheic".to_vec();
+        bytes.extend_from_slice(&[0u8; 64]);
+        let Preview::Unsupported { kind, reason } =
+            build_named("photo.heic", &bytes, Some(bytes.len() as u64))
+        else {
+            panic!("HEIC must build unsupported metadata");
         };
         assert_eq!(kind, Kind::Image);
         assert_eq!(reason, Unsupported::NoRenderer);
