@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+ferret-preview.workspace = true
 ferret-vfs.workspace = true
 
 anyhow.workspace = true

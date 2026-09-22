@@ -66,7 +66,10 @@ fn run() -> Result<bool> {
         }
         "bench" => {
             let results = bench::run(&root)?;
-            Ok(bench::report(&results))
+            let listing_ok = bench::report(&results);
+            let sweep = bench::sweep_preview(&root)?;
+            let sweep_ok = bench::report_preview_sweep(&sweep);
+            Ok(listing_ok && sweep_ok)
         }
         "clean" => {
             if root.exists() {

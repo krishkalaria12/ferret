@@ -84,6 +84,20 @@ pub const BENCH_RUNS: usize = 3;
 pub const BENCH_FIXTURES: &[&str] = &["flat", "types", "realistic", "names", "links"];
 
 // ---------------------------------------------------------------------------
+// Preview sweep — one settled selection per file in `preview/`
+// ---------------------------------------------------------------------------
+
+/// How long classifying, reading and building every file in `preview/` may
+/// take, total.
+///
+/// A settled selection costs a sniff read plus one budgeted read; ~30 small
+/// files plus two capped ones is milliseconds of syscalls and parses. The
+/// budget is generous so it catches a regression in kind — a third read per
+/// file, a full-file read past a budget, a decode attempted before the probe
+/// refused it — rather than machine-to-machine variation.
+pub const PREVIEW_SWEEP_BUDGET: Duration = Duration::from_secs(10);
+
+// ---------------------------------------------------------------------------
 // Location
 // ---------------------------------------------------------------------------
 
