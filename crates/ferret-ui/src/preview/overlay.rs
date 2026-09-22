@@ -270,7 +270,7 @@ impl PreviewOverlay {
         };
         cx.notify();
 
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let thumbs = cx.global::<FerretState>().thumb_cache.clone();
         let remote = !entry.path.is_local();
         let window_handle = self.window;
@@ -305,7 +305,7 @@ impl PreviewOverlay {
                     editor.set_value(text, window, cx);
                 });
                 self.state = OverlayState::Text {
-                    title: PreviewPane::display_name(entry.name()),
+                    title: PreviewPanel::display_name(entry.name()),
                     detail,
                     footer,
                 };
@@ -323,7 +323,7 @@ impl PreviewOverlay {
                     docview.set_text(&sanitized, cx);
                 });
                 self.state = OverlayState::Markdown {
-                    title: PreviewPane::display_name(entry.name()),
+                    title: PreviewPanel::display_name(entry.name()),
                     detail,
                     base,
                     remote,
@@ -340,7 +340,7 @@ impl PreviewOverlay {
                 let table = std::sync::Arc::new(table);
                 self.grid = Some(CsvGrid::new(&table, widths, window, cx));
                 self.state = OverlayState::Table {
-                    title: PreviewPane::display_name(entry.name()),
+                    title: PreviewPanel::display_name(entry.name()),
                     detail,
                     footer,
                 };
@@ -357,7 +357,7 @@ impl PreviewOverlay {
                 match render_bitmap(&page.bitmap) {
                     Some(render_image) => {
                         self.state = OverlayState::Pdf {
-                            title: PreviewPane::display_name(entry.name()),
+                            title: PreviewPanel::display_name(entry.name()),
                             detail,
                             bitmap_size: (page.bitmap.width, page.bitmap.height),
                             render_image,
@@ -373,7 +373,7 @@ impl PreviewOverlay {
                     }
                     None => {
                         self.state = OverlayState::Message {
-                            title: PreviewPane::display_name(entry.name()),
+                            title: PreviewPanel::display_name(entry.name()),
                             message: "Ferret couldn't render this PDF here.".to_string(),
                         };
                     }
@@ -388,7 +388,7 @@ impl PreviewOverlay {
                 Some(render_image) => {
                     let first = &image.frames[0];
                     self.state = OverlayState::Image {
-                        title: PreviewPane::display_name(entry.name()),
+                        title: PreviewPanel::display_name(entry.name()),
                         detail,
                         bitmap_size: (first.bitmap.width, first.bitmap.height),
                         render_image,
@@ -397,7 +397,7 @@ impl PreviewOverlay {
                 }
                 None => {
                     self.state = OverlayState::Message {
-                        title: PreviewPane::display_name(entry.name()),
+                        title: PreviewPanel::display_name(entry.name()),
                         message: "Ferret couldn't draw these pixels.".to_string(),
                     };
                 }
@@ -408,13 +408,13 @@ impl PreviewOverlay {
                 message,
             } => {
                 self.state = OverlayState::Message {
-                    title: format!("{} · {detail}", PreviewPane::display_name(entry.name())),
+                    title: format!("{} · {detail}", PreviewPanel::display_name(entry.name())),
                     message,
                 };
             }
             LoadOutcome::Error { name, message } => {
                 self.state = OverlayState::Message {
-                    title: PreviewPane::display_name(&name),
+                    title: PreviewPanel::display_name(&name),
                     message,
                 };
             }
@@ -520,7 +520,7 @@ impl PreviewOverlay {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, detail) = match &self.state {
             OverlayState::Loading { name } => {
-                (PreviewPane::display_name(name), "Loading…".to_string())
+                (PreviewPanel::display_name(name), "Loading…".to_string())
             }
             OverlayState::Text { title, detail, .. }
             | OverlayState::Markdown { title, detail, .. }

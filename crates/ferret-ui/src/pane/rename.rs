@@ -92,12 +92,22 @@ impl FilePane {
             .parent()
             .unwrap_or_else(|| renaming.path.clone());
         let dest = parent.join(&new_name);
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let src = renaming.path.clone();
         let window_handle = window.window_handle();
 
-        cx.spawn(async move |_, cx| {
-            if let Err(err) = fs.rename(&src, &dest).await {
+        // A mount has no watcher, so the renamed row would keep its old name
+        // until something else reloaded the listing.
+        let needs_reload = !src.is_local();
+        let folder = self.folder.clone();
+
+        cx.spawn(async move |_, cx| match fs.rename(&src, &dest).await {
+            Ok(()) => {
+                if needs_reload {
+                    folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
+                }
+            }
+            Err(err) => {
                 let _ = window_handle.update(cx, |_, window, cx| {
                     use gpui_component::{WindowExt as _, notification::Notification};
                     window.push_notification(Notification::error(err.to_string()), cx);
@@ -105,7 +115,8 @@ impl FilePane {
             }
         })
         .detach();
-        // The directory watcher repaints the listing once the rename lands.
+        // On local disk the directory watcher repaints the listing once the
+        // rename lands.
     }
 
     pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {

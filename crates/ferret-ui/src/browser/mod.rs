@@ -43,10 +43,11 @@ use crate::actions;
 use crate::folder::{Folder, FolderEvent, ListingProfile, SortRules};
 use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
-use crate::preview::{PreviewOverlay, PreviewPane};
+use crate::preview::{PreviewOverlay, PreviewPanel};
 use crate::state::FerretState;
 
 use commit_dialog::CommitDialog;
+use connection_dialog::ConnectionDialog;
 pub(crate) use git::GitHandle;
 use git::GitPanel;
 // Only the allocations-per-frame budget constructs one directly.
@@ -54,6 +55,8 @@ use git::GitPanel;
 pub(crate) use git::GitSnapshot;
 
 mod commit_dialog;
+mod connect;
+mod connection_dialog;
 mod git;
 mod git_bar;
 mod mutations;
@@ -61,6 +64,7 @@ mod path_bar;
 mod power_search;
 mod preview_panel;
 mod render;
+mod send_to;
 mod sidebar;
 mod tab_strip;
 mod tabs;
@@ -183,7 +187,7 @@ pub struct Browser {
     terminal_drag: Option<TerminalDrag>,
     /// The preview pane (F-30): one entity per window, fed by the active
     /// tab's selection. Mounted once; it swaps its `Preview`, never itself.
-    preview: Entity<PreviewPane>,
+    preview: Entity<PreviewPanel>,
     preview_visible: bool,
     /// Logical pixels, clamped to `settings::MIN/MAX_PREVIEW_WIDTH`.
     preview_width: f32,
@@ -199,10 +203,18 @@ pub struct Browser {
     /// The newest directory waiting to be injected, held until the shell can
     /// safely take it (§6). Only ever one: someone arrow-keying down a tree
     /// should produce one `cd`, not forty.
-    terminal_pending_sync: Option<PathBuf>,
+    ///
+    /// A `VfsPath` rather than a `PathBuf` because an SSH session follows the
+    /// mount it is logged in to, and a remote path is not a local one.
+    terminal_pending_sync: Option<VfsPath>,
     /// The last directory actually written, so a queue that catches up with
     /// where the shell already is writes nothing at all.
-    terminal_synced_to: Option<PathBuf>,
+    terminal_synced_to: Option<VfsPath>,
+    /// The mount an SSH session is logged in to, if this session is one.
+    ///
+    /// What decides whether a `cd` may be sent at all: a session on one server
+    /// must never be told to follow a path on another, or on local disk.
+    terminal_mount: Option<ferret_vfs::MountId>,
     /// Whether the user has typed something the injected line would complete.
     terminal_input_dirty: bool,
     /// When the terminal last saw a keystroke. A keystroke inside the idle
@@ -273,6 +285,16 @@ pub struct Browser {
     /// stacking a second copy.
     preview_overlay: Option<Entity<PreviewOverlay>>,
     overlay_open: bool,
+    /// Reused while opening and editing saved SSH endpoints. Input state must
+    /// live in an entity because a dialog builder runs again every frame.
+    connection_dialog: Option<Entity<ConnectionDialog>>,
+    /// The running transfer, drawn in the status bar. One at a time: the
+    /// interim queue exists so browsing continues during a copy, not so
+    /// several copies can compete for one link.
+    transfer: Option<send_to::TransferProgress>,
+    /// Pumps that transfer's events. Held here so it lives as long as the
+    /// window and dies with it — a transfer nobody can see should not run on.
+    transfer_task: Option<gpui::Task<()>>,
     /// Re-reads git status when the window comes back to the front. Held here
     /// so it lasts as long as the window does; see
     /// [`Browser::observe_git_activation`] for why the feature needs it.
@@ -372,7 +394,7 @@ impl Browser {
             (preview.visible, preview.width)
         };
         let browser_handle = cx.weak_entity();
-        let preview = cx.new(|cx| PreviewPane::new(window, cx, browser_handle.clone()));
+        let preview = cx.new(|cx| PreviewPanel::new(window, cx, browser_handle.clone()));
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -400,6 +422,7 @@ impl Browser {
             terminal_rows: 24,
             terminal_pending_sync: None,
             terminal_synced_to: None,
+            terminal_mount: None,
             terminal_input_dirty: false,
             terminal_last_key: None,
             terminal_poll: None,
@@ -421,6 +444,9 @@ impl Browser {
             guard_open: false,
             preview_overlay: None,
             overlay_open: false,
+            connection_dialog: None,
+            transfer: None,
+            transfer_task: None,
             _git_activation: Self::observe_git_activation(window, cx),
         };
         this.push_tab(start_directory(), window, cx);

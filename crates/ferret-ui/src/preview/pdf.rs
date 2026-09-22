@@ -13,7 +13,7 @@ use gpui_component::{
     h_flex,
 };
 
-impl PreviewPane {
+impl PreviewPanel {
     /// Step the current page by `delta` (±1 from the footer and the menu).
     pub(crate) fn pdf_step(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
         let current = match &self.state {

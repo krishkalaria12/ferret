@@ -20,7 +20,7 @@ use gpui_component::{
 
 use crate::actions;
 
-impl PreviewPane {
+impl PreviewPanel {
     /// Truncate a name in the middle, never wrapping.
     ///
     /// The head matters more than the middle for long names, and the
@@ -218,7 +218,7 @@ enum EditButtons {
     Editing,
 }
 
-impl PreviewPane {
+impl PreviewPanel {
     fn render_edit_buttons(
         &self,
         buttons: EditButtons,
@@ -278,15 +278,15 @@ impl PreviewPane {
 
 #[cfg(test)]
 mod tests {
-    use super::PreviewPane;
+    use super::PreviewPanel;
 
     #[test]
     fn long_names_keep_both_ends() {
         let name = "a_quite_long_filename_for_a_config_file_with_extra_versioning.yaml";
-        let shown = PreviewPane::display_name(name);
+        let shown = PreviewPanel::display_name(name);
         assert!(shown.starts_with("a_quite_long_filename_for_a_"), "{shown}");
         assert!(shown.ends_with("with_extra_versioning.yaml"), "{shown}");
         assert!(shown.contains('…'));
-        assert_eq!(PreviewPane::display_name("short.txt"), "short.txt");
+        assert_eq!(PreviewPanel::display_name("short.txt"), "short.txt");
     }
 }

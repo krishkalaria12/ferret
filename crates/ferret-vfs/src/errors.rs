@@ -41,6 +41,22 @@ pub enum VfsError {
     #[error("This location doesn't support {capability}.")]
     Unsupported { capability: &'static str },
 
+    /// A remote path whose mount is not connected — a tab restored from a
+    /// previous session, a server that dropped, or a record the user deleted.
+    #[error("Ferret isn't connected to the server that holds {path}.")]
+    NotMounted { path: VfsPath },
+
+    /// The two ends of a `rename` or `copy` live on different backends.
+    ///
+    /// Deliberately *not* [`VfsError::CrossVolume`], whose text promises a
+    /// copy: two local volumes copy in seconds, and a server is a network
+    /// transfer that needs progress and a cancel button. The caller routes
+    /// this to the transfer queue rather than retrying.
+    #[error(
+        "{from} and {to} are on different filesystems, so this has to be a transfer rather than a move."
+    )]
+    CrossBackend { from: VfsPath, to: VfsPath },
+
     #[error("Couldn't {action} {path}: {source}")]
     Io {
         action: &'static str,

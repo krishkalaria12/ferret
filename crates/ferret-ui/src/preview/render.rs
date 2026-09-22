@@ -19,7 +19,7 @@ use gpui_component::{
 
 use crate::actions::context;
 
-impl PreviewPane {
+impl PreviewPanel {
     /// The whole pane: header, body, and a footer only when it has something
     /// to say. An always-present status strip becomes furniture nobody reads.
     pub(super) fn render_pane(
@@ -44,7 +44,7 @@ impl PreviewPane {
             });
         }
         v_flex()
-            .id("preview-pane")
+            .id("preview-panel")
             .key_context(context::PREVIEW)
             .size_full()
             .bg(bg)
@@ -356,7 +356,7 @@ impl PreviewPane {
     }
 }
 
-impl Render for PreviewPane {
+impl Render for PreviewPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_pane(window, cx)
     }

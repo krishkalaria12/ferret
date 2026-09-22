@@ -283,7 +283,7 @@ impl FilePane {
         let entries: Vec<ferret_vfs::Entry> = range
             .filter_map(|ix| self.folder.read(cx).entry_at(ix).cloned())
             .collect();
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let cache = cx.global::<FerretState>().thumb_cache.clone();
         let rendered = Arc::clone(&cx.global::<FerretState>().rendered_thumbs);
         self.thumb_task = Some(cx.spawn(async move |pane, cx| {
@@ -600,7 +600,7 @@ impl FilePane {
 /// A failed store still returns the bitmap for this session: the disk being
 /// unwritable must not cost a re-decode every scroll.
 async fn generated_tile(
-    fs: &ferret_vfs::LocalFs,
+    fs: &impl ferret_vfs::Vfs,
     entry: &ferret_vfs::Entry,
     cache: &ferret_preview::ThumbCache,
     key: &str,

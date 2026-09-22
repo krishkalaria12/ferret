@@ -59,7 +59,7 @@ impl ShellKind {
 pub(crate) fn change_directory_command(kind: ShellKind, directory: &Path) -> Result<String> {
     let path = directory.to_string_lossy();
     Ok(match kind {
-        ShellKind::Posix => format!(" cd -- '{}'\n", path.replace('\'', "'\\''")),
+        ShellKind::Posix => posix_change_directory(&path),
         // `-LiteralPath` keeps `[`, `]` and `*` in a real directory name from
         // being read as wildcards.
         ShellKind::PowerShell => {
@@ -81,6 +81,16 @@ pub(crate) fn change_directory_command(kind: ShellKind, directory: &Path) -> Res
             format!("cd /d \"{path}\"\r\n")
         }
     })
+}
+
+/// The POSIX `cd` line, for a path that is already text.
+///
+/// The only form F-13 will send into an SSH session: the remote shell's
+/// dialect is genuinely unknown, and this is the one that is safe to send
+/// blind. A remote path is `/`-separated UTF-8 and must not be routed through
+/// `Path`, which would apply the *local* platform's rules to it.
+pub(crate) fn posix_change_directory(path: &str) -> String {
+    format!(" cd -- '{}'\n", path.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]

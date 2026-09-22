@@ -61,7 +61,7 @@ impl CsvGrid {
     }
 }
 
-impl PreviewPane {
+impl PreviewPanel {
     /// Flip between the inferred header and the first row as data.
     ///
     /// Reversible, sample-local, and silent about the file it has not read:

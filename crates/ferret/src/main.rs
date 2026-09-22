@@ -74,6 +74,12 @@ fn register_actions(cx: &mut App) {
         for copy in ferret_ui::preserve_edit_recovery_copies(cx) {
             eprintln!("ferret: unsaved edits preserved in {}", copy.display());
         }
+        // Mounts first, then the runtime: closing a session politely needs the
+        // runtime that owns its actor to still be there.
+        ferret_ui::disconnect_mounts(cx);
+        // The remote runtime is lazy and restartable, but process shutdown is
+        // its owning lifecycle boundary. No SSH task is allowed to outlive it.
+        ferret_remote::shutdown_runtime();
         async {}
     })
     .detach();
@@ -140,6 +146,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-`", browser_actions::FocusTerminalOrPane, None),
         KeyBinding::new("cmd-shift-.", browser_actions::ToggleHidden, None),
         KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, OUTSIDE_TERMINAL),
+        // New SSH connection (F-20), on both supported platforms.
+        KeyBinding::new("cmd-shift-k", browser_actions::NewConnection, None),
+        KeyBinding::new(
+            "ctrl-shift-k",
+            browser_actions::NewConnection,
+            OUTSIDE_TERMINAL,
+        ),
         // Commit (F-52). Not Cmd-K: that is "clear" in every terminal, and
         // this window has one docked in it.
         KeyBinding::new("cmd-shift-c", browser_actions::CommitChanges, None),

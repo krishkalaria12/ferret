@@ -357,7 +357,7 @@ impl Browser {
         let Some(repo) = self.git.repo.clone() else {
             return;
         };
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let git_dir = VfsPath::local(repo.git_dir().to_path_buf());
         let Ok(watch) = fs.watch(&git_dir) else {
             // No notification is a degraded mode, not a failure: navigating,

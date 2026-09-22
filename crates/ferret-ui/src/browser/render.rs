@@ -61,11 +61,13 @@ impl Browser {
         }
 
         let git = self.render_git_segment(cx);
+        let transfer = self.render_transfer_segment(cx);
 
         StatusBar::new()
             // The item count truncates before the git segment does: a count is
             // re-derivable by looking at the list, and a branch name is not.
             .left(div().min_w_0().truncate().child(text))
+            .when_some(transfer, |bar, segment| bar.right(segment))
             .when_some(git, |bar, segment| bar.right(segment))
             // §4: h24, 11.5 px, muted. The library defaults to an auto height
             // and `text_xs`, so the row would drift a pixel or two off spec.
@@ -125,6 +127,14 @@ impl Render for Browser {
             .on_action(
                 cx.listener(|this, _: &actions::TogglePowerSearch, window, cx| {
                     this.toggle_power_search(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::NewConnection, window, cx| {
+                this.open_connection_dialog(None, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, send: &actions::SendToConnection, window, cx| {
+                    this.send_selection_to(&send.id, window, cx)
                 }),
             )
             .on_action(

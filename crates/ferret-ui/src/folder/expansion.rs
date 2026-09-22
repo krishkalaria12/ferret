@@ -83,14 +83,14 @@ impl Folder {
     /// middle of the display order, so rows arriving one batch at a time
     /// would shift everything below them repeatedly.
     fn load_children(&mut self, parent: EntryId, dir: VfsPath, cx: &mut Context<Self>) {
-        let fs = cx.global::<crate::state::FerretState>().fs;
+        let fs = cx.global::<crate::state::FerretState>().fs.clone();
         let generation = self.generation;
         let rules = self.rules;
         // The same listing, so the same answer: these rows sit in the very
         // columns the parent's rows do.
         let detail = self
             .profile
-            .detail(rules, self.show_hidden, fs.capabilities());
+            .detail(rules, self.show_hidden, fs.capabilities_for(&dir));
 
         // Counted before the spawn, so a reload that finishes its top-level
         // walk before this listing lands still knows the carried state has
@@ -329,8 +329,8 @@ impl Folder {
             // `stat` per entry (A-14).
             return;
         }
-        let fs = cx.global::<crate::state::FerretState>().fs;
-        if fs.capabilities().metadata_in_listing {
+        let fs = cx.global::<crate::state::FerretState>().fs.clone();
+        if fs.capabilities_for(&self.dir).metadata_in_listing {
             return; // The walk already filled it.
         }
 

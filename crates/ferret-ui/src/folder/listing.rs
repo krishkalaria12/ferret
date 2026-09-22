@@ -71,14 +71,16 @@ impl Folder {
         self.watch = None;
         cx.notify();
 
-        let fs = cx.global::<crate::state::FerretState>().fs;
+        let fs = cx.global::<crate::state::FerretState>().fs.clone();
         let dir = self.dir.clone();
         // An ancestor column draws an icon, a name and a chevron; asking for
         // size and dates it will never show is a `stat` per entry for nothing
         // (A-14). `detail` decides whether that is actually safe here.
+        // The folder's backend, not the router's: whether metadata rides along
+        // with the listing is a property of the server this directory is on.
         let detail = self
             .profile
-            .detail(self.rules, self.show_hidden, fs.capabilities());
+            .detail(self.rules, self.show_hidden, fs.capabilities_for(&dir));
 
         // Nothing else will wake the view once the delay passes — the whole
         // point of the hint is that no rows have arrived — so the deadline
@@ -237,7 +239,7 @@ impl Folder {
             // that *are* being worked in a gap in delivery.
             return;
         }
-        let fs = cx.global::<crate::state::FerretState>().fs;
+        let fs = cx.global::<crate::state::FerretState>().fs.clone();
         let watch = match fs.watch(&self.dir) {
             Ok(watch) => watch,
             // No notification is a degraded mode, not a failure: manual
@@ -326,7 +328,7 @@ impl Folder {
     /// `self.dir` bounded by the expanded set — one registration, not one per
     /// open row.
     fn start_watch_apply(&mut self, mut paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
-        let fs = cx.global::<crate::state::FerretState>().fs;
+        let fs = cx.global::<crate::state::FerretState>().fs.clone();
         let generation = self.generation;
         let dir = self.dir.clone();
 

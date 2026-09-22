@@ -311,5 +311,21 @@ pub trait Vfs: Send + Sync + 'static {
         })
     }
 
+    /// Discard anything remembered about `path`, its children, and the
+    /// directory holding it.
+    ///
+    /// A backend that caches nothing does nothing, which is why this has a
+    /// default: local disk re-reads every time and has no stale answer to
+    /// drop. A backend that *does* cache must treat this as unconditional —
+    /// it is what makes "Refresh" mean "ask the server" rather than "ask
+    /// again and possibly get the same answer".
+    ///
+    /// Cheap and synchronous on purpose: callers invalidate immediately before
+    /// listing, and an `async` version would make that an await on the
+    /// navigation path for no benefit.
+    fn invalidate(&self, path: &VfsPath) {
+        let _ = path;
+    }
+
     async fn remove(&self, path: &VfsPath, mode: RemoveMode) -> Result<()>;
 }

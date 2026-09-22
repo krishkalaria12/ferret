@@ -40,7 +40,7 @@ use ferret_preview::{
     Bitmap, DecodedImage, Frame, Pages, ParsedTable, PdfUnavailable, Preview, RenderedPage,
     Truncation,
 };
-use ferret_vfs::{Entry, EntryKind, FileIdentity, LocalFs, Vfs as _, VfsError, VfsPath};
+use ferret_vfs::{Entry, EntryKind, FileIdentity, VfsError, VfsPath};
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window,
 };
@@ -227,7 +227,7 @@ impl PaneState {
     }
 }
 
-pub struct PreviewPane {
+pub struct PreviewPanel {
     editor: Entity<EditorState>,
     /// One retained document view, reused across selections (F-31).
     docview: Entity<TextViewState>,
@@ -263,7 +263,7 @@ pub struct PreviewPane {
     wrap_override: Option<bool>,
 }
 
-impl PreviewPane {
+impl PreviewPanel {
     pub fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -574,7 +574,7 @@ impl PreviewPane {
         // The count is a walk and must be asked for — but asking is this
         // pane's job, debounced like everything else, never automatic in
         // `Render` and never on the window thread.
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         self.tasks.push(cx.spawn(async move |pane, cx| {
             cx.background_executor()
                 .timer(ferret_preview::config::PREVIEW_DEBOUNCE)
@@ -634,7 +634,7 @@ impl PreviewPane {
         self.loading_since = Some(Instant::now());
         cx.notify();
 
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let thumbs = cx.global::<FerretState>().thumb_cache.clone();
         let window_handle = self.window;
         // The read, after the debounce: one settled request per sweep.
@@ -923,7 +923,7 @@ impl PreviewPane {
     }
 }
 
-impl Focusable for PreviewPane {
+impl Focusable for PreviewPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
     }
@@ -1004,7 +1004,7 @@ pub(crate) enum LoadOutcome {
 /// Shared with the F-75 overlay, which runs the same pipeline on demand when
 /// the pane has nothing fresh to reuse.
 pub(crate) async fn load_single(
-    fs: &LocalFs,
+    fs: &impl ferret_vfs::Vfs,
     thumbs: &ferret_preview::ThumbCache,
     entry: &Entry,
     remote: bool,
@@ -1054,7 +1054,7 @@ async fn text_outcome(
     mut bytes: Vec<u8>,
     total: Option<u64>,
     remote: bool,
-    fs: &LocalFs,
+    fs: &impl ferret_vfs::Vfs,
     thumbs: &ferret_preview::ThumbCache,
 ) -> LoadOutcome {
     let shown = bytes.len() as u64;
@@ -1203,7 +1203,7 @@ async fn pdfium_page(
 /// keeps the `Unsupported` — a tile that cannot be drawn is a glyph, and a
 /// pane that cannot be drawn is metadata, both finished states.
 async fn native_preview(
-    fs: &LocalFs,
+    fs: &impl ferret_vfs::Vfs,
     thumbs: &ferret_preview::ThumbCache,
     entry: &Entry,
     total: u64,
@@ -1628,7 +1628,7 @@ fn vfs_error(name: &str, err: VfsError) -> LoadOutcome {
 
 /// Count entries for a selected directory: one `read_dir` stream, bounded
 /// batches, dropped with the generation when the selection moves on.
-async fn count_entries(fs: &LocalFs, dir: &VfsPath) -> u64 {
+async fn count_entries(fs: &impl ferret_vfs::Vfs, dir: &VfsPath) -> u64 {
     use ferret_vfs::ListingDetail;
     use futures::StreamExt;
     let mut stream = fs.read_dir(dir, ListingDetail::NamesOnly);
@@ -1669,6 +1669,7 @@ fn directory_detail(entry: &Entry) -> String {
 mod tests {
     use super::*;
     use ferret_preview::Pages;
+    use ferret_vfs::LocalFs;
 
     fn pdf_entry() -> Entry {
         Entry::new(

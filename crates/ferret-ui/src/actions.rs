@@ -52,6 +52,11 @@ actions!(
         ViewAsIcons,
         ToggleTheme,
         TogglePowerSearch,
+        /// Open the saved SSH connection editor (F-20).
+        NewConnection,
+        /// Send the selection to a saved server (F-22). The connection is
+        /// chosen from the submenu this opens, not by this action.
+        SendTo,
         OpenInTerminal,
         AddToFavorites,
         FocusFilter,
@@ -139,3 +144,17 @@ actions!(
         ToggleColumnSize
     ]
 );
+
+/// Send the current selection to one saved server (F-22).
+///
+/// Carries the connection's id because a menu built from the saved list needs
+/// one action per server, and the alternative — an action per record
+/// registered at startup — could not survive the list being edited.
+/// `no_json` because this is dispatched from a menu Ferret builds, never bound
+/// to a key or written in a keymap file: there is no id a person could type
+/// that would be meaningful.
+#[derive(Clone, PartialEq, Eq, Default, Debug, gpui::Action)]
+#[action(namespace = ferret, no_json)]
+pub struct SendToConnection {
+    pub id: String,
+}

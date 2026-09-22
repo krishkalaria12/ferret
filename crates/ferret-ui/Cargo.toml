@@ -11,6 +11,7 @@ repository.workspace = true
 ferret-git.workspace = true
 ferret-platform.workspace = true
 ferret-preview.workspace = true
+ferret-remote.workspace = true
 ferret-search.workspace = true
 ferret-settings.workspace = true
 ferret-terminal.workspace = true

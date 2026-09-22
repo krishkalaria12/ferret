@@ -18,7 +18,7 @@
 //! not on `EditorState`, so entering and leaving edit mode is a re-render —
 //! no buffer reset, no scroll or cursor jump.
 
-use super::{PaneState, PreviewPane};
+use super::{PaneState, PreviewPanel};
 use crate::state::FerretState;
 use ferret_preview::{Bom, LineEndings};
 use ferret_vfs::{FileIdentity, Vfs as _, VfsPath};
@@ -63,7 +63,7 @@ pub(crate) struct EditSession {
     pub conflict: Option<String>,
 }
 
-impl PreviewPane {
+impl PreviewPanel {
     /// Whether the current body offers in-place editing right now.
     ///
     /// O(1): a flag carried from the background load, never a re-decode.
@@ -210,7 +210,7 @@ impl PreviewPane {
         let bytes = ferret_preview::reencode(&fidelity, &current);
         let path = session.path.clone();
         let identity = session.identity;
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = self.window;
         cx.spawn(async move |pane, cx| {
             let result = fs.write_atomic(&path, &bytes, identity).await;

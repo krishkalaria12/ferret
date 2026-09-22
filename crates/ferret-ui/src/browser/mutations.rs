@@ -7,6 +7,17 @@
 
 use super::*;
 
+/// Why a delete is irreversible, which decides whether it may be skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermanentReason {
+    /// The user chose "Delete Permanently". Honours the settings toggle.
+    Asked,
+    /// The user chose Trash, but the items are on a server, which has none.
+    /// Always confirms: agreeing to skip confirmations for a *local*
+    /// permanent delete says nothing about this.
+    NoRemoteTrash,
+}
+
 impl Browser {
     pub(super) fn open_current_in_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.active().folder.read(cx).dir.clone();
@@ -130,17 +141,26 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) where
-        F: FnOnce(ferret_vfs::LocalFs, VfsPath) -> Fut + Send + 'static,
+        F: FnOnce(ferret_vfs::Router, VfsPath) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ferret_vfs::Result<()>> + Send + 'static,
     {
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
-        // Capture the initiating pane. If the user changes tabs while a slow
-        // volume creates the item, the rename must not land in whichever tab
-        // happens to be active when the operation completes.
+        // A mount has no watcher, so the new row would never appear on its
+        // own and the rename request would wait for a row that never comes.
+        let needs_reload = !path.is_local();
+        // Capture the initiating pane *and its folder*. If the user changes
+        // tabs while a slow volume creates the item, neither the rename nor
+        // the reload may land on whichever tab happens to be active when the
+        // operation completes — reloading the wrong one leaves the initiating
+        // folder stale and the rename waiting for a row that never arrives.
         let pane = self.active().pane.clone();
+        let folder = self.active().folder.clone();
         cx.spawn(async move |_, cx| match create(fs, path.clone()).await {
             Ok(()) => {
+                if needs_reload {
+                    folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
+                }
                 let _ = window_handle.update(cx, |_, _window, cx| {
                     pane.update(cx, |pane, cx| pane.request_rename_when_visible(path, cx));
                 });
@@ -159,11 +179,28 @@ impl Browser {
         if paths.is_empty() {
             return;
         }
+
+        // There is no trash on a server. Silently skipping the remote half of
+        // a selection would be the worst of the three options — the user
+        // pressed Delete and nothing happened — and quietly deleting it
+        // instead is exactly what the "trash before delete" gate forbids. So
+        // remote paths are split out and routed to the permanent path, which
+        // says so before it does it.
+        let (local, remote): (Vec<VfsPath>, Vec<VfsPath>) =
+            paths.into_iter().partition(VfsPath::is_local);
+
+        if !remote.is_empty() {
+            self.confirm_permanent_delete(remote, PermanentReason::NoRemoteTrash, window, cx);
+        }
+        if local.is_empty() {
+            return;
+        }
+
         let platform = cx.global::<FerretState>().platform.clone();
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let mut failures = Vec::new();
-            for path in paths {
+            for path in local {
                 let Some(local) = path.as_local().map(Path::to_path_buf) else {
                     continue;
                 };
@@ -191,28 +228,55 @@ impl Browser {
             return;
         }
 
-        // `settings.browser.confirm_permanent_delete`. On by default, and the
-        // schema says why trashing is never confirmed: it is reversible, and a
-        // dialog on every delete trains people to dismiss them. Someone who
-        // has turned this off has said they know what the action does.
-        if !cx
-            .global::<FerretState>()
-            .settings
-            .browser
-            .confirm_permanent_delete
+        self.confirm_permanent_delete(paths, PermanentReason::Asked, window, cx);
+    }
+
+    /// Confirm, then delete irreversibly.
+    ///
+    /// `reason` decides whether the confirmation can be skipped.
+    /// `settings.browser.confirm_permanent_delete` is on by default, and the
+    /// schema says why trashing is never confirmed: it is reversible, and a
+    /// dialog on every delete trains people to dismiss them. Someone who has
+    /// turned it off has said they know what Delete Permanently does — but
+    /// they have *not* said anything about a server with no trash, so
+    /// [`PermanentReason::NoRemoteTrash`] always asks.
+    fn confirm_permanent_delete(
+        &mut self,
+        paths: Vec<VfsPath>,
+        reason: PermanentReason,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let skippable = reason == PermanentReason::Asked;
+        if skippable
+            && !cx
+                .global::<FerretState>()
+                .settings
+                .browser
+                .confirm_permanent_delete
         {
             self.delete_now(paths, window, cx);
             return;
         }
 
         let count = paths.len();
+        let description = match reason {
+            PermanentReason::Asked => {
+                format!("{count} item(s) will be deleted permanently. This can't be undone.")
+            }
+            PermanentReason::NoRemoteTrash => format!(
+                "{count} item(s) are on a server, which has no trash. \
+                 They will be deleted permanently. This can't be undone."
+            ),
+        };
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             alert
                 .title("Delete Permanently?")
-                .description(format!(
-                    "{count} item(s) will be deleted permanently. This can't be undone."
-                ))
+                .description(description.clone())
                 .confirm()
                 .on_ok({
                     let paths = paths.clone();
@@ -232,18 +296,24 @@ impl Browser {
     /// Delete without asking. The confirmation, where there is one, has
     /// already happened.
     fn delete_now(&mut self, paths: Vec<VfsPath>, window: &mut Window, cx: &mut Context<Self>) {
+        // A mount has no watcher, so nothing else will notice the rows are
+        // gone. The reload is scheduled here rather than left to the user.
+        let needs_reload = paths.iter().any(|path| !path.is_local());
         // Through the Vfs, not the platform: deleting irreversibly is
         // filesystem mechanics with nothing OS-specific in it, and
         // `RemoveMode::Permanent` is where the parallel tree delete lives
         // (D-34).
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let mut failures = Vec::new();
             for path in paths {
                 if let Err(err) = fs.remove(&path, ferret_vfs::RemoveMode::Permanent).await {
                     failures.push(err.to_string());
                 }
+            }
+            if needs_reload {
+                let _ = this.update(cx, |this, cx| this.refresh(cx));
             }
             if let Some(message) = summarize_failures("be deleted", &failures) {
                 let _ = window_handle.update(cx, |_, window, cx| {
@@ -260,6 +330,11 @@ impl Browser {
     /// was held. The cross-volume case is not guessed at from the paths —
     /// `rename` reports `CrossVolume` and the copy path takes over, which is
     /// the only answer that stays right for mount points and network shares.
+    ///
+    /// A drop that spans local disk and a mount is a different operation
+    /// entirely: the router refuses it by design, because moving those bytes
+    /// is a network transfer that needs progress and a cancel. It is handed to
+    /// the transfer queue instead of failing.
     pub(super) fn transfer(
         &mut self,
         sources: Vec<VfsPath>,
@@ -268,13 +343,19 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let fs = cx.global::<FerretState>().fs;
+        if let Some((sources, dest)) = crossing_backends(&sources, &dest) {
+            self.transfer_across_backends(sources, dest, window, cx);
+            return;
+        }
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
         // Names are settled here, so a copy beside its original gets "file 2"
         // rather than failing or overwriting.
         let planned = self.plan_names(sources, &dest, cx);
+        // Either end being remote means no watcher saw the change.
+        let needs_reload = !dest.is_local() || planned.iter().any(|(source, _)| !source.is_local());
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let mut failures = Vec::new();
 
             for (src, target) in planned {
@@ -298,6 +379,10 @@ impl Browser {
                 if let Err(err) = result {
                     failures.push(err.to_string());
                 }
+            }
+
+            if needs_reload {
+                let _ = this.update(cx, |this, cx| this.refresh(cx));
             }
 
             let verb = if force_copy { "copy" } else { "move" };
@@ -382,7 +467,7 @@ impl Browser {
             .filter(|src| !(cut && src.parent().as_ref() == Some(&dest_dir)))
             .collect();
         let planned = self.plan_names(sources, &dest_dir, cx);
-        let fs = cx.global::<FerretState>().fs;
+        let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
 
         cx.spawn(async move |_, cx| {
@@ -439,6 +524,13 @@ impl Browser {
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
+        // A mount answers from a short-lived cache, so Refresh has to say so
+        // first — otherwise ⌘R over a remote folder could return exactly what
+        // is already on screen, which is the opposite of what it promises.
+        // Local disk implements this as a no-op.
+        let dir = self.active().folder.read(cx).dir.clone();
+        cx.global::<FerretState>().fs.invalidate(&dir);
+
         self.active()
             .folder
             .update(cx, |f, cx| f.reload_preserving_state(cx));
@@ -621,4 +713,83 @@ fn read_clipboard_paths(cx: &App) -> Option<Vec<VfsPath>> {
         .map(VfsPath::local)
         .collect();
     (!paths.is_empty()).then_some(paths)
+}
+
+/// The sources that would cross a backend boundary landing in `dest`, if any.
+///
+/// Returns `None` when every source is on the same side as the destination,
+/// which is the ordinary drop the `Vfs` handles directly. A mixed selection
+/// keeps only the crossing half here; the rest is refused rather than
+/// half-handled, because a drag that silently did two different things to two
+/// halves of one selection would be worse than one that did nothing.
+fn crossing_backends(sources: &[VfsPath], dest: &VfsPath) -> Option<(Vec<VfsPath>, VfsPath)> {
+    let crossing: Vec<VfsPath> = sources
+        .iter()
+        .filter(|source| !same_backend(source, dest))
+        .cloned()
+        .collect();
+    (!crossing.is_empty()).then(|| (crossing, dest.clone()))
+}
+
+/// Whether two paths live on the same backend, and so can be renamed or copied
+/// between without moving bytes across a link.
+fn same_backend(a: &VfsPath, b: &VfsPath) -> bool {
+    match (a, b) {
+        (VfsPath::Local(_), VfsPath::Local(_)) => true,
+        (VfsPath::Remote { mount: x, .. }, VfsPath::Remote { mount: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod transfer_routing_tests {
+    use super::*;
+    use ferret_vfs::MountId;
+
+    #[test]
+    fn a_drop_within_one_backend_is_not_a_transfer() {
+        let local = VfsPath::local("/tmp/a");
+        let dest = VfsPath::local("/tmp/dir");
+        assert!(crossing_backends(&[local], &dest).is_none());
+
+        let remote = VfsPath::remote(MountId(1), "/srv/a");
+        let remote_dest = VfsPath::remote(MountId(1), "/srv/dir");
+        assert!(crossing_backends(&[remote], &remote_dest).is_none());
+    }
+
+    #[test]
+    fn a_drop_that_crosses_is_routed_to_the_queue() {
+        // Both directions: the router refuses each of these pairs, so each has
+        // to become a transfer rather than an error.
+        let up = crossing_backends(
+            &[VfsPath::local("/tmp/a")],
+            &VfsPath::remote(MountId(1), "/srv"),
+        );
+        assert_eq!(up.expect("upload").0.len(), 1);
+
+        let down = crossing_backends(
+            &[VfsPath::remote(MountId(1), "/srv/a")],
+            &VfsPath::local("/tmp"),
+        );
+        assert_eq!(down.expect("download").0.len(), 1);
+
+        // Two servers are two backends, and neither is the destination's.
+        let across = crossing_backends(
+            &[VfsPath::remote(MountId(2), "/srv/a")],
+            &VfsPath::remote(MountId(1), "/srv"),
+        );
+        assert_eq!(across.expect("cross-mount").0.len(), 1);
+    }
+
+    #[test]
+    fn a_mixed_selection_only_routes_the_crossing_half() {
+        let sources = vec![
+            VfsPath::local("/tmp/a"),
+            VfsPath::remote(MountId(1), "/srv/b"),
+        ];
+        let (crossing, _) = crossing_backends(&sources, &VfsPath::local("/tmp/dir"))
+            .expect("the remote source crosses");
+        assert_eq!(crossing.len(), 1);
+        assert!(!crossing[0].is_local());
+    }
 }

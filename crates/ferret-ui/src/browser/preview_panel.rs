@@ -1,7 +1,7 @@
 //! The preview pane's place in the shell: visibility, width, the divider
 //! drag, selection plumbing and the preview-local actions.
 //!
-//! The pane itself (`crate::preview::PreviewPane`) owns the pipeline —
+//! The pane itself (`crate::preview::PreviewPanel`) owns the pipeline —
 //! debounce, background reads, the editor entity. This module owns the
 //! shell around it: where it sits, how wide it is, and what feeds it.
 //! Visibility and width persist in `settings.preview`; the divider mirrors
