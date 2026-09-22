@@ -28,12 +28,21 @@ impl PreviewPane {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let bg = cx.theme().background;
-        let footer = match &self.state {
+        let mut footer = match &self.state {
             PaneState::Ready { footer, .. }
             | PaneState::ReadyMd { footer, .. }
-            | PaneState::Image { footer, .. } => footer.clone(),
+            | PaneState::Image { footer, .. }
+            | PaneState::Table { footer, .. } => footer.clone(),
             _ => None,
         };
+        // A refused save is the footer with something to say: the conflict
+        // names what happened and what to do, beside the buffer it kept.
+        if let Some(conflict) = self.edit_conflict() {
+            footer = Some(match footer {
+                Some(existing) => format!("{existing} {conflict}"),
+                None => conflict.to_string(),
+            });
+        }
         v_flex()
             .id("preview-pane")
             .key_context(context::PREVIEW)
@@ -43,6 +52,9 @@ impl PreviewPane {
             .border_color(cx.theme().border)
             .child(self.render_header(cx))
             .child(self.render_body(cx))
+            // The PDF bar carries page position in the footer's slot: one
+            // muted line, and the only interactive footer in the pane.
+            .children(self.render_pdf_bar(cx))
             .when_some(footer, |el, footer| {
                 el.child(self.render_footer(footer, cx))
             })
@@ -123,7 +135,22 @@ impl PreviewPane {
                 bitmap_size,
                 zoom,
                 ..
+            }
+            | PaneState::Pdf {
+                render_image,
+                bitmap_size,
+                zoom,
+                ..
             } => self.render_image(render_image, *bitmap_size, *zoom, cx),
+            // The sample grid: one virtualised `DataTable` whose delegate
+            // holds the rows as shared strings. Sorting happens in the
+            // delegate, header clicks only — never a full-file read.
+            PaneState::Table { grid, .. } => div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(grid.element())
+                .into_any_element(),
             PaneState::Unsupported { entry, message, .. } => {
                 self.render_fallback(entry, message, cx)
             }
@@ -348,7 +375,7 @@ impl Render for PreviewPane {
 ///   (missing targets land on the existing gone handling). No filesystem
 ///   calls happen here: the join is lexical, `..` is refused outright, and
 ///   remote documents get no file links at all.
-fn handle_markdown_link(
+pub(super) fn handle_markdown_link(
     browser: &gpui::WeakEntity<crate::Browser>,
     base: Option<PathBuf>,
     remote: bool,

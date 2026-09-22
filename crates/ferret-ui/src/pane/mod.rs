@@ -497,7 +497,9 @@ impl FilePane {
             && !e.keystroke.modifiers.control
             && !e.keystroke.modifiers.platform
             && !e.keystroke.modifiers.alt;
-        if !printable {
+        // Space is reserved for the F-75 overlay: it must never join a
+        // type-ahead prefix, whichever way the keystroke dispatches.
+        if !printable || key == " " {
             return;
         }
 

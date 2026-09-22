@@ -43,7 +43,7 @@ use crate::actions;
 use crate::folder::{Folder, FolderEvent, ListingProfile, SortRules};
 use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
-use crate::preview::PreviewPane;
+use crate::preview::{PreviewOverlay, PreviewPane};
 use crate::state::FerretState;
 
 use commit_dialog::CommitDialog;
@@ -257,6 +257,22 @@ pub struct Browser {
     /// The commit dialog's state, kept across opens so a message survives an
     /// accidental Escape. `None` until the dialog is opened for the first time.
     commit_dialog: Option<Entity<CommitDialog>>,
+    /// An edit-guard answer held while the Save it depends on is in flight.
+    ///
+    /// Save is async: the dialog closes at once, and this remembers where to
+    /// go when the backend answers. `None` while no guarded save is pending.
+    /// See `preview_panel.rs` (PV-Q02).
+    guard_after_save: Option<preview_panel::GuardPending>,
+    /// Whether the unsaved-changes dialog is currently open. A second
+    /// selection change while it stands replaces the pending action rather
+    /// than stacking a second copy of the same dialog.
+    guard_open: bool,
+    /// The full-window preview overlay (F-75), while open. The dialog layer
+    /// owns the presentation; this remembers the entity for focus and the
+    /// flag for toggle semantics, so a second `space` closes rather than
+    /// stacking a second copy.
+    preview_overlay: Option<Entity<PreviewOverlay>>,
+    overlay_open: bool,
     /// Re-reads git status when the window comes back to the front. Held here
     /// so it lasts as long as the window does; see
     /// [`Browser::observe_git_activation`] for why the feature needs it.
@@ -401,6 +417,10 @@ impl Browser {
             sidebar_focus: cx.focus_handle(),
             git: GitPanel::new(),
             commit_dialog: None,
+            guard_after_save: None,
+            guard_open: false,
+            preview_overlay: None,
+            overlay_open: false,
             _git_activation: Self::observe_git_activation(window, cx),
         };
         this.push_tab(start_directory(), window, cx);

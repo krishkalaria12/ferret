@@ -66,6 +66,14 @@ fn register_actions(cx: &mut App) {
     // place a config write is allowed to block.
     cx.on_app_quit(|cx: &mut App| {
         ferret_ui::flush_pending_saves(cx);
+        // Quitting cannot ask about unsaved preview edits — the application
+        // is already going away — so dirty buffers are preserved as recovery
+        // copies instead of being discarded silently (PV-Q02). No autosave,
+        // no surprise writes to the user's files: copies live in the cache
+        // directory, and their paths go to stderr where scripts can see them.
+        for copy in ferret_ui::preserve_edit_recovery_copies(cx) {
+            eprintln!("ferret: unsaved edits preserved in {}", copy.display());
+        }
         async {}
     })
     .detach();
@@ -187,6 +195,33 @@ fn bind_keys(cx: &mut App) {
             "ctrl-0",
             browser_actions::PreviewZoomReset,
             OUTSIDE_TERMINAL,
+        ),
+        // In-place save (F-36). Scoped to the preview: everywhere else
+        // Cmd/Ctrl-S keeps whatever meaning it already had, and inside the
+        // file pane it must not shadow anything.
+        KeyBinding::new(
+            "cmd-s",
+            browser_actions::PreviewEditSave,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-s",
+            browser_actions::PreviewEditSave,
+            Some(context::PREVIEW),
+        ),
+        // Full-window preview (F-75). `space` is the same key on both
+        // platforms, so one binding covers macOS and Windows. Scoped to the
+        // file list on open — never a text field — and to the overlay
+        // itself on close, where no text field exists to steal from.
+        KeyBinding::new(
+            "space",
+            browser_actions::PreviewOverlayToggle,
+            Some(context::FILE_PANE),
+        ),
+        KeyBinding::new(
+            "space",
+            browser_actions::PreviewOverlayToggle,
+            Some(context::OVERLAY),
         ),
         // View modes.
         KeyBinding::new("cmd-1", browser_actions::ViewAsList, None),

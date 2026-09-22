@@ -46,6 +46,62 @@ pub fn flush_pending_saves(cx: &mut gpui::App) {
     }
 }
 
+/// Preserve unsaved preview edits as recovery copies at quit (PV-Q02).
+///
+/// Quitting cannot open the unsaved-changes dialog — the application is
+/// already going away — and silently discarding a dirty buffer would be the
+/// data-loss failure edit mode exists to prevent. So every dirty buffer in
+/// every window is written to the cache directory, and the paths are
+/// returned for the binary to report. The one config write is not the only
+/// write allowed to block at quit: this one is too, because there is no
+/// next frame left to protect.
+///
+/// Each copy is named after its file plus the process id, so a second quit
+/// never overwrites the first, and stale copies are the user's to delete —
+/// Ferret never deletes something it did not create through the trash.
+pub fn preserve_edit_recovery_copies(cx: &mut gpui::App) -> Vec<std::path::PathBuf> {
+    let mut saved = Vec::new();
+    let dir = recovery_dir();
+    for window in cx.windows() {
+        let buffers: Vec<(ferret_vfs::VfsPath, String)> = window
+            .read::<RootView, _, _>(cx, |root, cx| {
+                root.read(cx).browser().read(cx).dirty_edit_buffers(cx)
+            })
+            .unwrap_or_default();
+        for (path, text) in buffers {
+            let name = path
+                .file_name()
+                .map(sanitize_recovery_name)
+                .unwrap_or_else(|| "untitled".to_string());
+            let dest = dir.join(format!("{name}.{}-{}.txt", std::process::id(), saved.len()));
+            if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&dest, text).is_ok() {
+                saved.push(dest);
+            }
+        }
+    }
+    saved
+}
+
+fn recovery_dir() -> std::path::PathBuf {
+    dirs::cache_dir()
+        .map(|dir| dir.join("ferret").join("recovery"))
+        .unwrap_or_else(|| std::env::temp_dir().join("ferret-recovery"))
+}
+
+fn sanitize_recovery_name(name: &str) -> String {
+    let kept: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    kept.chars().take(64).collect()
+}
+
 use gpui::{
     AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
 };

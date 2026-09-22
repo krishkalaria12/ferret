@@ -58,9 +58,9 @@ impl Browser {
                             .ghost()
                             .xsmall()
                             .icon(gpui_component::IconName::Close)
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 if let Some(this) = this.upgrade() {
-                                    this.update(cx, |this, cx| this.close_tab(ix, cx));
+                                    this.update(cx, |this, cx| this.close_tab(ix, window, cx));
                                 }
                             }),
                     );
@@ -99,29 +99,31 @@ impl Browser {
             // its own mouse-down, so a press is never observable here — but a
             // move with the button held is, and the first one still lands on
             // the tab that was pressed.
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                if event.pressed_button != Some(gpui::MouseButton::Left) {
-                    this.end_tab_drag(cx);
-                    return;
-                }
-                let Some(ix) = this.tab_at(event.position.x) else {
-                    return;
-                };
-                match this.tab_drag {
-                    None => {
-                        this.tab_drag = Some(ix);
-                        cx.notify();
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.pressed_button != Some(gpui::MouseButton::Left) {
+                        this.end_tab_drag(cx);
+                        return;
                     }
-                    Some(_) => this.move_dragged_tab_to(ix, cx),
-                }
-            }))
+                    let Some(ix) = this.tab_at(event.position.x) else {
+                        return;
+                    };
+                    match this.tab_drag {
+                        None => {
+                            this.tab_drag = Some(ix);
+                            cx.notify();
+                        }
+                        Some(_) => this.move_dragged_tab_to(ix, window, cx),
+                    }
+                }),
+            )
             .child(
                 TabBar::new("browser-tabs")
                     .max_width(px(super::TAB_MAX_WIDTH))
                     .selected_index(self.active)
                     .text_size(px(12.5))
-                    .on_click(cx.listener(|this, ix: &usize, _window, cx| {
-                        this.activate_tab(*ix, cx);
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.activate_tab(*ix, window, cx);
                     }))
                     .children(tabs),
             )
@@ -141,7 +143,7 @@ impl Browser {
 
     /// Live tab reordering: the dragged tab takes `to`'s slot and everything
     /// between shifts, which is what makes the strip follow the pointer.
-    fn move_dragged_tab_to(&mut self, to: usize, cx: &mut Context<Self>) {
+    fn move_dragged_tab_to(&mut self, to: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(from) = self.tab_drag else {
             return;
         };
@@ -151,7 +153,7 @@ impl Browser {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
         self.tab_drag = Some(to);
-        self.activate_tab(to, cx);
+        self.activate_tab(to, window, cx);
     }
 
     pub(super) fn end_tab_drag(&mut self, cx: &mut Context<Self>) {

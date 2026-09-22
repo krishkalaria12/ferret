@@ -2,19 +2,16 @@
 //!
 //! Left: the file name (truncated in the middle, never wrapped), then a
 //! muted second line — kind · size · modified, where the kind is the
-//! resolved language or format name, not the extension. Right: the overflow
-//! menu (Open with…, Reveal, Copy path, Word wrap, Line numbers). Keeping
-//! the header type-independent is what makes arrow-keying feel like one
-//! surface rather than seven.
-//!
-//! No *Edit* button yet: F-36 needs `Vfs::write_atomic` with its conflict
-//! contract first (PV-R01), and the button appears only for complete,
-//! lossless text on a backend with the atomic-save capability.
+//! resolved language or format name, not the extension. Right: the Edit
+//! button for saveable text (F-36), Save / Revert while editing, and the
+//! overflow menu (Open with…, Reveal, Copy path, Word wrap, Line numbers).
+//! Keeping the header type-independent is what makes arrow-keying feel like
+//! one surface rather than seven.
 
 use super::*;
 use gpui::{IntoElement, ParentElement as _, SharedString, Styled as _, px};
 use gpui_component::{
-    ActiveTheme as _, Icon,
+    ActiveTheme as _, Disableable as _, Icon,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::DropdownMenu as _,
@@ -65,6 +62,12 @@ impl PreviewPane {
             PaneState::Image { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
+            PaneState::Table { entry, detail, .. } => {
+                (Self::display_name(entry.name()), detail.clone())
+            }
+            PaneState::Pdf { entry, detail, .. } => {
+                (Self::display_name(entry.name()), detail.clone())
+            }
             PaneState::Unsupported { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
@@ -83,7 +86,37 @@ impl PreviewPane {
                     if show_source { "Rendered" } else { "Source" }
                 },
             );
-        let is_image = matches!(self.state, PaneState::Image { .. });
+        let is_image = matches!(self.state, PaneState::Image { .. } | PaneState::Pdf { .. });
+        // Page navigation lives in the footer bar too; the menu holds the
+        // same two actions for discoverability, disabled at the document's
+        // ends or while a turn is in flight.
+        let pdf_nav = match &self.state {
+            PaneState::Pdf {
+                pages,
+                loading_page,
+                ..
+            } => Some((
+                pages.current > 1 && !loading_page,
+                pages.current < pages.total && !loading_page,
+            )),
+            _ => None,
+        };
+        // The reversible header inference toggle: offered only when the
+        // parser detected a header, and labelled by the state it leaves.
+        let csv_header = match &self.state {
+            PaneState::Table { grid, .. } => grid.header_state(cx),
+            _ => None,
+        };
+        // F-36: Edit for complete, lossless text on an atomic-save backend;
+        // Save / Revert while the buffer is pinned. The Save button labels
+        // the dirty state ("Save •") so the header says what would be lost.
+        let edit_buttons = if self.editing.is_some() {
+            EditButtons::Editing
+        } else if self.can_edit() {
+            EditButtons::Offer
+        } else {
+            EditButtons::None
+        };
 
         h_flex()
             .flex_shrink_0()
@@ -113,6 +146,7 @@ impl PreviewPane {
                             .child(SharedString::from(detail)),
                     ),
             )
+            .children(self.render_edit_buttons(edit_buttons, cx))
             .child(
                 Button::new("preview-overflow")
                     .ghost()
@@ -138,10 +172,107 @@ impl PreviewPane {
                         } else {
                             menu
                         };
+                        let menu = match csv_header {
+                            Some(true) => menu
+                                .menu(
+                                    "Show first row as data",
+                                    Box::new(actions::PreviewToggleCsvHeader),
+                                )
+                                .separator(),
+                            Some(false) => menu
+                                .menu(
+                                    "Use first row as header",
+                                    Box::new(actions::PreviewToggleCsvHeader),
+                                )
+                                .separator(),
+                            None => menu,
+                        };
+                        let menu = match pdf_nav {
+                            Some((prev, next)) => menu
+                                .menu_with_disabled(
+                                    "Previous page",
+                                    Box::new(actions::PreviewPdfPrev),
+                                    !prev,
+                                )
+                                .menu_with_disabled(
+                                    "Next page",
+                                    Box::new(actions::PreviewPdfNext),
+                                    !next,
+                                )
+                                .separator(),
+                            None => menu,
+                        };
                         menu.menu("Word wrap", Box::new(actions::PreviewToggleWrap))
                             .menu("Line numbers", Box::new(actions::PreviewToggleLineNumbers))
                     }),
             )
+    }
+}
+
+/// Which edit controls the header shows: the reference puts *Edit*
+/// right-aligned in the header, and Save / Revert take its place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditButtons {
+    None,
+    Offer,
+    Editing,
+}
+
+impl PreviewPane {
+    fn render_edit_buttons(
+        &self,
+        buttons: EditButtons,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        match buttons {
+            EditButtons::None => None,
+            EditButtons::Offer => Some(
+                Button::new("preview-edit")
+                    .ghost()
+                    .label("Edit")
+                    .tooltip("Edit this file in place")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.begin_edit(window, cx);
+                    }))
+                    .into_any_element(),
+            ),
+            EditButtons::Editing => {
+                let dirty = self.is_dirty();
+                let saving = self.is_saving();
+                let save_label = if saving {
+                    "Saving…"
+                } else if dirty {
+                    "Save •"
+                } else {
+                    "Save"
+                };
+                Some(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("preview-revert")
+                                .ghost()
+                                .label("Revert")
+                                .tooltip("Throw away the edits")
+                                .disabled(!dirty || saving)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.revert_edit(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("preview-save")
+                                .primary()
+                                .label(save_label)
+                                .tooltip("Save atomically (⌘S)")
+                                .disabled(!dirty || saving)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save_edit(window, cx);
+                                })),
+                        )
+                        .into_any_element(),
+                )
+            }
+        }
     }
 }
 

@@ -162,7 +162,7 @@ impl Browser {
                     .tooltip("Toggle Preview")
                     .when(self.preview_visible, |button| button.primary())
                     .when(!self.preview_visible, |button| button.ghost())
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_preview(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))),
             )
             .child(
                 tool_button(

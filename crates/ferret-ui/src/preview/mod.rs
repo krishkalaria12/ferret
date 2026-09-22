@@ -12,25 +12,39 @@
 //! one generation, debounced and cancel-by-drop, and one render arm per
 //! state. `Render` only reads.
 //!
-//! Later steps add `grammars.rs` (extended tree-sitter registrations),
-//! `edit.rs` (F-36) and `overlay.rs` (F-75). They land here, inside this
-//! module, so a `gpui-component` bump touches one directory (PV-R04).
+//! Sibling files own one concern each — `grammars.rs` the extended
+//! tree-sitter registrations, `edit.rs` F-36, `grid.rs` the CSV table,
+//! `pdf.rs` page navigation, `overlay.rs` F-75 — so a `gpui-component`
+//! bump touches one directory (PV-R04).
 
+mod edit;
 mod grammars;
+mod grid;
 mod header;
+mod overlay;
+mod pdf;
 mod render;
+
+pub(crate) use overlay::{OverlaySnapshot, PreviewOverlay, SnapshotBody, overlay_geometry};
 
 use std::time::Instant;
 
 use std::path::PathBuf;
 
 use crate::browser::Browser;
-use ferret_preview::{DecodedImage, Frame, Preview, Truncation};
-use ferret_vfs::{Entry, EntryKind, LocalFs, Vfs as _, VfsError, VfsPath};
-use gpui::{App, AppContext as _, Context, Entity, FocusHandle, Focusable, Task, Window};
+use edit::{EditOriginal, EditSession};
+use ferret_preview::{
+    Bitmap, DecodedImage, Frame, Pages, ParsedTable, PdfUnavailable, Preview, RenderedPage,
+    Truncation,
+};
+use ferret_vfs::{Entry, EntryKind, FileIdentity, LocalFs, Vfs as _, VfsError, VfsPath};
+use gpui::{
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window,
+};
 use gpui_component::WindowExt as _;
 use gpui_component::input::{Editor, EditorState};
 use gpui_component::text::{TextView, TextViewState};
+use grid::CsvGrid;
 use smol_str::SmolStr;
 
 use crate::format::{format_date, format_size};
@@ -102,8 +116,14 @@ enum PaneState {
     Ready {
         entry: Entry,
         detail: String,
+        language: SmolStr,
         wrap: bool,
         footer: Option<String>,
+        /// The loaded bytes plus their identity, for in-place editing (F-36).
+        /// `Some` only for complete, lossless text on a backend with the
+        /// atomic-save capability — the Edit button reads this, never a
+        /// second guess about the file.
+        original: Option<EditOriginal>,
     },
     /// Rendered Markdown. The document view holds the sanitized source;
     /// the editor holds the original for the source toggle.
@@ -114,6 +134,10 @@ enum PaneState {
         show_source: bool,
         base: Option<PathBuf>,
         remote: bool,
+        /// The sanitized source the document view shows, retained so the
+        /// F-75 overlay reuses it without re-sanitizing the file.
+        sanitized: String,
+        original: Option<EditOriginal>,
     },
     Unsupported {
         entry: Entry,
@@ -131,6 +155,33 @@ enum PaneState {
         zoom: f32,
         footer: Option<String>,
     },
+    /// A CSV/TSV sample in the virtualised grid (F-35). The delegate holds
+    /// the rows as shared strings; `table` is retained so the F-75 overlay
+    /// can build its own grid without re-reading the file.
+    Table {
+        entry: Entry,
+        detail: String,
+        grid: CsvGrid,
+        table: std::sync::Arc<ParsedTable>,
+        footer: Option<String>,
+    },
+    /// A PDF page through the bundled backend (F-34). The bitmap is built
+    /// once per page turn at apply time; `pdf` is retained so navigation
+    /// re-renders from memory. `pdf_gen` serialises page requests the way
+    /// the pane generation serialises selections — a turning page never
+    /// paints over a newer selection, and a new selection drops the turn.
+    Pdf {
+        entry: Entry,
+        detail: String,
+        render_image: std::sync::Arc<gpui::RenderImage>,
+        bitmap_size: (u32, u32),
+        zoom: f32,
+        pdf: std::sync::Arc<Vec<u8>>,
+        pages: Pages,
+        pdf_gen: u64,
+        loading_page: bool,
+        page_error: Option<String>,
+    },
     Error {
         name: String,
         message: String,
@@ -145,7 +196,29 @@ impl PaneState {
             | PaneState::Ready { entry, .. }
             | PaneState::ReadyMd { entry, .. }
             | PaneState::Image { entry, .. }
+            | PaneState::Table { entry, .. }
+            | PaneState::Pdf { entry, .. }
             | PaneState::Unsupported { entry, .. } => Some(entry),
+            _ => None,
+        }
+    }
+
+    /// The edit snapshot, when the current body is saveable text.
+    fn original(&self) -> Option<&EditOriginal> {
+        match self {
+            PaneState::Ready { original, .. } | PaneState::ReadyMd { original, .. } => {
+                original.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    /// The edit snapshot, mutably — for re-pinning after a save.
+    fn original_mut(&mut self) -> Option<&mut EditOriginal> {
+        match self {
+            PaneState::Ready { original, .. } | PaneState::ReadyMd { original, .. } => {
+                original.as_mut()
+            }
             _ => None,
         }
     }
@@ -163,11 +236,23 @@ pub struct PreviewPane {
     /// the bytes land (the editor's `set_value` needs one).
     window: gpui::AnyWindowHandle,
     state: PaneState,
+    /// The in-progress edit session (F-36), if the previewed text is being
+    /// edited. While this is `Some`, selection changes are blocked until the
+    /// user answers Save / Discard / Cancel — a preview that silently
+    /// discards an edit on arrow-down is the data-loss failure in miniature.
+    editing: Option<EditSession>,
+    /// Set around programmatic `set_value` calls so the dirty observer can
+    /// tell a load from a keystroke.
+    suppress_dirty: bool,
     /// Bumps per selection; results carry theirs and stale ones are
     /// discarded. One generation, debounced, cancel-by-drop (PV-D11).
     generation: u64,
     loading_since: Option<Instant>,
     tasks: Vec<Task<()>>,
+    /// Held so the dirty observer below stays subscribed for the pane's
+    /// life. Dropping a `Subscription` unsubscribes, so this is never read —
+    /// only kept.
+    _subscriptions: Vec<Subscription>,
     /// Cached browsed-directory totals for the [`PaneState::Empty`] line.
     empty_cache: Option<(VfsPath, usize, Option<u64>)>,
     /// Session word-wrap override from the overflow menu. `None` means the
@@ -192,8 +277,8 @@ impl PreviewPane {
                 .soft_wrap(true)
         });
         let docview = cx.new(|cx| TextViewState::markdown("", cx));
-        Self {
-            editor,
+        let mut pane = Self {
+            editor: editor.clone(),
             docview,
             browser,
             focus: cx.focus_handle(),
@@ -203,12 +288,23 @@ impl PreviewPane {
                 rows: 0,
                 bytes: None,
             },
+            editing: None,
+            suppress_dirty: false,
             generation: 0,
             loading_since: None,
             tasks: Vec::new(),
             empty_cache: None,
             wrap_override: None,
-        }
+            _subscriptions: Vec::new(),
+        };
+        // Dirty tracking without per-frame work: the editor notifies on
+        // every change, and this fires once per change — never per frame —
+        // flipping one bool. Programmatic loads set `suppress_dirty` around
+        // `set_value` (which also notifies) so a new file never looks dirty.
+        pane._subscriptions.push(cx.observe(&editor, |this, _, cx| {
+            this.on_editor_changed(cx);
+        }));
+        pane
     }
 
     /// The editor's focus, for the focus-preview shortcut.
@@ -244,7 +340,7 @@ impl PreviewPane {
     /// (out). Resets on selection change: zoom is per-preview, never
     /// carried across files.
     pub(crate) fn zoom_image(&mut self, direction: i32, cx: &mut Context<Self>) {
-        if let PaneState::Image { zoom, .. } = &mut self.state {
+        if let PaneState::Image { zoom, .. } | PaneState::Pdf { zoom, .. } = &mut self.state {
             if *zoom <= 0.0 {
                 *zoom = 1.0;
             } else if direction > 0 {
@@ -258,7 +354,7 @@ impl PreviewPane {
 
     /// Back to fit-to-pane.
     pub(crate) fn zoom_image_reset(&mut self, cx: &mut Context<Self>) {
-        if let PaneState::Image { zoom, .. } = &mut self.state {
+        if let PaneState::Image { zoom, .. } | PaneState::Pdf { zoom, .. } = &mut self.state {
             *zoom = 0.0;
             cx.notify();
         }
@@ -289,6 +385,22 @@ impl PreviewPane {
     /// key-repeat sweep settles on one request. Replacing `tasks` drops the
     /// previous requests, which is what cancels them.
     pub fn set_input(&mut self, input: PreviewInput, cx: &mut Context<Self>) {
+        // An edit session pins its file: re-selecting the same path (a
+        // watcher refresh, a cancelled guard, a tab switch back) keeps the
+        // buffer, the cursor and the dirty flag exactly where they are.
+        // Anything for a *different* path while dirty never reaches here —
+        // the browser's guard holds it for Save / Discard / Cancel first.
+        if let SelectedInput::Single(entry) = &input.selected
+            && self.editing_path().is_some_and(|path| path == entry.path)
+        {
+            cx.notify();
+            return;
+        }
+        // A load replaces the buffer, which ends any clean edit session
+        // still standing. A *dirty* session never reaches here: the
+        // browser's guard holds different-path inputs for Save / Discard /
+        // Cancel first, so clearing here cannot lose an edit.
+        self.editing = None;
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.tasks.clear();
@@ -354,6 +466,84 @@ impl PreviewPane {
     /// The path the pane is showing, for Copy path and the header buttons.
     pub(crate) fn previewed_path(&self) -> Option<&VfsPath> {
         self.state.entry().map(|entry| &entry.path)
+    }
+
+    /// Snapshot the computed value for the F-75 overlay: shared bitmaps by
+    /// `Arc`, text by one bounded clone — never a re-read.
+    ///
+    /// `None` when the pane holds nothing reusable (empty, loading,
+    /// directory, message states): the overlay runs the pipeline on demand
+    /// instead. Editing included: the snapshot reads the live buffer, so
+    /// the overlay shows what is on screen, saved or not.
+    pub(crate) fn overlay_snapshot(&self, cx: &App) -> Option<OverlaySnapshot> {
+        let entry = self.state.entry()?.clone();
+        let title = Self::display_name(entry.name());
+        let body = match &self.state {
+            PaneState::Ready {
+                language,
+                wrap,
+                footer,
+                ..
+            } => SnapshotBody::Text {
+                text: self.editor.read(cx).value().to_string(),
+                language: language.clone(),
+                wrap: *wrap,
+                footer: footer.clone(),
+            },
+            PaneState::ReadyMd {
+                footer,
+                base,
+                remote,
+                sanitized,
+                ..
+            } => SnapshotBody::Markdown {
+                sanitized: sanitized.clone(),
+                base: base.clone(),
+                remote: *remote,
+                footer: footer.clone(),
+            },
+            PaneState::Image {
+                render_image,
+                bitmap_size,
+                footer,
+                ..
+            } => SnapshotBody::Image {
+                render_image: render_image.clone(),
+                bitmap_size: *bitmap_size,
+                footer: footer.clone(),
+            },
+            PaneState::Table { table, footer, .. } => SnapshotBody::Table {
+                table: table.clone(),
+                footer: footer.clone(),
+            },
+            PaneState::Pdf {
+                render_image,
+                bitmap_size,
+                pdf,
+                pages,
+                ..
+            } => SnapshotBody::Pdf {
+                render_image: render_image.clone(),
+                bitmap_size: *bitmap_size,
+                pdf: pdf.clone(),
+                pages: *pages,
+            },
+            _ => return None,
+        };
+        let detail = match &self.state {
+            PaneState::Ready { detail, .. }
+            | PaneState::ReadyMd { detail, .. }
+            | PaneState::Image { detail, .. }
+            | PaneState::Table { detail, .. }
+            | PaneState::Pdf { detail, .. } => detail.clone(),
+            _ => return None,
+        };
+        Some(OverlaySnapshot {
+            path: entry.path.clone(),
+            title,
+            detail,
+            body,
+        })
     }
 
     /// Re-apply the persisted line-number setting to the live editor.
@@ -488,18 +678,23 @@ impl PreviewPane {
                 language,
                 wrap,
                 footer,
+                original,
             } => {
                 let wrap = self.wrap_override.unwrap_or(wrap);
+                self.suppress_dirty = true;
                 self.editor.update(cx, |editor, cx| {
                     editor.set_highlighter(gpui::SharedString::from(registry_name(&language)), cx);
                     editor.set_soft_wrap(wrap, window, cx);
                     editor.set_value(text, window, cx);
                 });
+                self.suppress_dirty = false;
                 self.state = PaneState::Ready {
                     entry,
                     detail,
+                    language,
                     wrap,
                     footer,
+                    original,
                 };
                 cx.notify();
             }
@@ -511,12 +706,15 @@ impl PreviewPane {
                 footer,
                 base,
                 remote,
+                edit_original,
             } => {
+                self.suppress_dirty = true;
                 self.editor.update(cx, |editor, cx| {
                     editor.set_highlighter(gpui::SharedString::from("markdown"), cx);
                     editor.set_soft_wrap(self.wrap_override.unwrap_or(true), window, cx);
                     editor.set_value(original, window, cx);
                 });
+                self.suppress_dirty = false;
                 self.docview.update(cx, |docview, cx| {
                     docview.set_text(&sanitized, cx);
                 });
@@ -527,9 +725,66 @@ impl PreviewPane {
                     show_source: false,
                     base,
                     remote,
+                    sanitized,
+                    original: edit_original,
                 };
                 cx.notify();
             }
+            LoadOutcome::Table {
+                entry,
+                detail,
+                table,
+                widths,
+                footer,
+            } => {
+                // The grid edits nothing: this is a bounded sample, and a
+                // sample must never be saved back over the file.
+                let table = std::sync::Arc::new(table);
+                let grid = CsvGrid::new(&table, widths, window, cx);
+                self.state = PaneState::Table {
+                    entry,
+                    detail,
+                    grid,
+                    table,
+                    footer,
+                };
+                cx.notify();
+            }
+            LoadOutcome::Pdf {
+                entry,
+                detail,
+                pdf,
+                page,
+            } => match render_bitmap(&page.bitmap) {
+                Some(render_image) => {
+                    self.state = PaneState::Pdf {
+                        entry,
+                        detail,
+                        bitmap_size: (page.bitmap.width, page.bitmap.height),
+                        render_image,
+                        zoom: 0.0,
+                        pages: Pages {
+                            current: 1,
+                            total: page.pages_total,
+                        },
+                        pdf,
+                        pdf_gen: 0,
+                        loading_page: false,
+                        page_error: None,
+                    };
+                    cx.notify();
+                }
+                None => {
+                    self.state = PaneState::Error {
+                        name: entry.name().to_string(),
+                        message: format!(
+                            "Ferret can't preview {} — the rendered page didn't fit its frame.",
+                            entry.name()
+                        ),
+                    };
+                    cx.notify();
+                }
+            },
             LoadOutcome::Image {
                 entry,
                 detail,
@@ -656,7 +911,12 @@ impl PreviewPane {
     }
 
     fn editor_element(&self) -> Editor {
-        Editor::new(&self.editor).readonly(true).bordered(false)
+        // The element gates input: writable exactly while an edit session
+        // pins the buffer, read-only otherwise. `EditorState` itself is
+        // never reconfigured, so toggling costs a re-render, not a reload.
+        Editor::new(&self.editor)
+            .readonly(self.editing.is_none())
+            .bordered(false)
     }
 }
 
@@ -670,7 +930,10 @@ impl Focusable for PreviewPane {
 ///
 /// The `Entry` travels with every file outcome: the header buttons and the
 /// type icon need it, and it is one small clone — never file content.
-enum LoadOutcome {
+///
+/// Shared with the F-75 overlay, which consumes the same outcomes into its
+/// own views — the same pipeline, two surfaces.
+pub(crate) enum LoadOutcome {
     Text {
         entry: Entry,
         detail: String,
@@ -678,6 +941,9 @@ enum LoadOutcome {
         language: SmolStr,
         wrap: bool,
         footer: Option<String>,
+        /// The loaded bytes behind the text, for in-place editing. `Some`
+        /// only for complete, lossless, atomic-saveable files.
+        original: Option<EditOriginal>,
     },
     Markdown {
         entry: Entry,
@@ -689,6 +955,26 @@ enum LoadOutcome {
         footer: Option<String>,
         base: Option<PathBuf>,
         remote: bool,
+        /// The loaded bytes behind the source, for in-place editing.
+        edit_original: Option<EditOriginal>,
+    },
+    Table {
+        entry: Entry,
+        detail: String,
+        table: ParsedTable,
+        /// Column widths in logical pixels, measured from the sample on the
+        /// background task — never measured on the window thread.
+        widths: Vec<f32>,
+        footer: Option<String>,
+    },
+    Pdf {
+        entry: Entry,
+        detail: String,
+        /// The complete bytes, shared with page navigation: turning a page
+        /// re-renders from this input, never re-reads the file.
+        pdf: std::sync::Arc<Vec<u8>>,
+        /// Page one, rendered. Navigation replaces this, never the bytes.
+        page: RenderedPage,
     },
     Unsupported {
         entry: Entry,
@@ -711,7 +997,10 @@ enum LoadOutcome {
 
 /// Read, classify and build one file's preview. Blocking work stays inside
 /// `Vfs` (which unblocks internally); nothing here touches a window.
-async fn load_single(
+///
+/// Shared with the F-75 overlay, which runs the same pipeline on demand when
+/// the pane has nothing fresh to reuse.
+pub(crate) async fn load_single(
     fs: &LocalFs,
     thumbs: &ferret_preview::ThumbCache,
     entry: &Entry,
@@ -759,7 +1048,7 @@ async fn load_single(
 async fn text_outcome(
     entry: &Entry,
     kind: ferret_preview::Kind,
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
     total: Option<u64>,
     remote: bool,
     fs: &LocalFs,
@@ -768,6 +1057,49 @@ async fn text_outcome(
     let shown = bytes.len() as u64;
     let total = total.unwrap_or(shown);
     let base = entry.path.parent().unwrap_or_else(|| VfsPath::local("/"));
+    // The edit snapshot is taken here, from the bytes the user is about to
+    // see — never re-read later. Only text kinds keep their bytes, and only
+    // a complete read on a plain file behind an atomic-save backend can ever
+    // become an Edit button; everything else drops the clone below.
+    let identity = FileIdentity::new(
+        total,
+        entry.metadata.and_then(|metadata| metadata.modified),
+        &bytes,
+    );
+    // The bytes in hand cover the whole file: an empty file is complete,
+    // a short read of a longer file is not.
+    let complete = shown >= total;
+    let candidate = matches!(
+        kind,
+        ferret_preview::Kind::Markdown | ferret_preview::Kind::Code { .. }
+    )
+    .then(|| {
+        let can_write = !remote
+            && matches!(entry.kind, EntryKind::File)
+            && fs.capabilities_for(&entry.path).atomic_write;
+        (bytes.clone(), identity, complete && can_write)
+    });
+    // PDFs render through the bundled backend where one answers (PV-D08):
+    // installed shell handlers never decide whether ordinary PDFs work, so
+    // Pdfium is asked before the OS thumbnail service. Complete input only —
+    // PDFs index from the end, so a truncated head is useless — local or
+    // remote alike, since a complete remote read already paid its latency.
+    if matches!(&kind, ferret_preview::Kind::Pdf) && shown >= total {
+        let pdf = std::sync::Arc::new(bytes);
+        // Encrypted files decline here — `render_page` refuses before any
+        // library call — and `build` below labels them Protected. Anything
+        // else that declines gets the native question after this.
+        if let Ok(page) = pdfium_page(pdf.clone(), 0).await {
+            return pdf_load_outcome(entry, pdf, page);
+        }
+        // Sole owner again once the settled render dropped its clone; a
+        // shared straggler costs one bounded copy down the native path,
+        // never a panic.
+        bytes = match std::sync::Arc::try_unwrap(pdf) {
+            Ok(bytes) => bytes,
+            Err(shared) => (*shared).clone(),
+        };
+    }
     let preview = ferret_preview::build(kind, bytes, Some(total), base);
     // Kinds with no in-process decoder get one best-effort native question —
     // a local PDF or HEIC answered by the OS — before falling through to
@@ -779,7 +1111,26 @@ async fn text_outcome(
     } else {
         preview
     };
-    preview_outcome(entry, preview, total, remote)
+    preview_outcome(entry, preview, total, remote, candidate)
+}
+
+/// Decide the edit snapshot for one loaded text file.
+///
+/// `candidate` carries the raw bytes, their identity, and whether the read
+/// was complete on a writable backend. The snapshot exists only when a fresh
+/// decode of those bytes is saveable — uniform endings, lossless, untruncated
+/// — so the Edit button is a flag read, never a second judgement.
+fn edit_original(candidate: Option<(Vec<u8>, FileIdentity, bool)>) -> Option<EditOriginal> {
+    let (bytes, identity, writable) = candidate?;
+    if !writable {
+        return None;
+    }
+    let saveable = ferret_preview::text::decode(&bytes).is_some_and(|decoded| decoded.saveable());
+    saveable.then_some(EditOriginal {
+        bytes,
+        identity,
+        saveable: true,
+    })
 }
 
 /// Whether a built preview deserves one native question before it settles.
@@ -796,6 +1147,50 @@ fn wants_native(preview: &Preview) -> bool {
             reason: ferret_preview::Unsupported::NoRenderer,
         }
     )
+}
+
+/// Build the outcome for a rendered first page: the bytes travel with it so
+/// page navigation re-renders from the same input, never re-reads the file.
+///
+/// A declined render never reaches here — the caller falls through to the
+/// native thumbnail and then to metadata rather than waiting on a spinner.
+fn pdf_load_outcome(
+    entry: &Entry,
+    pdf: std::sync::Arc<Vec<u8>>,
+    page: RenderedPage,
+) -> LoadOutcome {
+    let total = pdf.len() as u64;
+    let size_label = format_size(entry.metadata.map(|md| md.len).unwrap_or(total));
+    let modified = entry
+        .metadata
+        .and_then(|md| md.modified)
+        .map(format_date)
+        .unwrap_or_else(|| "unknown date".to_string());
+    LoadOutcome::Pdf {
+        entry: entry.clone(),
+        detail: format!("PDF document · {size_label} · {modified}"),
+        pdf,
+        page,
+    }
+}
+
+/// Render one PDF page (zero-based) off the window thread, bounded by the
+/// render deadline.
+///
+/// The deadline bounds the *wait*, not the native call: a hung helper is the
+/// supervised-process follow-up, not something a timer preempts. On timeout
+/// the caller falls through to the native thumbnail rather than failing.
+async fn pdfium_page(
+    pdf: std::sync::Arc<Vec<u8>>,
+    page: u32,
+) -> Result<RenderedPage, PdfUnavailable> {
+    let render = smol::unblock(move || ferret_preview::render_page(&pdf, page));
+    let deadline = smol::Timer::after(ferret_preview::config::PDF_RENDER_DEADLINE);
+    futures::pin_mut!(render, deadline);
+    match futures::future::select(render, deadline).await {
+        futures::future::Either::Left((outcome, _)) => outcome,
+        futures::future::Either::Right(_) => Err(PdfUnavailable::Failed),
+    }
 }
 
 /// One best-effort OS thumbnail for the docked pane, cached on disk.
@@ -868,7 +1263,13 @@ fn rendered_preview(entry: &Entry, bitmap: ferret_preview::Bitmap) -> Preview {
     }
 }
 
-fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) -> LoadOutcome {
+fn preview_outcome(
+    entry: &Entry,
+    preview: Preview,
+    total: u64,
+    remote: bool,
+    edit: Option<(Vec<u8>, FileIdentity, bool)>,
+) -> LoadOutcome {
     let size_label = format_size(entry.metadata.map(|md| md.len).unwrap_or(total));
     let modified = entry
         .metadata
@@ -889,6 +1290,7 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
             truncated,
             base,
             remote,
+            edit_original(edit),
         ),
         Preview::Code {
             text,
@@ -906,6 +1308,7 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
                 language,
                 wrap,
                 footer: truncation_footer(&truncated),
+                original: edit_original(edit),
             }
         }
         Preview::Table { table, truncated } => {
@@ -914,10 +1317,11 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
             } else {
                 "CSV table"
             };
-            let dims = match table.header {
-                Some(ref header) => format!("{} rows × {} cols", table.rows.len(), header.len()),
-                None => format!("{} rows", table.rows.len()),
-            };
+            // Column widths are a character-count heuristic over the sample:
+            // O(the sample) on the background task, never measured per frame.
+            let widths = grid::column_widths(&table);
+            let width = widths.len();
+            let dims = format!("{} rows × {width} cols", table.rows.len());
             let mut footer = format!("{dims} sample");
             if let Some(tail) = truncation_footer(&truncated) {
                 footer.push_str(" · ");
@@ -926,12 +1330,21 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
             if table.omitted_trailing_record {
                 footer.push_str(" · incomplete final record omitted");
             }
-            LoadOutcome::Text {
+            if table.cut_field {
+                footer.push_str(" · a field was cut to its cap");
+            }
+            let ragged = grid::ragged_count(&table);
+            if ragged > 0 {
+                footer.push_str(&format!(
+                    " · {ragged} ragged row{}",
+                    if ragged == 1 { "" } else { "s" }
+                ));
+            }
+            LoadOutcome::Table {
                 entry: entry.clone(),
                 detail: format!("{label} · {size_label} · {modified}"),
-                text: sample_text(&table),
-                language: SmolStr::new("plain"),
-                wrap: false,
+                table,
+                widths,
                 footer: Some(footer),
             }
         }
@@ -948,6 +1361,8 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
                     format_size(size)
                 )
             }),
+            // Hex is a view, not a buffer: there is nothing to save.
+            original: None,
         },
         Preview::Image { image, .. } => LoadOutcome::Image {
             entry: entry.clone(),
@@ -1007,13 +1422,17 @@ fn preview_outcome(entry: &Entry, preview: Preview, total: u64, remote: bool) ->
                     format_size(size),
                     format_size(budget as u64)
                 ),
+                ferret_preview::Unsupported::Protected => {
+                    "This file needs a password to open — Ferret can't preview it. Open it externally."
+                        .to_string()
+                }
                 ferret_preview::Unsupported::NoRenderer => match kind {
                     ferret_preview::Kind::Image => {
                         "Image preview isn't available in this build — metadata and Open for now."
                             .to_string()
                     }
                     ferret_preview::Kind::Pdf => {
-                        "PDF preview isn't available in this build — metadata and Open for now."
+                        "Couldn't render this PDF here — it may need a handler this machine doesn't have. Metadata and Open for now."
                             .to_string()
                     }
                     _ => "No preview for this file yet — metadata and Open for now.".to_string(),
@@ -1046,6 +1465,7 @@ fn registry_name(language: &SmolStr) -> &str {
 ///
 /// Sanitizing fails safe: any refusal shows the bounded original source
 /// with the reason, never a half-sanitized document.
+#[allow(clippy::too_many_arguments)]
 fn markdown_outcome(
     entry: &Entry,
     size_label: &str,
@@ -1054,6 +1474,7 @@ fn markdown_outcome(
     truncated: Truncation,
     base: VfsPath,
     remote: bool,
+    edit_original: Option<EditOriginal>,
 ) -> LoadOutcome {
     let detail = format!("Markdown · {size_label} · {modified}");
     let base_dir: Option<PathBuf> = if remote {
@@ -1104,6 +1525,7 @@ fn markdown_outcome(
                 footer,
                 base: base_dir,
                 remote,
+                edit_original,
             }
         }
         Err(reason) => {
@@ -1124,6 +1546,10 @@ fn markdown_outcome(
                 language: SmolStr::new("markdown"),
                 wrap: true,
                 footer,
+                // The sanitizer refused, so the source view is a fallback
+                // surface, not an editing one: saving from a refused
+                // document would write back bytes the policy never approved.
+                original: None,
             }
         }
     }
@@ -1131,6 +1557,16 @@ fn markdown_outcome(
 
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
+}
+
+/// Build one `RenderImage` for a single bitmap, once, at apply time.
+///
+/// PDF pages render one at a time: the current page is one upload, and a
+/// page turn replaces it rather than retaining the document.
+fn render_bitmap(bitmap: &Bitmap) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let buffer = ::image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra.clone())?;
+    let frame = ::image::Frame::from_parts(buffer, 0, 0, ::image::Delay::from_numer_denom_ms(0, 1));
+    Some(std::sync::Arc::new(gpui::RenderImage::new(vec![frame])))
 }
 
 /// Build one `RenderImage` per preview, once, at apply time.
@@ -1171,36 +1607,6 @@ fn truncation_footer(truncated: &Truncation) -> Option<String> {
             format_size(truncated.total)
         )
     })
-}
-
-/// Render the bounded table sample as text until the grid lands.
-///
-/// Fields rejoined with the sniffed delimiter, display lines cut at the same
-/// width the text view enforces. Lossy around quoting by construction — the
-/// grid (step 09) replaces this rather than refining it.
-fn sample_text(table: &ferret_preview::ParsedTable) -> String {
-    use ferret_preview::config::TEXT_MAX_LINE_BYTES;
-    let delimiter = table.delimiter as char;
-    let mut out = String::new();
-    let mut rows = Vec::with_capacity(table.rows.len() + 1);
-    if let Some(header) = &table.header {
-        rows.push(header);
-    }
-    rows.extend(&table.rows);
-    for row in rows {
-        let mut line = row.join(&delimiter.to_string());
-        if line.len() > TEXT_MAX_LINE_BYTES {
-            let mut end = TEXT_MAX_LINE_BYTES;
-            while !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            line.truncate(end);
-            line.push('…');
-        }
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out
 }
 
 fn vfs_error(name: &str, err: VfsError) -> LoadOutcome {
@@ -1296,6 +1702,73 @@ mod tests {
             size: 1
         }));
         assert!(!wants_native(&Preview::Directory { entries: None }));
+        // Protected is terminal: a password is required, so no service is
+        // asked and nothing is retried in the background.
+        assert!(!wants_native(&unsupported(
+            ferret_preview::Kind::Pdf,
+            ferret_preview::Unsupported::Protected
+        )));
+    }
+
+    #[test]
+    fn a_protected_pdf_names_the_password() {
+        let outcome = preview_outcome(
+            &pdf_entry(),
+            unsupported(
+                ferret_preview::Kind::Pdf,
+                ferret_preview::Unsupported::Protected,
+            ),
+            1024,
+            false,
+            None,
+        );
+        let LoadOutcome::Unsupported {
+            detail, message, ..
+        } = outcome
+        else {
+            panic!("a protected PDF must stay metadata, never a render");
+        };
+        assert!(
+            detail.starts_with("PDF document · "),
+            "the kind labels the header: {detail}"
+        );
+        assert!(
+            message.contains("password"),
+            "the message names what is required: {message}"
+        );
+    }
+
+    #[test]
+    fn a_rendered_first_page_carries_its_bytes_for_navigation() {
+        let pdf = std::sync::Arc::new(vec![1u8, 2, 3]);
+        let outcome = pdf_load_outcome(
+            &pdf_entry(),
+            pdf.clone(),
+            RenderedPage {
+                bitmap: ferret_preview::Bitmap {
+                    width: 100,
+                    height: 80,
+                    bgra: vec![255; 100 * 80 * 4],
+                    has_transparency: false,
+                },
+                natural: (100, 80),
+                pages_total: 9,
+            },
+        );
+        let LoadOutcome::Pdf {
+            detail, pdf: kept, ..
+        } = outcome
+        else {
+            panic!("a rendered page must become the navigable outcome");
+        };
+        assert!(
+            detail.starts_with("PDF document · "),
+            "never 'PDF image': {detail}"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&kept, &pdf),
+            "navigation shares the bytes; it never re-reads the file"
+        );
     }
 
     #[test]
@@ -1315,6 +1788,7 @@ mod tests {
             },
             1024,
             false,
+            None,
         );
         let LoadOutcome::Image {
             detail,
@@ -1351,6 +1825,7 @@ mod tests {
             },
             512,
             false,
+            None,
         );
         let LoadOutcome::Image { footer, .. } = outcome else {
             panic!("a rendered bitmap must ride the image state");
@@ -1378,6 +1853,7 @@ mod tests {
             },
             1024,
             false,
+            None,
         );
         let LoadOutcome::Image { footer, .. } = outcome else {
             panic!("a rendered bitmap must ride the image state");

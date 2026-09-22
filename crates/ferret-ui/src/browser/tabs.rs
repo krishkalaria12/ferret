@@ -17,7 +17,7 @@ impl Browser {
             forward: Vec::new(),
             _subscriptions: subscriptions,
         });
-        self.activate_tab(self.tabs.len() - 1, cx);
+        self.activate_tab(self.tabs.len() - 1, window, cx);
         cx.notify();
     }
 
@@ -104,9 +104,9 @@ impl Browser {
         subscriptions.push(cx.subscribe_in(
             &folder,
             window,
-            |this, folder, event: &FolderEvent, _, cx| match event {
-                FolderEvent::SelectionChanged => this.sync_preview(folder, false, cx),
-                FolderEvent::LoadFinished => this.sync_preview(folder, true, cx),
+            |this, folder, event: &FolderEvent, window, cx| match event {
+                FolderEvent::SelectionChanged => this.sync_preview(folder, false, window, cx),
+                FolderEvent::LoadFinished => this.sync_preview(folder, true, window, cx),
                 _ => {}
             },
         ));
@@ -124,8 +124,19 @@ impl Browser {
 
     /// Make a tab visible and keep the persistent terminal aligned with the
     /// folder the window now shows.
-    pub(super) fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn activate_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
+            return;
+        }
+        // Another tab's selection would replace the buffer: ask first, and
+        // only the requested switch resumes afterwards.
+        if index != self.active && self.preview.read(cx).is_dirty() {
+            self.open_edit_guard(preview_panel::GuardPending::ActivateTab(index), window, cx);
             return;
         }
         self.active = index;
@@ -133,7 +144,7 @@ impl Browser {
         self.sync_terminal_to(&directory, cx);
         self.git_follow(&directory, cx);
         let folder = self.active().folder.clone();
-        self.sync_preview(&folder, false, cx);
+        self.sync_preview(&folder, false, window, cx);
         cx.notify();
     }
 
@@ -182,6 +193,12 @@ impl Browser {
 
     pub(super) fn navigate(&mut self, dir: VfsPath, window: &mut Window, cx: &mut Context<Self>) {
         if self.active().folder.read(cx).dir == dir {
+            return;
+        }
+        // Leaving the directory over unsaved changes asks first: the new
+        // folder's selection would otherwise replace the buffer.
+        if self.preview.read(cx).is_dirty() {
+            self.open_edit_guard(preview_panel::GuardPending::Navigate(dir), window, cx);
             return;
         }
         self.swap_active_tab(dir, HistoryOp::Push, window, cx);
@@ -256,9 +273,15 @@ impl Browser {
             .is_some_and(ferret_vfs::VfsError::is_gone)
     }
 
-    pub(super) fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(super) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() <= 1 {
             return; // One tab always stays so `+` has something to clone.
+        }
+        // Closing the tab whose file is being edited would drop the buffer:
+        // ask first. Other tabs never touch it.
+        if ix == self.active && self.preview.read(cx).is_dirty() {
+            self.open_edit_guard(preview_panel::GuardPending::CloseTab(ix), window, cx);
+            return;
         }
         let active_changed = ix == self.active;
         self.tabs.remove(ix);
