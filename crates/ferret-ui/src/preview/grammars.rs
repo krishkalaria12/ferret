@@ -1,7 +1,7 @@
 //! Extended tree-sitter grammars (PV-D05, Q-02).
 //!
 //! The built-ins behind `gpui-component`'s per-grammar features are always
-//! on. These 15 register through the public `LanguageRegistry` — one
+//! on. These 27 register through the public `LanguageRegistry` — one
 //! `register` call each — behind the default-on `languages-extended`
 //! feature, so `--no-default-features` still highlights the built-ins.
 //! Registration is a deterministic, duplicate-checked pass before the first
@@ -16,9 +16,14 @@
 //! is a follow-up, not a silent half-wire.
 //!
 //! Kept out (identified-only, with reasons in the workspace table): `just`
-//! and `fish`, whose crates link `tree-sitter` 0.25/0.22 directly — only one
-//! native `tree-sitter` may link into the binary. `dockerfile` and `vue`
-//! arrive via maintained forks for the same class of reason.
+//! and `fish`, whose crates link `tree-sitter` 0.25/0.22 directly, plus
+//! `clojure` (its crate links 0.25 directly) and `wgsl` 0.0.6 (links 0.20
+//! directly) — only one native `tree-sitter` may link into the binary.
+//! `dockerfile` arrives via a maintained fork and `vue` via `vue-next` for
+//! the same class of reason; `wgsl` arrives via the `wgsl-bevy` fork, whose
+//! bindings are `tree-sitter-language`-based. `latex` stays out: 0.1.0 ships
+//! no scanner sources while its generated parser calls the external scanner,
+//! so it fails at link time — broken packaging, not a version choice.
 
 #[cfg(feature = "languages-extended")]
 use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
@@ -71,6 +76,26 @@ shim!(perl, tree_sitter_perl);
 shim!(groovy, tree_sitter_groovy);
 #[cfg(feature = "languages-extended")]
 shim!(vue, tree_sitter_vue_next);
+#[cfg(feature = "languages-extended")]
+shim!(solidity, tree_sitter_solidity);
+#[cfg(feature = "languages-extended")]
+shim!(prisma, tree_sitter_prisma_io);
+#[cfg(feature = "languages-extended")]
+shim!(jsonnet, tree_sitter_jsonnet);
+#[cfg(feature = "languages-extended")]
+shim!(nginx, tree_sitter_nginx);
+#[cfg(feature = "languages-extended")]
+shim!(fortran, tree_sitter_fortran);
+#[cfg(feature = "languages-extended")]
+shim!(ada, tree_sitter_ada);
+#[cfg(feature = "languages-extended")]
+shim!(elm, tree_sitter_elm);
+#[cfg(feature = "languages-extended")]
+shim!(gleam, tree_sitter_gleam);
+#[cfg(feature = "languages-extended")]
+shim!(wgsl, tree_sitter_wgsl_bevy);
+#[cfg(feature = "languages-extended")]
+shim!(asm, tree_sitter_asm);
 
 /// OCaml ships three parsers; the implementation grammar covers both
 /// extensions our table emits (`.ml`, `.mli`) for this pass.
@@ -83,6 +108,25 @@ fn ocaml() -> tree_sitter::Language {
 #[cfg(feature = "languages-extended")]
 fn xml() -> tree_sitter::Language {
     tree_sitter::Language::new(tree_sitter_xml::LANGUAGE_XML)
+}
+
+/// GLSL exposes its handle as `LANGUAGE_GLSL` rather than `LANGUAGE` —
+/// same ABI-stable shape, different name, so a two-line function instead
+/// of the `shim!` macro.
+#[cfg(feature = "languages-extended")]
+fn glsl() -> tree_sitter::Language {
+    tree_sitter::Language::new(tree_sitter_glsl::LANGUAGE_GLSL)
+}
+
+/// Vimscript's bindings predate `tree-sitter-language` and return the
+/// runtime's own `Language` directly. Its `tree-sitter` requirement
+/// (`>=0.21.0`) unifies with the workspace's 0.26, so the returned value
+/// is already the right type — no `Language::new` involved. If a future
+/// bump breaks that unification, vim rejoins the identified-only list
+/// rather than growing an adapter.
+#[cfg(feature = "languages-extended")]
+fn vim() -> tree_sitter::Language {
+    tree_sitter_vim::language()
 }
 
 /// The extended set, in registration order.
@@ -166,6 +210,66 @@ const EXTENDED: &[ExtendedLanguage] = &[
         language: groovy,
         highlights: include_str!("../../assets/queries/groovy.scm"),
     },
+    ExtendedLanguage {
+        name: "solidity",
+        language: solidity,
+        highlights: include_str!("../../assets/queries/solidity.scm"),
+    },
+    ExtendedLanguage {
+        name: "prisma",
+        language: prisma,
+        highlights: include_str!("../../assets/queries/prisma.scm"),
+    },
+    ExtendedLanguage {
+        name: "jsonnet",
+        language: jsonnet,
+        highlights: include_str!("../../assets/queries/jsonnet.scm"),
+    },
+    ExtendedLanguage {
+        name: "nginx",
+        language: nginx,
+        highlights: include_str!("../../assets/queries/nginx.scm"),
+    },
+    ExtendedLanguage {
+        name: "fortran",
+        language: fortran,
+        highlights: include_str!("../../assets/queries/fortran.scm"),
+    },
+    ExtendedLanguage {
+        name: "ada",
+        language: ada,
+        highlights: include_str!("../../assets/queries/ada.scm"),
+    },
+    ExtendedLanguage {
+        name: "elm",
+        language: elm,
+        highlights: include_str!("../../assets/queries/elm.scm"),
+    },
+    ExtendedLanguage {
+        name: "gleam",
+        language: gleam,
+        highlights: include_str!("../../assets/queries/gleam.scm"),
+    },
+    ExtendedLanguage {
+        name: "wgsl",
+        language: wgsl,
+        highlights: include_str!("../../assets/queries/wgsl.scm"),
+    },
+    ExtendedLanguage {
+        name: "glsl",
+        language: glsl,
+        highlights: include_str!("../../assets/queries/glsl.scm"),
+    },
+    ExtendedLanguage {
+        name: "asm",
+        language: asm,
+        highlights: include_str!("../../assets/queries/asm.scm"),
+    },
+    ExtendedLanguage {
+        name: "vim",
+        language: vim,
+        highlights: include_str!("../../assets/queries/vim.scm"),
+    },
 ];
 
 /// Register every extended language, duplicate-checked.
@@ -208,6 +312,12 @@ pub(crate) fn ensure_registered() {
 mod tests {
     use super::*;
 
+    // `super::*` only brings the registry when `languages-extended` is on
+    // (the registration import is feature-gated); the invariant test below
+    // runs in both configurations, so the off build imports it directly.
+    #[cfg(not(feature = "languages-extended"))]
+    use gpui_component::highlighter::LanguageRegistry;
+
     /// Captures that never style anything by design: the explicit opt-out,
     /// spell-check directives, and error nodes (plain text until error
     /// styling exists). Anything else must resolve to a theme slot.
@@ -215,16 +325,14 @@ mod tests {
 
     /// Language names with no grammar in this build.
     ///
-    /// With `languages-extended` on, the 15 extended names resolve and must NOT
+    /// With `languages-extended` on, the 27 extended names resolve and must NOT
     /// be here; with it off, they must be. Everything else on this list is an
     /// identified-only label (PV-D06): correct header, plain monospaced body.
     #[cfg(feature = "languages-extended")]
     const IDENTIFIED_BUT_UNHIGHLIGHTED: &[&str] = &[
         "actionscript",
-        "ada",
         "applescript",
         "arduino",
-        "asm",
         "autoit",
         "awk",
         "batch",
@@ -234,27 +342,20 @@ mod tests {
         "csv",
         "d",
         "dotenv",
-        "elm",
         "fish",
-        "fortran",
         "forth",
         "gitignore",
-        "gleam",
-        "glsl",
         "janet",
-        "jsonnet",
         "just",
         "kdl",
         "latex",
         "lidr",
         "log",
-        "nginx",
         "nim",
         "nushell",
         "odin",
         "pascal",
         "pony",
-        "prisma",
         "purescript",
         "racket",
         "rego",
@@ -262,7 +363,6 @@ mod tests {
         "sed",
         "slang",
         "sml",
-        "solidity",
         "sql",
         "swig",
         "tcl",
@@ -271,8 +371,6 @@ mod tests {
         "v",
         "vala",
         "vbscript",
-        "vim",
-        "wgsl",
         "wren",
         "yuck",
         "zenscript",
@@ -407,6 +505,68 @@ mod tests {
         (
             "groovy",
             "// comment\ndef greet(String name) {\n println \"hi\"\n}\n",
+            4,
+        ),
+        (
+            "solidity",
+            "// comment\npragma solidity ^0.8.0;\ncontract Hi {\n uint256 public x = 42;\n}\n",
+            4,
+        ),
+        (
+            "prisma",
+            "datasource db {\n provider = \"sqlite\"\n url = \"file:./dev.db\"\n}\n\nmodel User {\n id Int @id\n}\n",
+            4,
+        ),
+        (
+            "jsonnet",
+            "// comment\n{\n name: \"hi\",\n port: 8080,\n debug: true,\n}\n",
+            4,
+        ),
+        (
+            "nginx",
+            "# comment\nevents {\n worker_connections 1024;\n}\n",
+            2,
+        ),
+        (
+            "fortran",
+            "! comment\nprogram hello\n implicit none\n print *, \"hi\"\nend program hello\n",
+            4,
+        ),
+        (
+            "ada",
+            "-- comment\npackage P is\n X : Integer := 42;\nend P;\n",
+            4,
+        ),
+        (
+            "elm",
+            "module Main exposing (..)\n\n-- comment\ngreet name =\n \"hi \" ++ name\n",
+            4,
+        ),
+        (
+            "gleam",
+            "// comment\nimport gleam/io\n\npub fn main() {\n io.println(\"hi\")\n}\n",
+            4,
+        ),
+        (
+            "wgsl",
+            "// comment\nstruct U {\n x : f32,\n};\n\n@vertex\nfn vs() -> vec4<f32> {\n return vec4<f32>(1.0, 0.0, 0.0, 1.0);\n}\n",
+            4,
+        ),
+        (
+            "glsl",
+            "// comment\nuniform vec3 color;\nvoid main() {\n gl_FragColor = vec4(color, 1.0);\n}\n",
+            4,
+        ),
+        (
+            "asm",
+            // A leading `;` comment line parses as an extra that leaves a
+            // phantom empty instruction behind it, so the comment trails.
+            "main:\n mov eax, 1 ; load\n ret\n",
+            2,
+        ),
+        (
+            "vim",
+            "\" comment\nfunction! Greet(name)\n echo \"hi\"\nendfunction\n",
             4,
         ),
     ];

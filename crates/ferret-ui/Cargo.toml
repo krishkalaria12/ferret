@@ -104,6 +104,18 @@ tree-sitter-powershell = { workspace = true, optional = true }
 tree-sitter-r = { workspace = true, optional = true }
 tree-sitter-vue-next = { workspace = true, optional = true }
 tree-sitter-xml = { workspace = true, optional = true }
+tree-sitter-solidity = { workspace = true, optional = true }
+tree-sitter-prisma-io = { workspace = true, optional = true }
+tree-sitter-jsonnet = { workspace = true, optional = true }
+tree-sitter-vim = { workspace = true, optional = true }
+tree-sitter-nginx = { workspace = true, optional = true }
+tree-sitter-fortran = { workspace = true, optional = true }
+tree-sitter-ada = { workspace = true, optional = true }
+tree-sitter-elm = { workspace = true, optional = true }
+tree-sitter-gleam = { workspace = true, optional = true }
+tree-sitter-wgsl-bevy = { workspace = true, optional = true }
+tree-sitter-glsl = { workspace = true, optional = true }
+tree-sitter-asm = { workspace = true, optional = true }
 
 [features]
 # Full highlighting: the 34 built-ins plus the extended registrations in
@@ -126,6 +138,18 @@ languages-extended = [
     "dep:tree-sitter-r",
     "dep:tree-sitter-vue-next",
     "dep:tree-sitter-xml",
+    "dep:tree-sitter-solidity",
+    "dep:tree-sitter-prisma-io",
+    "dep:tree-sitter-jsonnet",
+    "dep:tree-sitter-vim",
+    "dep:tree-sitter-nginx",
+    "dep:tree-sitter-fortran",
+    "dep:tree-sitter-ada",
+    "dep:tree-sitter-elm",
+    "dep:tree-sitter-gleam",
+    "dep:tree-sitter-wgsl-bevy",
+    "dep:tree-sitter-glsl",
+    "dep:tree-sitter-asm",
 ]
 # The allocations-per-frame budget (`docs/audit.html` §11).
 #
