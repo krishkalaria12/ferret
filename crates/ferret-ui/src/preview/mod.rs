@@ -25,6 +25,9 @@ mod overlay;
 mod pdf;
 mod render;
 
+#[cfg(all(test, feature = "dhat-heap"))]
+mod budget;
+
 pub(crate) use overlay::{OverlaySnapshot, PreviewOverlay, SnapshotBody, overlay_geometry};
 
 use std::time::Instant;
