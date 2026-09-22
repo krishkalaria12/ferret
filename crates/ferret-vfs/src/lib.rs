@@ -48,5 +48,8 @@ pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
 pub use errors::{Result, VfsError};
 pub use local::LocalFs;
 pub use path::{MountId, VfsPath};
-pub use vfs::{Capabilities, DirEntryBatch, ListingDetail, ReadDirStream, RemoveMode, Vfs};
+pub use vfs::{
+    Capabilities, DirEntryBatch, FileIdentity, ListingDetail, ReadDirStream, RemoveMode, Vfs,
+    content_hash,
+};
 pub use watch::{Watch, WatchEvent};

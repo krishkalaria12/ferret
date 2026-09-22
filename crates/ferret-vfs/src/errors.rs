@@ -33,6 +33,11 @@ pub enum VfsError {
     #[error("{path} is on a different volume, so it has to be copied rather than moved.")]
     CrossVolume { path: VfsPath },
 
+    #[error(
+        "Ferret can't save {path} — it changed on disk since you started editing. Discard your edits to reload it, or copy your text elsewhere first."
+    )]
+    Conflict { path: VfsPath },
+
     #[error("This location doesn't support {capability}.")]
     Unsupported { capability: &'static str },
 

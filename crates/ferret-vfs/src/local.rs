@@ -1,13 +1,13 @@
 use crate::config::{FIRST_LISTING_BATCH, LISTING_BATCH_SIZE, LISTING_BUFFER};
 use crate::{
-    Capabilities, DirEntryBatch, Entry, EntryKind, ListingDetail, Metadata, ReadDirStream,
-    RemoveMode, Result, SymlinkTarget, Vfs, VfsError, VfsPath,
+    Capabilities, DirEntryBatch, Entry, EntryKind, FileIdentity, ListingDetail, Metadata,
+    ReadDirStream, RemoveMode, Result, SymlinkTarget, Vfs, VfsError, VfsPath, content_hash,
 };
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use rayon::prelude::*;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 /// The local disk backend, over `std::fs`.
@@ -35,6 +35,11 @@ impl Vfs for LocalFs {
             symlinks: true,
             permissions: true,
             atomic_rename: true,
+            // Same-directory temp plus rename: atomic replacement with the
+            // identity check `write_atomic` performs. A future remote backend
+            // answers false here unless it can offer the same conflict checks —
+            // a generic writable or rename capability is insufficient.
+            atomic_write: true,
             watch: true,
             // True on both platforms now (D-33). On Windows it always was:
             // `FindFirstFileEx` returns size, times and attributes with the
@@ -290,6 +295,18 @@ impl Vfs for LocalFs {
                 .await
             }
         }
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &VfsPath,
+        contents: &[u8],
+        expect: FileIdentity,
+    ) -> Result<FileIdentity> {
+        let local = Self::require_local(path)?;
+        let owned = path.clone();
+        let contents = contents.to_vec();
+        smol::unblock(move || write_atomic_blocking(&local, &owned, &contents, expect)).await
     }
 }
 
@@ -570,6 +587,216 @@ fn platform_hidden(md: &fs::Metadata) -> bool {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn platform_hidden(_md: &fs::Metadata) -> bool {
     false
+}
+
+/// Replace one file's contents without ever exposing a half-written file.
+///
+/// All blocking, for `smol::unblock` only. The identity check (length, mtime,
+/// content hash) runs first so an external change — including one that kept
+/// the size and the mtime — refuses with [`VfsError::Conflict`] instead of
+/// destroying someone's edit. Then the new bytes go to a temp file in the
+/// *same directory* (a different filesystem would make the final step a copy)
+/// and the temp file is moved over the target.
+///
+/// Symlinks are refused outright: v1 editing never follows a link, so a link
+/// to a 4 GB file cannot be swapped for a small save, and a link whose target
+/// moved cannot be "saved" into a new regular file.
+fn write_atomic_blocking(
+    local: &std::path::Path,
+    owned: &VfsPath,
+    contents: &[u8],
+    expect: FileIdentity,
+) -> Result<FileIdentity> {
+    if fs::symlink_metadata(local)
+        .map_err(|source| VfsError::from_io("read", owned, source))?
+        .is_symlink()
+    {
+        return Err(VfsError::Unsupported {
+            capability: "editing linked files",
+        });
+    }
+    // Length and mtime first: cheap, and the common conflict shape.
+    let current = fs::metadata(local).map_err(|source| VfsError::from_io("read", owned, source))?;
+    let current_len = current.len();
+    let (current_secs, current_nanos) = unix_secs_nanos(current.modified().ok());
+    if current_len != expect.len
+        || current_secs != expect.mtime_secs
+        || current_nanos != expect.mtime_nanos
+    {
+        return Err(VfsError::Conflict {
+            path: owned.clone(),
+        });
+    }
+    // Then the bytes themselves: bounded by the length just observed, plus
+    // one byte to notice a growth that raced the stat.
+    let mut current_bytes = Vec::new();
+    fs::File::open(local)
+        .map_err(|source| VfsError::from_io("open", owned, source))?
+        .take(current_len.saturating_add(1))
+        .read_to_end(&mut current_bytes)
+        .map_err(|source| VfsError::from_io("read", owned, source))?;
+    if current_bytes.len() as u64 != expect.len
+        || content_hash(&current_bytes) != expect.content_hash
+    {
+        return Err(VfsError::Conflict {
+            path: owned.clone(),
+        });
+    }
+
+    let dir = local.parent().ok_or(VfsError::Unsupported {
+        capability: "editing files without a parent directory",
+    })?;
+    let temp = dir.join(format!(
+        ".ferret-save-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0),
+    ));
+    let cleanup = TempCleanup {
+        path: Some(temp.clone()),
+    };
+    let result = write_temp_and_replace(local, owned, &temp, contents, &current);
+    // A crash mid-write must leave the original intact *and* no litter: the
+    // temp file goes on every path where the rename did not consume it.
+    if result.is_err() {
+        drop(cleanup);
+    } else {
+        std::mem::forget(cleanup);
+    }
+    result
+}
+
+/// A temp file that deletes itself unless disarmed.
+///
+/// The rename consumes the temp on success; every other exit — conflict,
+/// full disk, permission — must not leave `.ferret-save-*.tmp` litter behind
+/// the next listing.
+struct TempCleanup {
+    path: Option<PathBuf>,
+}
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn write_temp_and_replace(
+    local: &std::path::Path,
+    owned: &VfsPath,
+    temp: &std::path::Path,
+    contents: &[u8],
+    current: &fs::Metadata,
+) -> Result<FileIdentity> {
+    {
+        let mut file = fs::File::create_new(temp)
+            .map_err(|source| VfsError::from_io("create", owned, source))?;
+        file.write_all(contents)
+            .map_err(|source| VfsError::from_io("write", owned, source))?;
+        file.flush()
+            .map_err(|source| VfsError::from_io("write", owned, source))?;
+        #[cfg(unix)]
+        file.sync_all()
+            .map_err(|source| VfsError::from_io("write", owned, source))?;
+        preserve_mode(&file, current);
+    }
+    replace_file(temp, local, owned)?;
+    // Crash durability for the rename itself, where the platform offers it.
+    // Best-effort by design: the rename already committed, so a failure here
+    // is reported by syncing nothing — retrying a replacement that may have
+    // committed is how a file gets written twice.
+    #[cfg(unix)]
+    let _ = fs::File::open(local.parent().unwrap_or(local)).and_then(|dir| dir.sync_all());
+    let fresh = fs::metadata(local).map_err(|source| VfsError::from_io("read", owned, source))?;
+    Ok(FileIdentity::new(
+        fresh.len(),
+        fresh.modified().ok(),
+        contents,
+    ))
+}
+
+/// Carry the destination's permission bits onto the temp file before the
+/// rename, so a save never widens or narrows who can read the file.
+///
+/// Ownership follows for free: the temp file is created in the same directory
+/// by the same user. macOS extended attributes and Windows ACLs beyond the
+/// readonly bit are *not* carried by this path — `ReplaceFileW` preserves the
+/// destination's ACLs on Windows, while Unix callers with xattrs beyond mode
+/// bits should treat that as a known v1 limitation, not as silent fidelity.
+#[cfg(unix)]
+fn preserve_mode(temp: &fs::File, current: &fs::Metadata) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mode = current.mode() & 0o7777;
+    let _ = temp.set_permissions(fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn preserve_mode(_temp: &fs::File, _current: &fs::Metadata) {}
+
+/// Move the flushed temp file over the destination.
+///
+/// Unix `rename` is atomic on one filesystem, which the same-directory temp
+/// guarantees. Windows goes through `ReplaceFileW`: unlike delete-then-move
+/// it preserves the destination's ACLs and attributes, and it never leaves a
+/// window where the path names nothing.
+fn replace_file(temp: &std::path::Path, dest: &std::path::Path, owned: &VfsPath) -> Result<()> {
+    #[cfg(windows)]
+    {
+        replace_file_windows(temp, dest, owned)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(temp, dest).map_err(|source| VfsError::from_io("save", owned, source))
+    }
+}
+
+/// Verified `ReplaceFileW` semantics: never delete the destination first.
+#[cfg(windows)]
+fn replace_file_windows(
+    temp: &std::path::Path,
+    dest: &std::path::Path,
+    owned: &VfsPath,
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    fn wide(path: &std::path::Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain([0]).collect()
+    }
+
+    let temp_wide = wide(temp);
+    let dest_wide = wide(dest);
+    // SAFETY: both pointers are valid NUL-terminated UTF-16 for the call, no
+    // backup is requested, and no flags change the default replace behavior.
+    let ok = unsafe {
+        ReplaceFileW(
+            dest_wide.as_ptr(),
+            temp_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(VfsError::from_io(
+            "save",
+            owned,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+fn unix_secs_nanos(modified: Option<std::time::SystemTime>) -> (u64, u32) {
+    modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| (elapsed.as_secs(), elapsed.subsec_nanos()))
+        .unwrap_or((0, 0))
 }
 
 #[cfg(test)]
@@ -1036,6 +1263,185 @@ mod tree_tests {
         smol::block_on(LocalFs::new().remove(&VfsPath::local(&doomed), RemoveMode::Permanent))
             .unwrap();
         assert!(!doomed.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    fn identity_of(path: &VfsPath, bytes: &[u8]) -> FileIdentity {
+        let md = fs::metadata(path.as_local().unwrap()).unwrap();
+        FileIdentity::new(md.len(), md.modified().ok(), bytes)
+    }
+
+    #[test]
+    fn an_unedited_save_round_trips_byte_identically() {
+        // Opened and saved without being edited: the bytes must not move at
+        // all, not even a newline or a mode bit.
+        let root = tempdir("atomic-noop");
+        let file = root.join("config.conf");
+        fs::write(&file, b"key = value\nsecond = 2").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let path = VfsPath::local(&file);
+        let before = fs::read(&file).unwrap();
+        let expect = identity_of(&path, &before);
+
+        let after = smol::block_on(LocalFs::new().write_atomic(&path, &before, expect)).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), before, "bytes untouched");
+        assert_eq!(after.len, before.len() as u64);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(&file).unwrap().mode() & 0o777,
+                0o640,
+                "permission bits preserved"
+            );
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn crlf_without_trailing_newline_survives_a_save() {
+        // The fidelity the editor promises: line endings and the missing
+        // final newline are the caller's bytes to keep, and the atomic layer
+        // must not touch them.
+        let root = tempdir("atomic-crlf");
+        let file = root.join("win.ini");
+        let before = b"[section]\r\nkey=value";
+        fs::write(&file, before).unwrap();
+        let path = VfsPath::local(&file);
+        let expect = identity_of(&path, before);
+
+        let changed = b"[section]\r\nkey=other";
+        smol::block_on(LocalFs::new().write_atomic(&path, changed, expect)).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), changed);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_bom_is_opaque_bytes_to_the_atomic_layer() {
+        let root = tempdir("atomic-bom");
+        let file = root.join("utf16.txt");
+        let mut before = vec![0xFF, 0xFE];
+        before.extend_from_slice(&[b'h', 0, b'i', 0]);
+        fs::write(&file, &before).unwrap();
+        let path = VfsPath::local(&file);
+        let expect = identity_of(&path, &before);
+
+        let mut changed = before.clone();
+        changed.extend_from_slice(&[b'!', 0]);
+        smol::block_on(LocalFs::new().write_atomic(&path, &changed, expect)).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), changed);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_external_edit_refuses_rather_than_winning() {
+        let root = tempdir("atomic-conflict");
+        let file = root.join("shared.txt");
+        fs::write(&file, b"version one").unwrap();
+        let path = VfsPath::local(&file);
+        let stale = identity_of(&path, b"version one");
+
+        // Someone else saves first: longer, so the length check fires.
+        fs::write(&file, b"version two, longer").unwrap();
+        let err = smol::block_on(LocalFs::new().write_atomic(&path, b"mine", stale))
+            .expect_err("a changed file must refuse");
+        assert!(
+            matches!(err, VfsError::Conflict { .. }),
+            "refusal, not resolution: {err:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "version two, longer",
+            "the refused save changed nothing"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_same_size_same_mtime_edit_still_conflicts() {
+        // The case a stat alone cannot see: identical length and identical
+        // mtime, different bytes. Only the content hash catches it, so forge
+        // an identity with the current stat but a stale hash.
+        let root = tempdir("atomic-sneaky");
+        let file = root.join("sneaky.txt");
+        fs::write(&file, b"aaaaaaaa").unwrap();
+        let path = VfsPath::local(&file);
+
+        // An external edit that keeps the size; the forged identity carries
+        // the *new* stat (as if the clock never moved) with the *old* hash.
+        fs::write(&file, b"bbbbbbbb").unwrap();
+        let current = fs::read(&file).unwrap();
+        let md = fs::metadata(&file).unwrap();
+        let mut stale = FileIdentity::new(md.len(), md.modified().ok(), &current);
+        stale.content_hash = content_hash(b"aaaaaaaa");
+
+        let err = smol::block_on(LocalFs::new().write_atomic(&path, b"cccccccc", stale))
+            .expect_err("same-size edits must conflict");
+        assert!(matches!(err, VfsError::Conflict { .. }), "{err:?}");
+        assert_eq!(fs::read(&file).unwrap(), b"bbbbbbbb");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn conflict_messages_name_the_file() {
+        let err = VfsError::Conflict {
+            path: VfsPath::local("/docs/notes.md"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/docs/notes.md"), "{msg}");
+        assert!(msg.contains("changed"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_refused_not_followed() {
+        let root = tempdir("atomic-link");
+        let target = root.join("real.txt");
+        fs::write(&target, b"real").unwrap();
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let path = VfsPath::local(&link);
+        let expect = FileIdentity::new(4, None, b"real");
+
+        let err = smol::block_on(LocalFs::new().write_atomic(&path, b"swapped", expect))
+            .expect_err("a symlink must never be saved through");
+        assert!(matches!(err, VfsError::Unsupported { .. }), "{err:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"real");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_litter() {
+        let root = tempdir("atomic-litter");
+        let file = root.join("note.txt");
+        fs::write(&file, b"original").unwrap();
+        let path = VfsPath::local(&file);
+        let stale = FileIdentity::new(999, None, b"wrong");
+
+        let _ = smol::block_on(LocalFs::new().write_atomic(&path, b"mine", stale));
+        let litter: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ferret-save-")
+            })
+            .collect();
+        assert!(litter.is_empty(), "temp files must not survive: {litter:?}");
+        assert_eq!(fs::read(&file).unwrap(), b"original");
 
         fs::remove_dir_all(&root).ok();
     }
