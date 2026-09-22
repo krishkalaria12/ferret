@@ -217,6 +217,59 @@ pub fn parse(text: &str, delimiter: u8) -> ParsedTable {
     }
 }
 
+/// Sort the bounded sample by one column, for the grid view.
+///
+/// Sample-only by construction: the grid holds at most
+/// [`TABLE_INITIAL_ROWS`](super::config::TABLE_INITIAL_ROWS) records and no
+/// full-file read exists, so the header says "sample" and sorting says so
+/// too. Numeric-aware — a column of numbers sorts as numbers, mixed content
+/// falls back to string order with numbers first — and stable, so repeated
+/// clicks on one column never scramble ties.
+pub fn sort_sample(rows: &[Row], column: usize, ascending: bool) -> Vec<Row> {
+    let mut sorted: Vec<Row> = rows.to_vec();
+    sort_rows(&mut sorted, column, ascending);
+    sorted
+}
+
+/// Sort display rows in place by one column, with the same numeric-aware,
+/// stable order as [`sort_sample`].
+///
+/// Generic over the cell so the grid can sort its shared strings without
+/// allocating a parallel `String` copy per header click.
+pub fn sort_rows<Cell: AsRef<str>>(rows: &mut [Vec<Cell>], column: usize, ascending: bool) {
+    rows.sort_by(|a, b| {
+        let ordering = compare_cells(
+            a.get(column).map(AsRef::as_ref),
+            b.get(column).map(AsRef::as_ref),
+        );
+        if ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+}
+
+fn compare_cells(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+    match (a, b) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(a), Some(b)) => {
+            match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
+                (Ok(x), Ok(y)) => x
+                    .partial_cmp(&y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(b)),
+                // Numbers sort before text; text sorts as text.
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => a.cmp(b),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +341,36 @@ mod tests {
         let table = parse(&format!("a\n{huge}\n"), b',');
         assert!(table.cut_field);
         assert!(table.rows[1][0].len() <= TABLE_MAX_FIELD_BYTES);
+    }
+
+    #[test]
+    fn samples_sort_numerically_not_lexically() {
+        let rows = vec![
+            vec!["amy".to_string(), "30".to_string()],
+            vec!["bo".to_string(), "9".to_string()],
+            vec!["cy".to_string(), "100".to_string()],
+        ];
+        let sorted = sort_sample(&rows, 1, true);
+        assert_eq!(
+            sorted.iter().map(|row| row[1].clone()).collect::<Vec<_>>(),
+            vec!["9", "30", "100"],
+            "numeric-aware, or ages sort wrong"
+        );
+        let reversed = sort_sample(&rows, 1, false);
+        assert_eq!(reversed[0][1], "100");
+    }
+
+    #[test]
+    fn sorting_is_stable_and_ragged_safe() {
+        let rows = vec![
+            vec!["b".to_string()],
+            vec!["a".to_string(), "x".to_string(), "y".to_string()],
+            vec!["a".to_string()],
+        ];
+        // Missing cells sort last; ties keep their input order.
+        let sorted = sort_sample(&rows, 0, true);
+        assert_eq!(sorted[0].len(), 3);
+        assert_eq!(sorted[1], vec!["a".to_string()]);
+        assert_eq!(sorted[2], vec!["b".to_string()]);
     }
 }

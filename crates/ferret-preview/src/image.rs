@@ -51,6 +51,69 @@ impl Bitmap {
             && self.height > 0
             && self.bgra.len() == (self.width as usize) * (self.height as usize) * 4
     }
+
+    /// Wrap straight (unpremultiplied) RGBA bytes as a BGRA bitmap.
+    ///
+    /// Returns `None` for a zero area or a buffer that does not match its
+    /// dimensions — the same boundary check as [`Bitmap::is_well_formed`],
+    /// applied before the bytes can travel anywhere.
+    pub fn from_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Option<Bitmap> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if rgba.len() != width as usize * height as usize * 4 {
+            return None;
+        }
+        let (bgra, has_transparency) = rgba_to_bgra(rgba);
+        let bitmap = Bitmap {
+            width,
+            height,
+            bgra,
+            has_transparency,
+        };
+        bitmap.is_well_formed().then_some(bitmap)
+    }
+
+    /// Wrap premultiplied RGBA bytes (as rasterisers emit them) as a BGRA
+    /// bitmap, unpremultiplying on the way in.
+    ///
+    /// A zero alpha unpremultiplies to transparent black rather than
+    /// dividing by zero. `None` on the same malformed inputs as
+    /// [`Bitmap::from_rgba8`].
+    pub fn from_premultiplied_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Option<Bitmap> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if rgba.len() != width as usize * height as usize * 4 {
+            return None;
+        }
+        let mut bgra = rgba;
+        let mut transparent = false;
+        for pixel in bgra.chunks_exact_mut(4) {
+            let alpha = pixel[3];
+            if alpha == 0 {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+            } else if alpha < 255 {
+                pixel[0] = ((u16::from(pixel[0]) * 255 + u16::from(alpha) / 2) / u16::from(alpha))
+                    .min(255) as u8;
+                pixel[1] = ((u16::from(pixel[1]) * 255 + u16::from(alpha) / 2) / u16::from(alpha))
+                    .min(255) as u8;
+                pixel[2] = ((u16::from(pixel[2]) * 255 + u16::from(alpha) / 2) / u16::from(alpha))
+                    .min(255) as u8;
+            }
+            pixel.swap(0, 2);
+            transparent |= alpha != 255;
+        }
+        let bitmap = Bitmap {
+            width,
+            height,
+            bgra,
+            has_transparency: transparent,
+        };
+        bitmap.is_well_formed().then_some(bitmap)
+    }
 }
 
 /// One animation frame: composited full-canvas bitmap plus delay.

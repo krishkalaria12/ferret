@@ -78,6 +78,16 @@ impl DecodedText {
     pub fn lossless(&self) -> bool {
         !self.lossy && !self.truncated_lines && !matches!(self.endings, LineEndings::Mixed)
     }
+
+    /// Whether a save may be attempted at all.
+    ///
+    /// Everything [`DecodedText::lossless`] requires, plus a re-encodable
+    /// encoding: UTF-32 stays read-only in v1 because its four-byte units
+    /// make the editor's character offsets lie about byte offsets, and that
+    /// lie is exactly what a save must never act on.
+    pub fn saveable(&self) -> bool {
+        self.lossless() && !matches!(self.bom, Bom::Utf32Le | Bom::Utf32Be)
+    }
 }
 
 /// Decode budgeted bytes into displayable text.
@@ -255,6 +265,71 @@ fn cap_lines(text: &str) -> (String, bool) {
     (out, truncated)
 }
 
+/// Rebuild file bytes from edited editor text plus the fidelity snapshot.
+///
+/// The editor works in LF with no BOM; the file may be CRLF with one. `text`
+/// is the editor's current value, `original` the [`DecodedText`] it was
+/// loaded from. Line endings, the byte-order mark and the presence or absence
+/// of a trailing newline are all restored from the snapshot, so a CRLF file
+/// stays CRLF even though the editor never saw a `\r`.
+///
+/// Callers must have checked [`DecodedText::saveable`] first: mixed endings
+/// have no single ending to restore, and UTF-32 is refused above, not
+/// mangled here.
+pub fn reencode(original: &DecodedText, text: &str) -> Vec<u8> {
+    // The editor normalises to LF; strip any stray `\r` first so a pasted
+    // CRLF fragment cannot smuggle a second ending style into the file.
+    let logical: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let joined = match original.endings {
+        LineEndings::Crlf => logical.join("\r\n"),
+        _ => logical.join("\n"),
+    };
+    // Restore the trailing-newline state: a file that ended without one must
+    // still end without one after an edit, and vice versa.
+    let mut body = joined;
+    if original.trailing_newline && !body.ends_with('\n') {
+        let ending = matches!(original.endings, LineEndings::Crlf)
+            .then_some("\r\n")
+            .unwrap_or("\n");
+        body.push_str(ending);
+    } else if !original.trailing_newline && body.ends_with('\n') {
+        body.pop();
+        if matches!(original.endings, LineEndings::Crlf) && body.ends_with('\r') {
+            body.pop();
+        }
+    }
+    match original.bom {
+        Bom::None => body.into_bytes(),
+        Bom::Utf8 => {
+            let mut out = vec![0xEF, 0xBB, 0xBF];
+            out.extend_from_slice(body.as_bytes());
+            out
+        }
+        Bom::Utf16Le | Bom::Utf16Be => {
+            let little = matches!(original.bom, Bom::Utf16Le);
+            let mut out = if little {
+                vec![0xFF, 0xFE]
+            } else {
+                vec![0xFE, 0xFF]
+            };
+            for unit in body.encode_utf16() {
+                let pair = if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                };
+                out.extend_from_slice(&pair);
+            }
+            out
+        }
+        // Refused by `saveable`; encode UTF-8 rather than corrupt.
+        Bom::Utf32Le | Bom::Utf32Be => body.into_bytes(),
+    }
+}
+
 /// Format the head of a binary file: 16 bytes per row, offset gutter, hex,
 /// printable ASCII column.
 pub fn format_hex(head: &[u8]) -> String {
@@ -363,5 +438,69 @@ mod tests {
     #[test]
     fn nul_bytes_are_binary_whatever_the_bom_claimed() {
         assert!(decode(b"\xEF\xBB\xBFa\x00b").is_none());
+    }
+
+    #[test]
+    fn utf32_is_decoded_but_never_saveable() {
+        let mut bytes = vec![0xFF, 0xFE, 0, 0];
+        for ch in "hi\n".chars() {
+            bytes.extend_from_slice(&(ch as u32).to_le_bytes());
+        }
+        let decoded = decode(&bytes).expect("UTF-32 decodes");
+        assert_eq!(decoded.text, "hi\n");
+        assert!(decoded.lossless(), "complete and uniform");
+        assert!(!decoded.saveable(), "four-byte units lie about offsets");
+    }
+
+    #[test]
+    fn reencode_restores_endings_newline_and_bom() {
+        // LF, trailing newline: the edit changes one line, nothing else.
+        let original = decode(b"a\nb\n").unwrap();
+        assert_eq!(reencode(&original, "a\nB\n"), b"a\nB\n");
+
+        // CRLF without a trailing newline: both survive the round trip.
+        let original = decode(b"a\r\nb").unwrap();
+        assert_eq!(original.endings, LineEndings::Crlf);
+        assert!(!original.trailing_newline);
+        assert_eq!(reencode(&original, "a\r\nB"), b"a\r\nB");
+        // A stray CRLF pasted into the editor cannot smuggle endings in.
+        assert_eq!(reencode(&original, "a\r\nB\r\n"), b"a\r\nB");
+
+        // A file that ended with a newline keeps it even if the edit drops
+        // the last one; one that did not keeps not having it.
+        let original = decode(b"x\n").unwrap();
+        assert_eq!(reencode(&original, "y"), b"y\n");
+        let original = decode(b"x").unwrap();
+        assert_eq!(reencode(&original, "y\n"), b"y");
+
+        // UTF-8 BOM round-trips; UTF-16LE re-encodes its units.
+        let original = decode(b"\xEF\xBB\xBFhi\n").unwrap();
+        assert_eq!(
+            reencode(&original, "hi!\n"),
+            b"\xEF\xBB\xBFhi!\n".as_slice()
+        );
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in "hi\n".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let original = decode(&utf16).unwrap();
+        let mut want = vec![0xFF, 0xFE];
+        for unit in "yo\n".encode_utf16() {
+            want.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(reencode(&original, "yo\n"), want);
+    }
+
+    #[test]
+    fn an_unedited_buffer_reencodes_byte_identically() {
+        for file in [
+            b"plain\n".as_slice(),
+            b"crlf\r\nfile\r\n".as_slice(),
+            b"bare".as_slice(),
+        ] {
+            let original = decode(file).unwrap();
+            assert!(original.saveable());
+            assert_eq!(reencode(&original, &original.text), file);
+        }
     }
 }

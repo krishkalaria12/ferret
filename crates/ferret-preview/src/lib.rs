@@ -20,6 +20,8 @@ pub mod config;
 pub mod image;
 pub mod languages;
 pub mod markdown;
+pub mod pdf;
+pub mod svg;
 pub mod table;
 pub mod text;
 pub mod thumbs;
@@ -29,7 +31,10 @@ mod errors;
 pub use classify::Kind;
 pub use errors::{PreviewError, Result};
 pub use image::{Bitmap, DecodedImage, Frame, ImageError};
-pub use table::{ParsedTable, Row};
+pub use pdf::{PdfUnavailable, RenderedPage, is_encrypted, page_count, render_page};
+pub use svg::{SvgError, looks_like_svg};
+pub use table::{ParsedTable, Row, sort_sample};
+pub use text::{Bom, DecodedText, LineEndings, reencode};
 pub use thumbs::{ThumbCache, fingerprint, is_tileable_extension, thumb_key};
 
 use ferret_vfs::VfsPath;
@@ -73,6 +78,10 @@ pub enum Unsupported {
     /// renderer covers the kind. Metadata and *Open with…* instead — a
     /// finished state, not a failure state.
     NoRenderer,
+    /// The file declares encryption (PDF `/Encrypt`). v1 opens nothing and
+    /// retries nothing in the background: a password is required, so the
+    /// pane says so and offers *Open with…* instead.
+    Protected,
 }
 
 /// The value the background pipeline produces and `Render` only reads.
@@ -100,8 +109,8 @@ pub enum Preview {
         truncated: Truncation,
     },
 
-    /// F-35. Header row detected, delimiter sniffed, rows bounded. The grid
-    /// renderer arrives later; until then the sample previews as text.
+    /// F-35. Header row detected, delimiter sniffed, rows bounded. The pane
+    /// renders the sample in a virtualised grid; sorting is sample-only.
     Table {
         table: ParsedTable,
         truncated: Truncation,
@@ -177,6 +186,7 @@ pub fn budget_for(kind: &Kind, remote: bool) -> usize {
         Kind::Code { .. } => config::TEXT_BUDGET,
         Kind::Csv | Kind::Tsv => config::TABLE_BUDGET,
         Kind::Image => config::IMAGE_BUDGET,
+        Kind::Svg => config::SVG_BUDGET,
         Kind::Pdf => config::PDF_BUDGET,
         Kind::Binary => config::HEX_BUDGET,
     };
@@ -256,6 +266,11 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                     image,
                     truncated: Truncation { shown, total },
                 },
+                // A vector image wearing a raster extension (or the reverse):
+                // the bounded rasteriser gets one chance before the fallbacks.
+                Err(image::ImageError::Undecodable) if svg::looks_like_svg(&bytes) => {
+                    svg_preview(bytes, total)
+                }
                 // A corrupt image must still show its size: the hex floor.
                 Err(image::ImageError::Undecodable) => Preview::Binary {
                     head: bytes[..bytes.len().min(config::HEX_BUDGET)].to_vec(),
@@ -281,6 +296,7 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                 }
             }
         }
+        Kind::Svg => svg_preview(bytes, total),
         Kind::Pdf => {
             let budget = budget_for(&kind, false);
             if total > budget as u64 {
@@ -291,6 +307,14 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                         budget,
                     },
                 }
+            } else if pdf::is_encrypted(&bytes) {
+                // Labelled here so every path that declines the render —
+                // the pipeline, the overlay, a future helper — agrees the
+                // file needs a password. v1 opens nothing and retries nothing.
+                Preview::Unsupported {
+                    kind,
+                    reason: Unsupported::Protected,
+                }
             } else {
                 Preview::Unsupported {
                     kind,
@@ -298,6 +322,40 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                 }
             }
         }
+    }
+}
+
+/// Build the [`Preview`] for SVG bytes: rasterise bounded, fall back to
+/// labelled XML source for files that claim the extension without parsing,
+/// and to the hex floor only for bytes that are neither.
+fn svg_preview(bytes: Vec<u8>, total: u64) -> Preview {
+    let shown = bytes.len() as u64;
+    match svg::render(&bytes) {
+        Ok(image) => Preview::Image {
+            image,
+            truncated: Truncation { shown, total },
+        },
+        Err(svg::SvgError::TooLarge) => {
+            let budget = budget_for(&Kind::Svg, false);
+            Preview::Unsupported {
+                kind: Kind::Svg,
+                reason: Unsupported::TooLarge {
+                    size: total,
+                    budget,
+                },
+            }
+        }
+        Err(svg::SvgError::Unparseable) => match text::decode(&bytes) {
+            Some(decoded) => Preview::Code {
+                text: decoded.text,
+                language: SmolStr::new("xml"),
+                truncated: Truncation { shown, total },
+            },
+            None => Preview::Binary {
+                head: bytes[..bytes.len().min(config::HEX_BUDGET)].to_vec(),
+                size: total,
+            },
+        },
     }
 }
 
@@ -420,5 +478,57 @@ mod tests {
             ),
             config::TEXT_BUDGET / 4
         );
+    }
+
+    #[test]
+    fn svg_builds_a_bitmap_labelled_svg() {
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="green"/></svg>"#;
+        let Preview::Image { image, .. } =
+            build_named("icon.svg", source, Some(source.len() as u64))
+        else {
+            panic!("a real SVG must rasterise");
+        };
+        assert_eq!(image.format_name, "SVG");
+        assert_eq!(image.natural, (32, 32));
+    }
+
+    #[test]
+    fn ordinary_pdfs_build_unsupported_until_the_backend_answers() {
+        // `build` never calls the renderer: an in-budget PDF is metadata
+        // with a renderer-shaped hole, which the pipeline fills (Pdfium)
+        // or leaves (native thumbnail, then this message).
+        let bytes = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+        let Preview::Unsupported { kind, reason } =
+            build_named("report.pdf", &bytes, Some(bytes.len() as u64))
+        else {
+            panic!("a PDF must not preview as text, code or hex");
+        };
+        assert_eq!(kind, Kind::Pdf);
+        assert_eq!(reason, Unsupported::NoRenderer);
+    }
+
+    #[test]
+    fn encrypted_pdfs_label_protected_not_unrenderable() {
+        // The password requirement is detected from bytes alone, on every
+        // path that declines the render — never a spinner, never retries.
+        let mut bytes = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+        bytes.extend_from_slice(b"trailer\n<< /Size 2 /Encrypt 5 0 R >>");
+        let Preview::Unsupported { kind, reason } =
+            build_named("secret.pdf", &bytes, Some(bytes.len() as u64))
+        else {
+            panic!("an encrypted PDF must not preview as anything else");
+        };
+        assert_eq!(kind, Kind::Pdf);
+        assert_eq!(reason, Unsupported::Protected);
+    }
+
+    #[test]
+    fn garbage_wearing_svg_falls_back_to_labelled_source() {
+        let Preview::Code { language, .. } =
+            build_named("icon.svg", b"definitely not xml", Some(18))
+        else {
+            panic!("an unparseable .svg must preview as source, not hex");
+        };
+        assert_eq!(language.as_str(), "xml");
     }
 }

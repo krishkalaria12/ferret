@@ -234,9 +234,27 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+# F-33. Bounded SVG rasterisation: `usvg` parses with no resource directory
+# (external references resolve to nothing, never to the network) and `resvg`
+# renders at display scale into a capped pixmap. Both are already in the graph
+# through `gpui`, pinned there at 0.46 — these are edges to the same packages,
+# not new ones, so the versions below must stay on the 0.46/0.11 line gpui
+# uses. `text` is declared explicitly rather than inherited from Zed's edge.
+resvg = { version = "0.46", default-features = false, features = ["text"] }
+usvg = { version = "0.46", default-features = false }
+tiny-skia = { version = "0.11", default-features = false }
+# F-34. Paged PDF rendering behind `ferret-preview/pdf` (PV-D08). The crate is
+# pure-Rust bindings; the native Pdfium library itself is resolved at runtime
+# (bundled path, then the system), and its absence is a graceful metadata
+# fallback — never a crash. `threadsafe` because page renders run on the
+# background pool, not on one dedicated thread.
+pdfium-render = { version = "0.9", features = ["thread_safe"] }
+
 # `RenderImage` is built from `image::Frame`, so the OS icon path needs the
 # same `image` version gpui itself uses. Codecs are preview decoders (F-33):
 # raster formats ferret decodes itself, bounded, off-thread — never through
+# GPUI's whole-file asset loader. HEIC/RAW stay out (OS thumbnails cover
+# them); AVIF stays out until decoder-level subsampling is proven.
 # GPUI's whole-file asset loader. HEIC/RAW stay out (OS thumbnails cover
 # them); AVIF stays out until decoder-level subsampling is proven.
 image = { version = "0.25", default-features = false, features = [

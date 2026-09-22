@@ -13,6 +13,20 @@ csv.workspace = true
 dirs.workspace = true
 image.workspace = true
 markdown.workspace = true
+resvg.workspace = true
 smallvec.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
+tiny-skia.workspace = true
+usvg.workspace = true
+# Paged PDF rendering (F-34, PV-D08). Optional so a fast
+# `--no-default-features` build skips it; official builds keep it on, and its
+# absence at runtime is a metadata fallback rather than a crash.
+pdfium-render = { workspace = true, optional = true }
+
+[features]
+default = ["pdf"]
+pdf = ["dep:pdfium-render"]
+
+[dev-dependencies]
+smol.workspace = true

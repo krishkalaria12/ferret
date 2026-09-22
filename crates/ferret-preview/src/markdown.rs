@@ -67,6 +67,68 @@ pub struct LocalImage {
     pub alt: String,
 }
 
+/// A document-local image, decoded and bounded for display.
+///
+/// First frame only: a document that embeds an animation gets its poster,
+/// not a second animation competing with the pane's own. Failures are
+/// skipped by the loader rather than reported — the alt text the sanitizer
+/// left behind is already the honest representation.
+#[derive(Clone, Debug)]
+pub struct LoadedDocImage {
+    pub path: PathBuf,
+    pub alt: String,
+    pub image: super::image::DecodedImage,
+}
+
+/// Decode the safe-relative images [`sanitize`] recorded, for display under
+/// the document.
+///
+/// Each file is read under [`MARKDOWN_IMAGE_INPUT`](super::config::MARKDOWN_IMAGE_INPUT),
+/// decoded through the same capped pipeline as F-33, and kept while the
+/// aggregate decoded bytes stay within
+/// [`MARKDOWN_IMAGE_DECODED`](super::config::MARKDOWN_IMAGE_DECODED). Runs on
+/// the caller's background task; nothing here touches a window.
+///
+/// The paths are the canonical absolute paths `decide` verified at sanitize
+/// time — no traversal is possible at load, only a file that changed since.
+/// Anything unreadable or undecodable is skipped: a missing diagram must not
+/// fail the document around it.
+pub async fn load_doc_images(
+    fs: &impl ferret_vfs::Vfs,
+    local: &[LocalImage],
+) -> Vec<LoadedDocImage> {
+    use super::config::{MARKDOWN_IMAGE_DECODED, MARKDOWN_IMAGE_INPUT};
+
+    let mut loaded = Vec::new();
+    let mut decoded_bytes = 0usize;
+    for image in local.iter().take(super::config::MARKDOWN_MAX_IMAGES) {
+        let path = ferret_vfs::VfsPath::local(image.path.clone());
+        let Ok(bytes) = fs.read(&path, MARKDOWN_IMAGE_INPUT).await else {
+            continue;
+        };
+        let Ok(mut decoded) = super::image::decode(&bytes) else {
+            continue;
+        };
+        decoded.frames.truncate(1);
+        decoded.frames_capped = false;
+        let cost: usize = decoded
+            .frames
+            .iter()
+            .map(|frame| frame.bitmap.bgra.len())
+            .sum();
+        if decoded_bytes + cost > MARKDOWN_IMAGE_DECODED && !loaded.is_empty() {
+            break;
+        }
+        decoded_bytes += cost;
+        loaded.push(LoadedDocImage {
+            path: image.path.clone(),
+            alt: image.alt.clone(),
+            image: decoded,
+        });
+    }
+    loaded
+}
+
 /// Sanitized source plus everything the footer and phase 07 need.
 #[derive(Debug)]
 pub struct Sanitized {
@@ -538,8 +600,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            // A process-wide counter disambiguates fixtures created within
+            // the same clock tick: parallel tests sharing a pid and a
+            // timestamp would otherwise share one directory, and one's
+            // `Drop` would delete the other's files mid-assertion.
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
-                "ferret-md-{}-{}",
+                "ferret-md-{}-{}-{seq}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -810,5 +878,47 @@ mod tests {
         let out = sanitize(source, Some(fixture.doc())).unwrap();
         assert_eq!(out.source, source);
         assert!(out.local.is_empty());
+    }
+
+    #[test]
+    fn doc_images_decode_bounded_first_frames_only() {
+        use ::image::{Rgba, RgbaImage};
+
+        smol::block_on(async {
+            let fixture = Fixture::new();
+            // A real PNG beside the document decodes; a corrupt file and a
+            // missing one are skipped without failing the rest.
+            let png = RgbaImage::from_pixel(4, 3, Rgba([9, 9, 9, 255]));
+            let mut encoded = Vec::new();
+            ::image::DynamicImage::ImageRgba8(png)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut encoded),
+                    ::image::ImageFormat::Png,
+                )
+                .unwrap();
+            fs::write(fixture.doc().join("good.png"), &encoded).unwrap();
+            fs::write(fixture.doc().join("bad.png"), b"not a png").unwrap();
+
+            let fs = ferret_vfs::LocalFs::new();
+            let local = vec![
+                LocalImage {
+                    path: fixture.doc().join("good.png"),
+                    alt: "diagram".into(),
+                },
+                LocalImage {
+                    path: fixture.doc().join("bad.png"),
+                    alt: "broken".into(),
+                },
+                LocalImage {
+                    path: fixture.doc().join("missing.png"),
+                    alt: "gone".into(),
+                },
+            ];
+            let loaded = load_doc_images(&fs, &local).await;
+            assert_eq!(loaded.len(), 1, "one good image, two silent skips");
+            assert_eq!(loaded[0].alt, "diagram");
+            assert_eq!(loaded[0].image.frames.len(), 1);
+            assert!(loaded[0].image.frames[0].bitmap.is_well_formed());
+        });
     }
 }

@@ -131,6 +131,48 @@ pub const IMAGE_TARGET_LONG_EDGE: u32 = 4096;
 /// cache keys, so the two never share entries.
 pub const NATIVE_PANE_PX: u32 = 1024;
 
+/// Largest SVG source parsed in-process.
+///
+/// SVGs are text: 2 MiB of XML is already an enormous document, and anything
+/// past it previews as labelled source rather than risking a pathological
+/// node tree. The read budget for `Kind::Svg` is this, not `IMAGE_BUDGET`.
+pub const SVG_BUDGET: usize = 2 * 1024 * 1024;
+
+/// Most nodes in a parsed SVG tree.
+///
+/// `viewBox` dimensions alone do not bound complexity — a 16 px icon can
+/// carry a hundred thousand paths — so the tree is walked and counted before
+/// rasterising. Past this the answer is `TooLarge`, never an attempted
+/// render.
+pub const SVG_MAX_NODES: usize = 50_000;
+
+/// Deepest SVG group nesting rendered.
+///
+/// Past this the document is refused rather than recursed into.
+pub const SVG_MAX_DEPTH: usize = 256;
+
+/// Long edge of a rendered PDF page bitmap.
+///
+/// A page is a document, not a photograph: 2048 px is crisp at any pane
+/// width on a 2x display, and two retained pages (current plus one neighbour)
+/// stay inside the resident bitmap budget.
+pub const PDF_TARGET_LONG_EDGE: u32 = 2048;
+
+/// Deadline for one PDF page render.
+///
+/// An initial target to verify on both platforms, not a measured guarantee.
+/// The render runs off the window thread; a helper that exceeds this is
+/// restarted and the pane keeps page one with a note, rather than blocking
+/// the sweep that is still arriving.
+pub const PDF_RENDER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Memory ceiling for the PDF helper.
+///
+/// Decoder limits alone do not enforce aggregate accounting: input, scratch
+/// and retained page bitmaps all count, and past this a render is refused
+/// rather than attempted.
+pub const PDF_HELPER_MEMORY: usize = 256 * 1024 * 1024;
+
 /// Long edge of an icon-view thumbnail tile.
 ///
 /// The tile glyph box is 48 logical px, so 128 covers 2x displays with room

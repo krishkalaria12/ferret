@@ -30,6 +30,9 @@ pub enum Kind {
     Csv,
     Tsv,
     Image,
+    /// Vector images: rasterised in-process by [`crate::svg`], bounded by
+    /// [`crate::config::SVG_BUDGET`] rather than [`crate::config::IMAGE_BUDGET`].
+    Svg,
     Pdf,
     /// Anything else: the hex floor, not an apology.
     Binary,
@@ -45,6 +48,7 @@ impl Kind {
             Kind::Csv => "CSV table".into(),
             Kind::Tsv => "TSV table".into(),
             Kind::Image => "Image".into(),
+            Kind::Svg => "SVG image".into(),
             Kind::Pdf => "PDF document".into(),
             Kind::Binary => "Binary".into(),
         }
@@ -86,9 +90,13 @@ pub fn classify(file_name: &str, sniff: &[u8], size: Option<u64>) -> Kind {
 
     // 3. Extension table (tentative) and format extensions. A raster file
     // with its real extension but unrecognised magic (HEIC, RAW) is still an
-    // image — it reaches the OS-thumbnail path, never the text view.
-    let mut kind = super::languages::language_for(file_name)
-        .map(language_kind)
+    // image — it reaches the OS-thumbnail path, never the text view. SVG is
+    // checked before the language table: `svg` resolves to `xml` there, and
+    // a vector image must rasterise rather than preview as source now that
+    // the bounded rasteriser exists.
+    let mut kind = is_svg_name(file_name)
+        .then_some(Kind::Svg)
+        .or_else(|| super::languages::language_for(file_name).map(language_kind))
         .or_else(|| format_extension_kind(file_name));
     if kind.is_none() {
         // The extension table already maps `txt` to `plain`; anything else
@@ -119,6 +127,18 @@ pub fn classify(file_name: &str, sniff: &[u8], size: Option<u64>) -> Kind {
     kind.unwrap_or(Kind::Binary)
 }
 
+/// Whether a file name claims the `.svg` extension, case-insensitively.
+///
+/// Checked before the language table, where `svg` would otherwise resolve to
+/// `xml` and preview as source. A leading dot makes a hidden file, not an
+/// extension, the same rule the language table uses.
+fn is_svg_name(file_name: &str) -> bool {
+    let Some((_, ext)) = file_name.trim_start_matches('.').rsplit_once('.') else {
+        return false;
+    };
+    ext.eq_ignore_ascii_case("svg")
+}
+
 /// Image and document formats by extension, for files whose magic is
 /// unrecognised (HEIC, RAW) or absent from the sniff window.
 fn format_extension_kind(file_name: &str) -> Option<Kind> {
@@ -145,10 +165,10 @@ fn format_extension_kind(file_name: &str) -> Option<Kind> {
 
 /// Map a resolved language name to the kind that renders it.
 ///
-/// Note `svg` resolves to `xml` in the language table, which is deliberate:
-/// until the bounded SVG rasteriser lands, vector images preview as labelled
-/// source — the documented fallback, not a misclassification. Raster formats
-/// return no language at all, so they can only arrive here via magic bytes.
+/// Note `svg` still resolves to `xml` in the language table for files that
+/// reach it without the extension (an extensionless vector document): those
+/// preview as labelled source, the honest fallback. Raster formats return no
+/// language at all, so they can only arrive here via magic bytes.
 fn language_kind(language: &'static str) -> Kind {
     match language {
         "markdown" => Kind::Markdown,
@@ -297,6 +317,19 @@ mod tests {
             classify("huge.log", &head, Some(4_000_000_000)),
             Kind::Binary
         );
+    }
+
+    #[test]
+    fn svg_names_rasterise_before_the_language_table() {
+        // The language table maps `svg` to `xml`; the extension check runs
+        // first so vector images rasterise instead of previewing as source.
+        assert_eq!(classify("icon.svg", b"<svg", Some(5)), Kind::Svg);
+        assert_eq!(classify("ICON.SVG", b"<svg", Some(5)), Kind::Svg);
+        // ...but only the extension claims it: inline SVG in HTML stays HTML.
+        assert!(matches!(
+            classify("page.html", b"<svg", Some(5)),
+            Kind::Code { .. }
+        ));
     }
 
     #[test]
