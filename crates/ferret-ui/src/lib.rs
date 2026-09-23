@@ -74,8 +74,23 @@ pub fn preserve_edit_recovery_copies(cx: &mut gpui::App) -> Vec<std::path::PathB
                 .file_name()
                 .map(sanitize_recovery_name)
                 .unwrap_or_else(|| "untitled".to_string());
-            let dest = dir.join(format!("{name}.{}-{}.txt", std::process::id(), saved.len()));
-            if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&dest, text).is_ok() {
+            // Hash the full path into the name: two same-named files in
+            // different directories must never collide, and the source stays
+            // recoverable from the copy's first line below.
+            let digest = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                path.to_string().hash(&mut hasher);
+                hasher.finish()
+            };
+            let dest = dir.join(format!(
+                "{name}.{digest:016x}.{}-{}.txt",
+                std::process::id(),
+                saved.len()
+            ));
+            let mut body = format!("Source: {path}\n");
+            body.push_str(&text);
+            if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&dest, body).is_ok() {
                 saved.push(dest);
             }
         }

@@ -45,10 +45,13 @@ impl PreviewPanel {
     pub(super) fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (title, detail) = match &self.state {
-            PaneState::Empty { name, .. } => (Self::display_name(name), "Preview".to_string()),
-            PaneState::Multiple { count, .. } => {
-                (format!("{count} items selected"), "Preview".to_string())
+            PaneState::Empty { name, .. } => {
+                (Self::display_name(name), SharedString::from("Preview"))
             }
+            PaneState::Multiple { count, .. } => (
+                format!("{count} items selected"),
+                SharedString::from("Preview"),
+            ),
             PaneState::Directory { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
@@ -71,7 +74,9 @@ impl PreviewPanel {
             PaneState::Unsupported { entry, detail, .. } => {
                 (Self::display_name(entry.name()), detail.clone())
             }
-            PaneState::Error { name, .. } => (Self::display_name(name), "Preview".to_string()),
+            PaneState::Error { name, .. } => {
+                (Self::display_name(name), SharedString::from("Preview"))
+            }
         };
         let reveal_label: &'static str = if cfg!(target_os = "macos") {
             "Reveal in Finder"
@@ -143,7 +148,7 @@ impl PreviewPanel {
                             .truncate()
                             .text_size(px(11.5))
                             .text_color(theme.muted_foreground)
-                            .child(SharedString::from(detail)),
+                            .child(detail),
                     ),
             )
             .children(self.render_edit_buttons(edit_buttons, cx))

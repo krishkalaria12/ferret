@@ -219,11 +219,12 @@ pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
     if !bitmap.is_well_formed() {
         return None;
     }
-    let frame = image::Frame::new(image::RgbaImage::from_raw(
-        bitmap.width,
-        bitmap.height,
-        bitmap.bgra,
-    )?);
+    let frame = ferret_preview::image::still_frame(&ferret_preview::Bitmap {
+        width: bitmap.width,
+        height: bitmap.height,
+        has_transparency: ferret_preview::image::detect_transparency(&bitmap.bgra),
+        bgra: bitmap.bgra,
+    })?;
     let image = Arc::new(gpui::RenderImage::new(vec![frame]));
     Some(gpui::ImageSource::Render(
         state.rendered_os_icons.insert_if_absent(key, image),

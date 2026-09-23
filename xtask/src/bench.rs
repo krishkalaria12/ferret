@@ -267,7 +267,7 @@ pub fn sweep_preview(root: &Path) -> Result<PreviewSweep> {
 
         let total = known_size.unwrap_or(bytes.len() as u64);
         let base = path.parent().unwrap_or_else(|| VfsPath::local("/"));
-        let preview = ferret_preview::build(kind.clone(), bytes, Some(total), base);
+        let preview = ferret_preview::build(kind.clone(), bytes, Some(total), base, false);
         describe(
             name,
             &kind,

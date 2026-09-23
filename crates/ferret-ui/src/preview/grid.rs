@@ -59,6 +59,12 @@ impl CsvGrid {
             .has_header_toggle()
             .then(|| delegate.delegate().header_on())
     }
+
+    /// The background-computed column widths, for the overlay to reuse
+    /// without remeasuring O(the sample) on the window thread.
+    pub fn widths(&self, cx: &App) -> Vec<f32> {
+        self.table.read(cx).delegate().widths.clone()
+    }
 }
 
 impl PreviewPanel {
@@ -142,7 +148,18 @@ impl CsvDelegate {
         };
         self.header_on = !self.header_on;
         if self.header_on {
-            self.labels = inferred;
+            // Restore the padded labels: a short header must not narrow the
+            // grid below the widest data row on the way back on.
+            let width = self
+                .base_rows
+                .iter()
+                .map(Vec::len)
+                .fold(inferred.len(), usize::max);
+            let mut labels = inferred;
+            for index in labels.len() + 1..=width {
+                labels.push(SharedString::from(format!("Column {index}")));
+            }
+            self.labels = labels;
             // The header row leaves the data: it labels, not doubles.
             if self.base_rows.first().is_some_and(|first| {
                 first.len() == self.inferred.as_ref().map(Vec::len).unwrap_or(0)

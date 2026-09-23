@@ -21,7 +21,6 @@ arc-swap.workspace = true
 foldhash.workspace = true
 futures.workspace = true
 gpui.workspace = true
-image.workspace = true
 jiff.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true

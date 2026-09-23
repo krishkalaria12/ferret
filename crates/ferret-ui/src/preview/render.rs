@@ -37,10 +37,12 @@ impl PreviewPanel {
         };
         // A refused save is the footer with something to say: the conflict
         // names what happened and what to do, beside the buffer it kept.
+        // (Conflict is a rare state, not steady-state frames, so formatting
+        // here does not touch the allocations budget.)
         if let Some(conflict) = self.edit_conflict() {
             footer = Some(match footer {
-                Some(existing) => format!("{existing} {conflict}"),
-                None => conflict.to_string(),
+                Some(existing) => SharedString::from(format!("{existing} {conflict}")),
+                None => SharedString::from(conflict),
             });
         }
         v_flex()
@@ -251,11 +253,12 @@ impl PreviewPanel {
     }
 
     /// Type icon at large size, the reason, and *Open with…*. A finished
-    /// state, not a failure state.
+    /// state, not a failure state. The message is a stored handle, cloned
+    /// per frame as a refcount bump — never reformatted.
     fn render_fallback(
         &self,
         entry: &Entry,
-        message: &str,
+        message: &SharedString,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let icon = cx.global::<FerretState>().icons.asset_path(entry);
@@ -277,7 +280,7 @@ impl PreviewPanel {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(message.to_string())),
+                    .child(message.clone()),
             )
             .child(
                 h_flex()
@@ -303,7 +306,7 @@ impl PreviewPanel {
             .into_any_element()
     }
 
-    fn render_error(&self, message: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_error(&self, message: &SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
         h_flex()
             .flex_1()
             .items_start()
@@ -319,7 +322,7 @@ impl PreviewPanel {
                     .flex_1()
                     .text_size(px(13.))
                     .text_color(cx.theme().foreground)
-                    .child(SharedString::from(message.to_string())),
+                    .child(message.clone()),
             )
             .into_any_element()
     }
@@ -343,7 +346,7 @@ impl PreviewPanel {
             })
     }
 
-    fn render_footer(&self, footer: String, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_footer(&self, footer: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_shrink_0()
             .px(px(12.))
@@ -352,7 +355,7 @@ impl PreviewPanel {
             .border_color(cx.theme().border)
             .text_size(px(11.5))
             .text_color(cx.theme().muted_foreground)
-            .child(SharedString::from(footer))
+            .child(footer)
     }
 }
 

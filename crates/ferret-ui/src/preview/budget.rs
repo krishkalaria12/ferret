@@ -35,10 +35,13 @@ const FILES: usize = 10;
 /// Frames to average over.
 const FRAMES: usize = 20;
 
-/// Heap allocations one preview may cost per frame: the stored footer's
-/// clone, when there is one. Everything else is a read of a reference, a
-/// `Copy`, or an inline `SmolStr`. Anything O(the file) lands orders of
-/// magnitude above this, which is the point — a tripwire, not a stopwatch.
+/// Heap allocations one preview may cost per frame: the header title, which
+/// is re-derived per frame and filename-bounded (measured: exactly 1). The
+/// stored detail, footer and page-label handles are `SharedString` clones
+/// (refcount bumps, no heap blocks) and everything else is a read of a
+/// reference, a `Copy`, or an inline `SmolStr`. Anything O(the file) lands
+/// orders of magnitude above this, which is the point — a tripwire, not a
+/// stopwatch.
 const ALLOCATIONS_PER_PREVIEW: u64 = 1;
 
 fn entry(name: &str, len: u64) -> Entry {
@@ -182,12 +185,35 @@ fn ten_outcomes(capped: bool) -> Vec<LoadOutcome> {
 
 /// One frame's worth of what the pane asks of each computed preview.
 ///
-/// Mirrors `render_pane` and `render_body`: the stored footer is cloned
-/// (the one allowed allocation), everything else is read by reference. The
-/// results fold into a return value so nothing can be optimised away.
+/// Mirrors `render_pane`, `render_header` and `render_pdf_bar` exactly:
+/// the header title is re-derived per frame (`display_name`, filename-
+/// bounded), the stored detail/footer/page-label handles are cloned
+/// (`SharedString`: refcount bumps, no heap blocks), and everything else is
+/// read by reference. The results fold into a return value so nothing can
+/// be optimised away.
+///
+/// What this proves is the gate: payload sizes (2 MiB of text vs 13 bytes)
+/// must not change the allocation count. Anything O(the file) — a text
+/// clone, a re-derived language, a re-scan — lands orders of magnitude
+/// above the allowance, which is the point: a tripwire, not a stopwatch.
 fn read_frame(outcomes: &[LoadOutcome]) -> usize {
     let mut sink = 0usize;
     for outcome in outcomes {
+        // The header title, re-derived per frame like `render_header` does.
+        // Filename-bounded (≤57 chars inline, one heap block past that),
+        // never file-bounded.
+        let title = match outcome {
+            LoadOutcome::Text { entry, .. }
+            | LoadOutcome::Markdown { entry, .. }
+            | LoadOutcome::Table { entry, .. }
+            | LoadOutcome::Image { entry, .. }
+            | LoadOutcome::Pdf { entry, .. }
+            | LoadOutcome::Unsupported { entry, .. } => {
+                super::PreviewPanel::display_name(entry.name())
+            }
+            LoadOutcome::Error { name, .. } => super::PreviewPanel::display_name(name),
+        };
+        sink += title.len();
         match outcome {
             LoadOutcome::Text {
                 detail,
@@ -248,6 +274,9 @@ fn read_frame(outcomes: &[LoadOutcome]) -> usize {
             LoadOutcome::Pdf {
                 detail, pdf, page, ..
             } => {
+                // The bar reads the preformatted page label (a handle clone,
+                // like the footer above): page turns reformat at apply time,
+                // never per frame.
                 sink += detail.len();
                 sink += pdf.len();
                 sink += page.pages_total as usize;

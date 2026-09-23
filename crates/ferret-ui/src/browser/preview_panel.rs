@@ -167,10 +167,15 @@ impl Browser {
         // Directory totals are O(the directory): on a finished load, or
         // once per directory when the pane's cache misses — never per
         // keystroke or mouse-move. A marquee drag changes the selection on
-        // every move; this must stay flat while it does.
+        // every move; this must stay flat while it does. Past the row cap
+        // the bytes stay unknown (the line reads "N items") rather than
+        // janking the first visit of a 200,000-entry directory on the
+        // window thread; summing 200k rows belongs on a background task
+        // with a snapshot the folder model does not currently lend out.
         let dir = folder.dir.clone();
         let dir_bytes = (reload_totals || self.preview.read(cx).wants_totals(&dir))
-            .then(|| folder_total_bytes(folder));
+            .then(|| (folder.row_count() <= DIR_TOTAL_ROW_CAP).then(|| folder_total_bytes(folder)))
+            .flatten();
         let input = PreviewInput {
             dir,
             row_count: folder.row_count(),
@@ -403,7 +408,7 @@ impl Browser {
                     let _ = on_cancel.update(cx, |browser, cx| {
                         browser.overlay_closed(cx);
                     });
-                    false
+                    true
                 })
                 .on_close(move |_, _, cx| {
                     let _ = on_close.update(cx, |browser, cx| {
@@ -572,7 +577,7 @@ impl Browser {
                         browser.update(cx, |browser, cx| {
                             browser.resolve_edit_guard(None, window, cx);
                         });
-                        false
+                        true
                     }
                 })
                 .on_close({
@@ -696,12 +701,26 @@ impl Browser {
 
 /// Sum of file sizes in the browsed directory. Directories contribute
 /// nothing rather than a lie — the same rule as the status bar.
+///
+/// Only called for directories at or under [`DIR_TOTAL_ROW_CAP`]: the scan
+/// is O(the directory) on the window thread, so huge directories keep an
+/// unknown total rather than janking their first visit.
 fn folder_total_bytes(folder: &Folder) -> u64 {
     (0..folder.row_count())
         .filter_map(|row| folder.entry_at(row))
         .filter_map(|entry| entry.display_len())
         .sum()
 }
+
+/// Most rows a directory may hold for its total to be summed on the window
+/// thread.
+///
+/// `folder_total_bytes` is one `entry_at` + `display_len` per row: fast per
+/// row, but 200,000 of them on the first visit of `flat/` is a visible hitch
+/// on the thread that also paints. Past this the Empty line reads "N items"
+/// with no bytes — honest, and the status bar (which sums incrementally off
+/// the render path) still shows its own total.
+const DIR_TOTAL_ROW_CAP: usize = 50_000;
 
 /// "4 folders · 8 images · …" for a bounded multi-selection.
 ///

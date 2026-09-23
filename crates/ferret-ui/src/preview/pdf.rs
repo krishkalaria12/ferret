@@ -50,12 +50,15 @@ impl PreviewPanel {
             pdf_gen,
             loading_page,
             page_error,
+            page_label,
+            pages,
             ..
         } = &mut self.state
         {
             *pdf_gen += 1;
             *loading_page = true;
             *page_error = None;
+            *page_label = super::pdf_page_label(pages, true, None);
         }
         let pdf_gen = match &self.state {
             PaneState::Pdf { pdf_gen, .. } => *pdf_gen,
@@ -65,8 +68,10 @@ impl PreviewPanel {
         let window_handle = self.window;
         cx.notify();
         // The render borrows through the share: turning a page costs no
-        // file-sized copy, just one `Arc` clone into the blocking task.
-        self.tasks.push(cx.spawn(async move |pane, cx| {
+        // file-sized copy, just one `Arc` clone into the blocking task. One
+        // slot, not the shared task list: page turns would otherwise retain
+        // one completed task per turn until the selection changes.
+        self.pdf_task = Some(cx.spawn(async move |pane, cx| {
             let rendered = pdfium_page(pdf, page - 1).await;
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = pane.update(cx, |pane, cx| {
@@ -107,6 +112,7 @@ impl PreviewPanel {
                         pages,
                         loading_page,
                         page_error,
+                        page_label,
                         zoom,
                         ..
                     } = &mut self.state
@@ -116,6 +122,7 @@ impl PreviewPanel {
                         pages.current = page;
                         *loading_page = false;
                         *page_error = None;
+                        *page_label = super::pdf_page_label(pages, false, None);
                         // A new page is a new picture: fit it before judging.
                         *zoom = 0.0;
                     }
@@ -124,11 +131,16 @@ impl PreviewPanel {
                     if let PaneState::Pdf {
                         loading_page,
                         page_error,
+                        page_label,
+                        pages,
                         ..
                     } = &mut self.state
                     {
                         *loading_page = false;
-                        *page_error = Some(format!("Page {page} didn't fit its frame."));
+                        *page_error = Some(SharedString::from(format!(
+                            "Page {page} didn't fit its frame."
+                        )));
+                        *page_label = super::pdf_page_label(pages, false, page_error.as_ref());
                     }
                 }
             },
@@ -136,11 +148,14 @@ impl PreviewPanel {
                 if let PaneState::Pdf {
                     loading_page,
                     page_error,
+                    page_label,
+                    pages,
                     ..
                 } = &mut self.state
                 {
                     *loading_page = false;
-                    *page_error = Some(format!("Couldn't render page {page}."));
+                    *page_error = Some(SharedString::from(format!("Couldn't render page {page}.")));
+                    *page_label = super::pdf_page_label(pages, false, page_error.as_ref());
                 }
             }
         }
@@ -151,29 +166,23 @@ impl PreviewPanel {
     ///
     /// The footer only exists when it has something to say, and "Page 1 of
     /// 9" always qualifies — it is the one-line proof the document is paged.
+    /// The line is preformatted in the state (see `pdf_page_label`): this
+    /// only clones the finished handle, never formats per frame.
     pub(super) fn render_pdf_bar(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let (current, total, loading, error) = match &self.state {
+        let (current, total, loading, label) = match &self.state {
             PaneState::Pdf {
                 pages,
                 loading_page,
-                page_error,
+                page_label,
                 ..
             } => (
                 pages.current,
                 pages.total,
                 *loading_page,
-                page_error.clone(),
+                page_label.clone(),
             ),
             _ => return None,
         };
-        let mut label = format!("Page {current} of {total}.");
-        if loading {
-            label.push_str(" Loading…");
-        }
-        if let Some(note) = error {
-            label.push(' ');
-            label.push_str(&note);
-        }
         Some(
             h_flex()
                 .flex_shrink_0()
@@ -197,7 +206,7 @@ impl PreviewPanel {
                     gpui::div()
                         .text_size(px(11.5))
                         .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(label)),
+                        .child(label),
                 )
                 .child(
                     Button::new("pdf-next")

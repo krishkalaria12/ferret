@@ -273,9 +273,21 @@ impl FilePane {
         // One viewport of lookahead: the next scroll step finds warm tiles.
         let last_row = (first_row + visible_rows * 2).min(rows.saturating_sub(1));
         let range = first_row * per_row..(last_row * per_row + per_row).min(n);
-        let dir = self.folder.read(cx).dir.clone();
-        if range == self.thumb_range && Some(&dir) == self.thumb_dir.as_ref() {
+        // Compare before cloning: the common scroll step keeps the directory
+        // and only moves the range, so no path clone is owed per frame.
+        let same_range = range == self.thumb_range;
+        let same_dir = self
+            .thumb_dir
+            .as_ref()
+            .is_some_and(|cached| *cached == self.folder.read(cx).dir);
+        if same_range && same_dir {
             return;
+        }
+        let dir = self.folder.read(cx).dir.clone();
+        // A new directory drops the previous folder's tiles: memory holds the
+        // visible working set, the disk cache holds the rest.
+        if Some(&dir) != self.thumb_dir.as_ref() {
+            cx.global::<FerretState>().rendered_thumbs.clear();
         }
         self.thumb_range = range.clone();
         self.thumb_dir = Some(dir);
@@ -292,11 +304,19 @@ impl FilePane {
                     continue;
                 }
                 // In-process decoders generate; everything the OS covers
-                // (HEIC, PDF, video posters) asks the service. Anything else
-                // keeps its glyph — a tile is never worth an error surface.
+                // (HEIC, PDF, video posters) asks the service — but only
+                // where a service exists. On Windows the provider declines
+                // until the supervised helper lands, so native formats keep
+                // their glyphs without paying canonicalize + lookup + hop
+                // per tile to learn the answer is `None`.
                 let native = match entry.extension() {
                     Some(ext) if ferret_preview::is_tileable_extension(ext) => false,
-                    Some(ext) if ferret_preview::thumbs::is_native_tileable_extension(ext) => true,
+                    Some(ext)
+                        if ferret_preview::thumbs::is_native_tileable_extension(ext)
+                            && ferret_platform::thumbnail_available() =>
+                    {
+                        true
+                    }
                     _ => continue,
                 };
                 let Some(local) = entry.path.as_local() else {
@@ -626,6 +646,9 @@ async fn native_tile(
     key: &str,
     len: u64,
 ) -> Option<ferret_preview::Bitmap> {
+    if !ferret_platform::thumbnail_available() {
+        return None;
+    }
     let local = entry.path.as_local()?;
     if len > ferret_platform::config::NATIVE_THUMBNAIL_INPUT_LIMIT {
         return None;

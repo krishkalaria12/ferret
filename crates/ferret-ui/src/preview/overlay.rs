@@ -35,34 +35,38 @@ const MIN_MARGIN_HORIZONTAL: f32 = 16.;
 /// What the pane hands the overlay when it already shows the file.
 pub(crate) struct OverlaySnapshot {
     pub path: VfsPath,
-    pub title: String,
-    pub detail: String,
+    pub title: SharedString,
+    pub detail: SharedString,
     pub body: SnapshotBody,
 }
 
 /// The pane's computed value in overlay-ready shape: shared bitmaps cross
 /// by `Arc`, text by one bounded clone per opening — never a re-read.
+///
+/// Footers cross as `SharedString` for the same reason the pane stores them
+/// that way: the overlay header clones them every frame.
 pub(crate) enum SnapshotBody {
     Text {
         text: String,
         language: SmolStr,
         wrap: bool,
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Markdown {
         sanitized: String,
         base: Option<PathBuf>,
         remote: bool,
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Image {
         render_image: std::sync::Arc<gpui::RenderImage>,
         bitmap_size: (u32, u32),
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Table {
         table: std::sync::Arc<ParsedTable>,
-        footer: Option<String>,
+        widths: Vec<f32>,
+        footer: Option<SharedString>,
     },
     Pdf {
         render_image: std::sync::Arc<gpui::RenderImage>,
@@ -82,50 +86,56 @@ pub(crate) struct PreviewOverlay {
     state: OverlayState,
     generation: u64,
     tasks: Vec<Task<()>>,
+    /// The in-flight page turn, if any: same one-slot shape as the pane, so
+    /// rapid turns replace rather than retain a task each.
+    pdf_task: Option<Task<()>>,
 }
 
 enum OverlayState {
     Loading {
-        name: String,
+        name: SharedString,
     },
     Text {
-        title: String,
-        detail: String,
-        footer: Option<String>,
+        title: SharedString,
+        detail: SharedString,
+        footer: Option<SharedString>,
     },
     Markdown {
-        title: String,
-        detail: String,
+        title: SharedString,
+        detail: SharedString,
         base: Option<PathBuf>,
         remote: bool,
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Image {
-        title: String,
-        detail: String,
+        title: SharedString,
+        detail: SharedString,
         render_image: std::sync::Arc<gpui::RenderImage>,
         bitmap_size: (u32, u32),
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Table {
-        title: String,
-        detail: String,
-        footer: Option<String>,
+        title: SharedString,
+        detail: SharedString,
+        footer: Option<SharedString>,
     },
     Pdf {
-        title: String,
-        detail: String,
+        title: SharedString,
+        detail: SharedString,
         render_image: std::sync::Arc<gpui::RenderImage>,
         bitmap_size: (u32, u32),
         pdf: std::sync::Arc<Vec<u8>>,
         pages: Pages,
         pdf_gen: u64,
         loading_page: bool,
-        page_error: Option<String>,
+        page_error: Option<SharedString>,
+        /// Preformatted footer line, like the pane's: the bar renders every
+        /// frame and must not `format!` per frame.
+        page_label: SharedString,
     },
     Message {
-        title: String,
-        message: String,
+        title: SharedString,
+        message: SharedString,
     },
 }
 
@@ -151,10 +161,11 @@ impl PreviewOverlay {
             docview,
             grid: None,
             state: OverlayState::Loading {
-                name: String::new(),
+                name: SharedString::from(""),
             },
             generation: 0,
             tasks: Vec::new(),
+            pdf_task: None,
         };
         // The constructor holds the window, so the instant path fills the
         // views here: by the first frame the content is already standing.
@@ -225,11 +236,11 @@ impl PreviewOverlay {
                     footer,
                 };
             }
-            SnapshotBody::Table { table, footer } => {
-                // Widths remeasured from the retained sample: O(the sample)
-                // once per opening, never per frame. The grid holds the rows
-                // from here; the sample itself stays with the pane.
-                let widths = grid::column_widths(&table);
+            SnapshotBody::Table {
+                table,
+                widths,
+                footer,
+            } => {
                 self.grid = Some(CsvGrid::new(&table, widths, window, cx));
                 self.state = OverlayState::Table {
                     title,
@@ -253,6 +264,7 @@ impl PreviewOverlay {
                     pdf_gen: 0,
                     loading_page: false,
                     page_error: None,
+                    page_label: super::pdf_page_label(&pages, false, None),
                 };
             }
         }
@@ -265,8 +277,9 @@ impl PreviewOverlay {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.tasks.clear();
+        self.pdf_task = None;
         self.state = OverlayState::Loading {
-            name: entry.name().to_string(),
+            name: SharedString::from(entry.name()),
         };
         cx.notify();
 
@@ -305,7 +318,7 @@ impl PreviewOverlay {
                     editor.set_value(text, window, cx);
                 });
                 self.state = OverlayState::Text {
-                    title: PreviewPanel::display_name(entry.name()),
+                    title: SharedString::from(PreviewPanel::display_name(entry.name())),
                     detail,
                     footer,
                 };
@@ -323,7 +336,7 @@ impl PreviewOverlay {
                     docview.set_text(&sanitized, cx);
                 });
                 self.state = OverlayState::Markdown {
-                    title: PreviewPanel::display_name(entry.name()),
+                    title: SharedString::from(PreviewPanel::display_name(entry.name())),
                     detail,
                     base,
                     remote,
@@ -340,7 +353,7 @@ impl PreviewOverlay {
                 let table = std::sync::Arc::new(table);
                 self.grid = Some(CsvGrid::new(&table, widths, window, cx));
                 self.state = OverlayState::Table {
-                    title: PreviewPanel::display_name(entry.name()),
+                    title: SharedString::from(PreviewPanel::display_name(entry.name())),
                     detail,
                     footer,
                 };
@@ -356,25 +369,27 @@ impl PreviewOverlay {
                 // from memory. No blocking call on the window thread.
                 match render_bitmap(&page.bitmap) {
                     Some(render_image) => {
+                        let pages = Pages {
+                            current: 1,
+                            total: page.pages_total,
+                        };
                         self.state = OverlayState::Pdf {
-                            title: PreviewPanel::display_name(entry.name()),
+                            title: SharedString::from(PreviewPanel::display_name(entry.name())),
                             detail,
                             bitmap_size: (page.bitmap.width, page.bitmap.height),
                             render_image,
                             pdf,
-                            pages: Pages {
-                                current: 1,
-                                total: page.pages_total,
-                            },
+                            pages,
                             pdf_gen: 0,
                             loading_page: false,
                             page_error: None,
+                            page_label: super::pdf_page_label(&pages, false, None),
                         };
                     }
                     None => {
                         self.state = OverlayState::Message {
-                            title: PreviewPanel::display_name(entry.name()),
-                            message: "Ferret couldn't render this PDF here.".to_string(),
+                            title: SharedString::from(PreviewPanel::display_name(entry.name())),
+                            message: SharedString::from("Ferret couldn't render this PDF here."),
                         };
                     }
                 }
@@ -388,7 +403,7 @@ impl PreviewOverlay {
                 Some(render_image) => {
                     let first = &image.frames[0];
                     self.state = OverlayState::Image {
-                        title: PreviewPanel::display_name(entry.name()),
+                        title: SharedString::from(PreviewPanel::display_name(entry.name())),
                         detail,
                         bitmap_size: (first.bitmap.width, first.bitmap.height),
                         render_image,
@@ -397,8 +412,8 @@ impl PreviewOverlay {
                 }
                 None => {
                     self.state = OverlayState::Message {
-                        title: PreviewPanel::display_name(entry.name()),
-                        message: "Ferret couldn't draw these pixels.".to_string(),
+                        title: SharedString::from(PreviewPanel::display_name(entry.name())),
+                        message: SharedString::from("Ferret couldn't draw these pixels."),
                     };
                 }
             },
@@ -408,13 +423,16 @@ impl PreviewOverlay {
                 message,
             } => {
                 self.state = OverlayState::Message {
-                    title: format!("{} · {detail}", PreviewPanel::display_name(entry.name())),
+                    title: SharedString::from(format!(
+                        "{} · {detail}",
+                        PreviewPanel::display_name(entry.name())
+                    )),
                     message,
                 };
             }
             LoadOutcome::Error { name, message } => {
                 self.state = OverlayState::Message {
-                    title: PreviewPanel::display_name(&name),
+                    title: SharedString::from(PreviewPanel::display_name(&name)),
                     message,
                 };
             }
@@ -440,12 +458,15 @@ impl PreviewOverlay {
             pdf_gen,
             loading_page,
             page_error,
+            page_label,
+            pages,
             ..
         } = &mut self.state
         {
             *pdf_gen += 1;
             *loading_page = true;
             *page_error = None;
+            *page_label = super::pdf_page_label(pages, true, None);
         }
         let pdf_gen = match &self.state {
             OverlayState::Pdf { pdf_gen, .. } => *pdf_gen,
@@ -454,7 +475,7 @@ impl PreviewOverlay {
         let generation = self.generation;
         let window_handle = self.window;
         cx.notify();
-        self.tasks.push(cx.spawn(async move |overlay, cx| {
+        self.pdf_task = Some(cx.spawn(async move |overlay, cx| {
             let rendered = pdfium_page(pdf, page - 1).await;
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = overlay.update(cx, |overlay, cx| {
@@ -474,6 +495,7 @@ impl PreviewOverlay {
                                     pages,
                                     loading_page,
                                     page_error,
+                                    page_label,
                                     ..
                                 } = &mut overlay.state
                                 {
@@ -483,18 +505,28 @@ impl PreviewOverlay {
                                     pages.current = page;
                                     *loading_page = false;
                                     *page_error = None;
+                                    *page_label =
+                                        super::pdf_page_label(pages, false, None);
                                 }
                             }
                             None => {
                                 if let OverlayState::Pdf {
                                     loading_page,
                                     page_error,
+                                    page_label,
+                                    pages,
                                     ..
                                 } = &mut overlay.state
                                 {
                                     *loading_page = false;
-                                    *page_error =
-                                        Some(format!("Page {page} didn't fit its frame."));
+                                    *page_error = Some(SharedString::from(format!(
+                                        "Page {page} didn't fit its frame."
+                                    )));
+                                    *page_label = super::pdf_page_label(
+                                        pages,
+                                        false,
+                                        page_error.as_ref(),
+                                    );
                                 }
                             }
                         },
@@ -502,11 +534,17 @@ impl PreviewOverlay {
                             if let OverlayState::Pdf {
                                 loading_page,
                                 page_error,
+                                page_label,
+                                pages,
                                 ..
                             } = &mut overlay.state
                             {
                                 *loading_page = false;
-                                *page_error = Some(format!("Couldn't render page {page}."));
+                                *page_error = Some(SharedString::from(format!(
+                                    "Couldn't render page {page}."
+                                )));
+                                *page_label =
+                                    super::pdf_page_label(pages, false, page_error.as_ref());
                             }
                         }
                     }
@@ -519,15 +557,16 @@ impl PreviewOverlay {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, detail) = match &self.state {
-            OverlayState::Loading { name } => {
-                (PreviewPanel::display_name(name), "Loading…".to_string())
-            }
+            OverlayState::Loading { name } => (
+                SharedString::from(PreviewPanel::display_name(name)),
+                SharedString::from("Loading…"),
+            ),
             OverlayState::Text { title, detail, .. }
             | OverlayState::Markdown { title, detail, .. }
             | OverlayState::Image { title, detail, .. }
             | OverlayState::Table { title, detail, .. }
             | OverlayState::Pdf { title, detail, .. } => (title.clone(), detail.clone()),
-            OverlayState::Message { title, .. } => (title.clone(), "Preview".to_string()),
+            OverlayState::Message { title, .. } => (title.clone(), SharedString::from("Preview")),
         };
         let browser = self.browser.clone();
         h_flex()
@@ -548,14 +587,14 @@ impl PreviewOverlay {
                             .text_size(px(14.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(cx.theme().foreground)
-                            .child(SharedString::from(title)),
+                            .child(title),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(detail)),
+                            .child(detail),
                     ),
             )
             .child(
@@ -580,7 +619,7 @@ impl PreviewOverlay {
 
     fn render_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         match &self.state {
-            OverlayState::Loading { .. } => self.render_centred("Loading…".to_string(), cx),
+            OverlayState::Loading { .. } => self.render_centred(SharedString::from("Loading…"), cx),
             OverlayState::Text { .. } => div()
                 .flex_1()
                 .min_h_0()
@@ -617,7 +656,7 @@ impl PreviewOverlay {
                     .overflow_hidden()
                     .child(grid.element())
                     .into_any_element(),
-                None => self.render_centred("No rows to show.".to_string(), cx),
+                None => self.render_centred(SharedString::from("No rows to show."), cx),
             },
             OverlayState::Pdf {
                 render_image,
@@ -650,7 +689,7 @@ impl PreviewOverlay {
             .into_any_element()
     }
 
-    fn render_centred(&self, text: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_centred(&self, text: SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .flex_1()
             .flex()
@@ -663,7 +702,7 @@ impl PreviewOverlay {
                     .text_center()
                     .text_size(px(13.5))
                     .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(text)),
+                    .child(text),
             )
             .into_any_element()
     }
@@ -682,26 +721,19 @@ impl PreviewOverlay {
                     .border_color(cx.theme().border)
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(footer))
+                    .child(footer)
                     .into_any_element()
             }),
             OverlayState::Pdf {
                 pages,
                 loading_page,
-                page_error,
+                page_label,
                 ..
             } => {
                 let current = pages.current;
                 let total = pages.total;
                 let loading = *loading_page;
-                let mut label = format!("Page {current} of {total}.");
-                if loading {
-                    label.push_str(" Loading…");
-                }
-                if let Some(note) = page_error.clone() {
-                    label.push(' ');
-                    label.push_str(&note);
-                }
+                let label = page_label.clone();
                 Some(
                     h_flex()
                         .flex_shrink_0()
@@ -725,7 +757,7 @@ impl PreviewOverlay {
                             div()
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(SharedString::from(label)),
+                                .child(label),
                         )
                         .child(
                             Button::new("overlay-pdf-next")

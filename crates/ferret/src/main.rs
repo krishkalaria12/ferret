@@ -222,6 +222,118 @@ fn bind_keys(cx: &mut App) {
             browser_actions::PreviewEditSave,
             Some(context::PREVIEW),
         ),
+        // Preview-local actions (F-30–F-36, F-75). Every binding needs a
+        // Windows equivalent: `cmd`/`ctrl` pairs stay out of the terminal
+        // where the shell owns the key, and `pageup`/`pagedown`/`alt-z` are
+        // the same physical keys on both platforms so one binding covers
+        // both. All scoped to PREVIEW (or OVERLAY for the overlay's own
+        // page turns) so they never shadow typing in a text field — except
+        // `alt-z`, which the editor does not bind.
+        //
+        // PDF pages: `pageup`/`pagedown`, the keys a paged document earns.
+        KeyBinding::new(
+            "pagedown",
+            browser_actions::PreviewPdfNext,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "pageup",
+            browser_actions::PreviewPdfPrev,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "pagedown",
+            browser_actions::PreviewPdfNext,
+            Some(context::OVERLAY),
+        ),
+        KeyBinding::new(
+            "pageup",
+            browser_actions::PreviewPdfPrev,
+            Some(context::OVERLAY),
+        ),
+        // Markdown rendered/source.
+        KeyBinding::new(
+            "cmd-shift-m",
+            browser_actions::PreviewToggleSource,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-m",
+            browser_actions::PreviewToggleSource,
+            Some(context::PREVIEW),
+        ),
+        // Soft wrap, after the editor convention (`alt-z`).
+        KeyBinding::new(
+            "alt-z",
+            browser_actions::PreviewToggleWrap,
+            Some(context::PREVIEW),
+        ),
+        // CSV header inference.
+        KeyBinding::new(
+            "cmd-shift-h",
+            browser_actions::PreviewToggleCsvHeader,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-h",
+            browser_actions::PreviewToggleCsvHeader,
+            Some(context::PREVIEW),
+        ),
+        // Line numbers (persisted).
+        KeyBinding::new(
+            "cmd-shift-l",
+            browser_actions::PreviewToggleLineNumbers,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-l",
+            browser_actions::PreviewToggleLineNumbers,
+            Some(context::PREVIEW),
+        ),
+        // Enter and leave edit mode. Save keeps `cmd-s` above; Revert stays
+        // menu-only (with Cancel on the guard dialog) rather than taking a
+        // key a shell or the editor already owns.
+        KeyBinding::new(
+            "cmd-e",
+            browser_actions::PreviewEditBegin,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-e",
+            browser_actions::PreviewEditBegin,
+            Some(context::PREVIEW),
+        ),
+        // The previewed file: open, reveal, copy path.
+        KeyBinding::new(
+            "cmd-o",
+            browser_actions::PreviewOpen,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-o",
+            browser_actions::PreviewOpen,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "cmd-shift-o",
+            browser_actions::PreviewReveal,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-o",
+            browser_actions::PreviewReveal,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "cmd-alt-c",
+            browser_actions::PreviewCopyPath,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-alt-c",
+            browser_actions::PreviewCopyPath,
+            Some(context::PREVIEW),
+        ),
         // Full-window preview (F-75). `space` is the same key on both
         // platforms, so one binding covers macOS and Windows. Scoped to the
         // file list on open — never a text field — and to the overlay

@@ -34,6 +34,14 @@ pub const THUMB_EVICT_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 /// before noticing.
 pub const THUMB_WARM_CAP: usize = 256;
 
+/// Most decoded tiles held in memory.
+///
+/// Scrolling a 200,000-photo directory must not grow this without bound: past
+/// the cap an insert drops an arbitrary entry rather than growing. The disk
+/// cache below remains the source of truth; memory is only the visible
+/// working set.
+pub const MAX_RENDERED_THUMBS: usize = 1024;
+
 /// One tile, decoded and carrying the fingerprint it was built from.
 ///
 /// The fingerprint is what keeps a path-keyed memory entry honest: an edit
@@ -85,6 +93,37 @@ impl RenderedThumbCache {
             let current = self.images.load_full();
             let mut next = (*current).clone();
             next.insert(path.clone(), image.clone());
+            // Bounded: an unbounded path-keyed map over a 200k directory is
+            // gigabytes. Drop an arbitrary entry past the cap rather than
+            // growing; the disk cache regenerates it on revisit.
+            if next.len() > MAX_RENDERED_THUMBS
+                && let Some(victim) = next.keys().next().cloned()
+            {
+                next.remove(&victim);
+            }
+            let previous = self.images.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return;
+            }
+        }
+    }
+
+    /// Drop every tile: called when the directory changes, so a visited
+    /// photo folder does not keep its tiles resident forever.
+    pub fn clear(&self) {
+        self.images.store(Arc::new(HashMap::new()));
+    }
+
+    /// Drop one path's tile: called on trash/rename/delete so a removed
+    /// file's pixels do not survive in memory.
+    pub fn remove(&self, path: &VfsPath) {
+        loop {
+            let current = self.images.load_full();
+            if !current.contains_key(path) {
+                return;
+            }
+            let mut next = (*current).clone();
+            next.remove(path);
             let previous = self.images.compare_and_swap(&current, Arc::new(next));
             if Arc::ptr_eq(&previous, &current) {
                 return;
@@ -105,8 +144,7 @@ pub fn render_thumb(
     mtime_secs: u64,
     mtime_nanos: u32,
 ) -> Option<ThumbImage> {
-    let buffer = ::image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra.clone())?;
-    let frame = ::image::Frame::new(buffer);
+    let frame = ferret_preview::image::still_frame(bitmap)?;
     Some(ThumbImage {
         image: Arc::new(gpui::RenderImage::new(vec![frame])),
         width: bitmap.width,

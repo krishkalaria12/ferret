@@ -275,16 +275,16 @@ const EXTENDED: &[ExtendedLanguage] = &[
 /// Register every extended language, duplicate-checked.
 ///
 /// A name already present would mean a grammar added without removing its
-/// placeholder — fail loudly in debug rather than silently shadowing.
+/// placeholder. Always checked, not just in debug: a release double-register
+/// would silently shadow, and the one log line costs nothing at startup.
 #[cfg(feature = "languages-extended")]
 fn register_extended() {
     let registry = LanguageRegistry::singleton();
     for lang in EXTENDED {
-        debug_assert!(
-            registry.language(lang.name).is_none(),
-            "{} is already registered",
-            lang.name
-        );
+        if registry.language(lang.name).is_some() {
+            eprintln!("ferret: duplicate grammar registration for {}", lang.name);
+            continue;
+        }
         registry.register(
             lang.name,
             &LanguageConfig::new(

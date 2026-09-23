@@ -2540,7 +2540,6 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
- "image",
  "jiff",
  "parking_lot",
  "rayon",

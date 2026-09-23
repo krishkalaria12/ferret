@@ -115,22 +115,32 @@ impl PreviewPanel {
         ))
     }
 
-    /// Fired once per editor change — never per frame — flipping one bool.
+    /// Fired once per editor change — never per frame.
+    ///
+    /// Value-compared, not flag-suppressed: loads happen with no edit
+    /// session standing (so this ignores them), and revert restores the
+    /// exact original text (so the comparison stays clean). A temporal
+    /// `suppress_dirty` flag would assume `observe` fires synchronously
+    /// inside `update`, which GPUI does not promise — a deferred observer
+    /// would re-dirty a just-reverted buffer.
     pub(crate) fn on_editor_changed(&mut self, cx: &mut Context<Self>) {
-        if self.suppress_dirty {
+        let Some(session) = self.editing.as_mut() else {
+            return;
+        };
+        let current = self.editor.read(cx).value().to_string();
+        let dirty = current != session.original_text;
+        if dirty == session.dirty {
             return;
         }
-        if let Some(session) = self.editing.as_mut() {
+        session.dirty = dirty;
+        if dirty {
             // A save in flight pins its bytes; late keystrokes start the
             // next dirty cycle rather than joining the write.
-            if !session.dirty {
-                session.dirty = true;
-                // A new edit supersedes a shown conflict: the buffer moved
-                // on, and the old refusal describes bytes nobody holds.
-                session.conflict = None;
-                cx.notify();
-            }
+            // A new edit supersedes a shown conflict: the buffer moved
+            // on, and the old refusal describes bytes nobody holds.
+            session.conflict = None;
         }
+        cx.notify();
     }
 
     /// Enter edit mode: pin the buffer, focus the writable editor.
@@ -210,12 +220,24 @@ impl PreviewPanel {
         let bytes = ferret_preview::reencode(&fidelity, &current);
         let path = session.path.clone();
         let identity = session.identity;
+        let generation = self.generation;
         let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = self.window;
         cx.spawn(async move |pane, cx| {
             let result = fs.write_atomic(&path, &bytes, identity).await;
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = pane.update(cx, |pane, cx| {
+                    // A save in flight across a tab switch or a new load must
+                    // not settle onto the new file: drop the result on a
+                    // generation or path mismatch.
+                    if pane.generation != generation
+                        || pane
+                            .editing
+                            .as_ref()
+                            .is_none_or(|session| session.path != path)
+                    {
+                        return;
+                    }
                     pane.finish_save(result, bytes, window, cx);
                 });
             });
@@ -243,13 +265,21 @@ impl PreviewPanel {
                 self.continue_edit_save(true, cx);
             }
             Err(ferret_vfs::VfsError::Conflict { .. }) => {
+                // The check-to-replace race has a caller-side answer: stash
+                // the refused bytes in the recovery dir before telling the
+                // user, so even a mistaken Discard cannot lose work. Bounded
+                // (one file per conflict), best-effort, never a second error
+                // surface — the buffer itself stays put regardless.
+                let recovery_note = stash_conflict_recovery(
+                    self.editing.as_ref().map(|session| &session.path),
+                    &written,
+                );
                 if let Some(session) = self.editing.as_mut() {
                     session.saving = false;
-                    session.conflict = Some(
+                    session.conflict = Some(format!(
                         "Ferret can't save — this file changed on disk since you started editing. \
-                         Revert to reload it, or copy your text elsewhere first."
-                            .to_string(),
-                    );
+                         Revert to reload it, or copy your text elsewhere first.{recovery_note}"
+                    ));
                 }
                 // Save failure keeps the buffer and focus intact.
                 window.focus(&self.editor.read(cx).focus_handle(cx), cx);
@@ -297,11 +327,9 @@ impl PreviewPanel {
         let original = session.original_text.clone();
         session.dirty = false;
         session.conflict = None;
-        self.suppress_dirty = true;
         self.editor.update(cx, |editor, cx| {
             editor.set_value(original, window, cx);
         });
-        self.suppress_dirty = false;
         cx.notify();
     }
 
@@ -310,13 +338,57 @@ impl PreviewPanel {
     /// Used when the user answers Discard: the selection is moving on and
     /// the incoming load replaces the buffer wholesale, so restoring the
     /// original text first would be a visible flash of a file nobody asked
-    /// to see. The next `set_value` is the new file's, under
-    /// `suppress_dirty` as always.
+    /// to see. The next `set_value` lands with no session standing, which
+    /// is what keeps the observer from reading it as a keystroke.
     pub(crate) fn discard_edit(&mut self, cx: &mut Context<Self>) {
         if self.editing.is_none() {
             return;
         }
         self.editing = None;
         cx.notify();
+    }
+}
+
+/// Stash refused save bytes in the recovery dir, returning the sentence the
+/// conflict message appends.
+///
+/// Named by a hash of the full path plus the file name, so two same-named
+/// files in different directories never collide and the original directory
+/// stays recoverable from the copy's first line (which names the source).
+/// Best-effort: a full disk or a missing cache dir costs the stash, never
+/// the buffer — the caller keeps that regardless.
+fn stash_conflict_recovery(path: Option<&VfsPath>, bytes: &[u8]) -> String {
+    let Some(path) = path else {
+        return String::new();
+    };
+    let dir = dirs::cache_dir()
+        .map(|dir| dir.join("ferret").join("recovery"))
+        .unwrap_or_else(|| std::env::temp_dir().join("ferret-recovery"));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    path.to_string().hash(&mut hasher);
+    let digest = hasher.finish();
+    let name = path
+        .file_name()
+        .map(|name| {
+            name.chars()
+                .map(|ch| {
+                    if ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .take(48)
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "untitled".to_string());
+    let dest = dir.join(format!("{name}.{digest:016x}.conflict.txt"));
+    let mut body = format!("Source: {}\n", path);
+    body.push_str(&String::from_utf8_lossy(bytes));
+    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&dest, body).is_ok() {
+        format!(" A copy is kept at {}.", dest.to_string_lossy())
+    } else {
+        String::new()
     }
 }

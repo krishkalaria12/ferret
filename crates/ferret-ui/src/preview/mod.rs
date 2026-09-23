@@ -30,8 +30,6 @@ mod budget;
 
 pub(crate) use overlay::{OverlaySnapshot, PreviewOverlay, SnapshotBody, overlay_geometry};
 
-use std::time::Instant;
-
 use std::path::PathBuf;
 
 use crate::browser::Browser;
@@ -42,7 +40,8 @@ use ferret_preview::{
 };
 use ferret_vfs::{Entry, EntryKind, FileIdentity, VfsError, VfsPath};
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, SharedString, Subscription,
+    Task, Window,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::input::{Editor, EditorState};
@@ -94,34 +93,39 @@ pub const BREAKDOWN_CAP: usize = 512;
 /// The editor entity holds the text; states that show text carry only the
 /// header strings, the footer and the editor options — never a second copy
 /// of the buffer.
+///
+/// Header strings are `SharedString`: `render_header` clones them every
+/// frame, and a `SharedString` clone is a refcount bump rather than a heap
+/// allocation — which is what keeps the allocations-per-frame budget at one
+/// (the footer, when the conflict note formats it) instead of three.
 enum PaneState {
     Empty {
-        name: String,
+        name: SharedString,
         rows: usize,
         bytes: Option<u64>,
     },
     Multiple {
         count: usize,
         bytes: u64,
-        breakdown: Option<String>,
+        breakdown: Option<SharedString>,
     },
     Directory {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         count: Option<u64>,
     },
     Loading {
-        name: String,
-        detail: String,
+        name: SharedString,
+        detail: SharedString,
         skeleton: bool,
         remote: bool,
     },
     Ready {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         language: SmolStr,
         wrap: bool,
-        footer: Option<String>,
+        footer: Option<SharedString>,
         /// The loaded bytes plus their identity, for in-place editing (F-36).
         /// `Some` only for complete, lossless text on a backend with the
         /// atomic-save capability — the Edit button reads this, never a
@@ -132,8 +136,8 @@ enum PaneState {
     /// the editor holds the original for the source toggle.
     ReadyMd {
         entry: Entry,
-        detail: String,
-        footer: Option<String>,
+        detail: SharedString,
+        footer: Option<SharedString>,
         show_source: bool,
         base: Option<PathBuf>,
         remote: bool,
@@ -144,29 +148,29 @@ enum PaneState {
     },
     Unsupported {
         entry: Entry,
-        detail: String,
-        message: String,
+        detail: SharedString,
+        message: SharedString,
     },
     /// A decoded image. The `RenderImage` is built once, at apply time:
     /// rebuilding it per frame would re-upload the texture every frame.
     /// `zoom` of 0 means fit-to-pane; anything else is a fixed scale.
     Image {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         render_image: std::sync::Arc<gpui::RenderImage>,
         bitmap_size: (u32, u32),
         zoom: f32,
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     /// A CSV/TSV sample in the virtualised grid (F-35). The delegate holds
     /// the rows as shared strings; `table` is retained so the F-75 overlay
     /// can build its own grid without re-reading the file.
     Table {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         grid: CsvGrid,
         table: std::sync::Arc<ParsedTable>,
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     /// A PDF page through the bundled backend (F-34). The bitmap is built
     /// once per page turn at apply time; `pdf` is retained so navigation
@@ -175,7 +179,7 @@ enum PaneState {
     /// paints over a newer selection, and a new selection drops the turn.
     Pdf {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         render_image: std::sync::Arc<gpui::RenderImage>,
         bitmap_size: (u32, u32),
         zoom: f32,
@@ -183,11 +187,14 @@ enum PaneState {
         pages: Pages,
         pdf_gen: u64,
         loading_page: bool,
-        page_error: Option<String>,
+        page_error: Option<SharedString>,
+        /// The footer bar line, preformatted at apply time: `render_pdf_bar`
+        /// runs every frame and must not `format!` per frame.
+        page_label: SharedString,
     },
     Error {
-        name: String,
-        message: String,
+        name: SharedString,
+        message: SharedString,
     },
 }
 
@@ -244,14 +251,15 @@ pub struct PreviewPanel {
     /// user answers Save / Discard / Cancel — a preview that silently
     /// discards an edit on arrow-down is the data-loss failure in miniature.
     editing: Option<EditSession>,
-    /// Set around programmatic `set_value` calls so the dirty observer can
-    /// tell a load from a keystroke.
-    suppress_dirty: bool,
     /// Bumps per selection; results carry theirs and stale ones are
     /// discarded. One generation, debounced, cancel-by-drop (PV-D11).
     generation: u64,
-    loading_since: Option<Instant>,
     tasks: Vec<Task<()>>,
+    /// The in-flight PDF page turn, if any. Page turns accumulate in `tasks`
+    /// otherwise: 100 turns retain 100 completed tasks until the selection
+    /// changes. One slot replaces the previous turn, which is what cancels
+    /// it — the serial still guards the ordering.
+    pdf_task: Option<Task<()>>,
     /// Held so the dirty observer below stays subscribed for the pane's
     /// life. Dropping a `Subscription` unsubscribes, so this is never read —
     /// only kept.
@@ -287,23 +295,25 @@ impl PreviewPanel {
             focus: cx.focus_handle(),
             window: window.window_handle(),
             state: PaneState::Empty {
-                name: String::new(),
+                name: SharedString::from(""),
                 rows: 0,
                 bytes: None,
             },
             editing: None,
-            suppress_dirty: false,
             generation: 0,
-            loading_since: None,
             tasks: Vec::new(),
+            pdf_task: None,
             empty_cache: None,
             wrap_override: None,
             _subscriptions: Vec::new(),
         };
         // Dirty tracking without per-frame work: the editor notifies on
-        // every change, and this fires once per change — never per frame —
-        // flipping one bool. Programmatic loads set `suppress_dirty` around
-        // `set_value` (which also notifies) so a new file never looks dirty.
+        // every change, and this fires once per change — never per frame.
+        // No suppression flag: loads happen with no edit session standing
+        // (so the observer ignores them), and revert restores the exact
+        // original text (so the value comparison below stays clean). A
+        // temporal flag would assume `observe` fires synchronously inside
+        // `update`, which GPUI does not promise.
         pane._subscriptions.push(cx.observe(&editor, |this, _, cx| {
             this.on_editor_changed(cx);
         }));
@@ -323,7 +333,14 @@ impl PreviewPanel {
     }
 
     /// Flip between rendered Markdown and its source.
+    ///
+    /// Blocked while an edit session stands: the session edits the source
+    /// buffer, and flipping to rendered would hide the buffer (with its dirty
+    /// flag) behind a view with no caret. Finish or discard the edit first.
     pub(crate) fn toggle_source(&mut self, cx: &mut Context<Self>) {
+        if self.editing.is_some() {
+            return;
+        }
         if let PaneState::ReadyMd { show_source, .. } = &mut self.state {
             *show_source = !*show_source;
             cx.notify();
@@ -331,7 +348,13 @@ impl PreviewPanel {
     }
 
     /// Whether the source toggle is offered right now.
+    ///
+    /// Hidden while editing (see `toggle_source`): the session owns the
+    /// source view until it settles.
     fn showing_markdown(&self) -> Option<bool> {
+        if self.editing.is_some() {
+            return None;
+        }
         match &self.state {
             PaneState::ReadyMd { show_source, .. } => Some(*show_source),
             _ => None,
@@ -371,6 +394,7 @@ impl PreviewPanel {
         editor.update(cx, |editor, cx| {
             editor.set_soft_wrap(next, window, cx);
         });
+        cx.notify();
     }
 
     fn effective_wrap(&self) -> bool {
@@ -407,7 +431,7 @@ impl PreviewPanel {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.tasks.clear();
-        self.loading_since = None;
+        self.pdf_task = None;
 
         match input.selected {
             SelectedInput::None => {
@@ -419,7 +443,7 @@ impl PreviewPanel {
                     _ => (input.row_count, None),
                 };
                 self.state = PaneState::Empty {
-                    name: input.dir.file_name().unwrap_or("/").to_string(),
+                    name: SharedString::from(input.dir.file_name().unwrap_or("/")),
                     rows,
                     bytes,
                 };
@@ -433,7 +457,7 @@ impl PreviewPanel {
                 self.state = PaneState::Multiple {
                     count,
                     bytes,
-                    breakdown,
+                    breakdown: breakdown.map(SharedString::from),
                 };
                 cx.notify();
             }
@@ -454,7 +478,7 @@ impl PreviewPanel {
     pub(crate) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.tasks.clear();
-        self.loading_since = None;
+        self.pdf_task = None;
     }
 
     /// Whether fresh directory totals are worth computing.
@@ -476,21 +500,21 @@ impl PreviewPanel {
     ///
     /// `None` when the pane holds nothing reusable (empty, loading,
     /// directory, message states): the overlay runs the pipeline on demand
-    /// instead. Editing included: the snapshot reads the live buffer, so
-    /// the overlay shows what is on screen, saved or not.
+    /// instead. Text editing included: the snapshot reads the live buffer,
+    /// so the overlay shows what is on screen, saved or not. Markdown shows
+    /// the last loaded render with an "unsaved changes" note when dirty —
+    /// re-sanitizing the live source off-thread is the follow-up, and a
+    /// stale render without the note would be the lie.
     pub(crate) fn overlay_snapshot(&self, cx: &App) -> Option<OverlaySnapshot> {
         let entry = self.state.entry()?.clone();
-        let title = Self::display_name(entry.name());
+        let title = SharedString::from(Self::display_name(entry.name()));
         let body = match &self.state {
             PaneState::Ready {
-                language,
-                wrap,
-                footer,
-                ..
+                language, footer, ..
             } => SnapshotBody::Text {
                 text: self.editor.read(cx).value().to_string(),
                 language: language.clone(),
-                wrap: *wrap,
+                wrap: self.effective_wrap(),
                 footer: footer.clone(),
             },
             PaneState::ReadyMd {
@@ -499,12 +523,23 @@ impl PreviewPanel {
                 remote,
                 sanitized,
                 ..
-            } => SnapshotBody::Markdown {
-                sanitized: sanitized.clone(),
-                base: base.clone(),
-                remote: *remote,
-                footer: footer.clone(),
-            },
+            } => {
+                let dirty = self.editing.as_ref().is_some_and(|session| session.dirty);
+                let footer: Option<SharedString> = match (footer.clone(), dirty) {
+                    (None, false) => None,
+                    (footer, false) => footer,
+                    (None, true) => Some(SharedString::from("Unsaved changes not shown.")),
+                    (Some(footer), true) => Some(SharedString::from(format!(
+                        "{footer} · unsaved changes not shown"
+                    ))),
+                };
+                SnapshotBody::Markdown {
+                    sanitized: sanitized.clone(),
+                    base: base.clone(),
+                    remote: *remote,
+                    footer,
+                }
+            }
             PaneState::Image {
                 render_image,
                 bitmap_size,
@@ -515,8 +550,14 @@ impl PreviewPanel {
                 bitmap_size: *bitmap_size,
                 footer: footer.clone(),
             },
-            PaneState::Table { table, footer, .. } => SnapshotBody::Table {
+            PaneState::Table {
+                grid,
+                table,
+                footer,
+                ..
+            } => SnapshotBody::Table {
                 table: table.clone(),
+                widths: grid.widths(cx),
                 footer: footer.clone(),
             },
             PaneState::Pdf {
@@ -602,11 +643,11 @@ impl PreviewPanel {
                 .map(|target| target.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "(unknown target)".to_string());
             self.state = PaneState::Error {
-                name: entry.name().to_string(),
-                message: format!(
+                name: SharedString::from(entry.name()),
+                message: SharedString::from(format!(
                     "Ferret can't preview {} — it points at {target}, which no longer exists.",
                     entry.name()
-                ),
+                )),
             };
             cx.notify();
             return;
@@ -614,11 +655,11 @@ impl PreviewPanel {
         // Sockets, FIFOs, devices: listed, never opened.
         if matches!(entry.kind, EntryKind::Other) {
             self.state = PaneState::Error {
-                name: entry.name().to_string(),
-                message: format!(
+                name: SharedString::from(entry.name()),
+                message: SharedString::from(format!(
                     "Ferret can't preview {} — it isn't a regular file.",
                     entry.name()
-                ),
+                )),
             };
             cx.notify();
             return;
@@ -626,12 +667,11 @@ impl PreviewPanel {
 
         let remote = !entry.path.is_local();
         self.state = PaneState::Loading {
-            name: entry.name().to_string(),
+            name: SharedString::from(entry.name()),
             detail: entry_detail_no_kind(&entry),
             skeleton: false,
             remote,
         };
-        self.loading_since = Some(Instant::now());
         cx.notify();
 
         let fs = cx.global::<FerretState>().fs.clone();
@@ -648,7 +688,6 @@ impl PreviewPanel {
                     if pane.generation != generation {
                         return;
                     }
-                    pane.loading_since = None;
                     pane.apply_loaded(outcome, window, cx);
                 });
             });
@@ -684,13 +723,11 @@ impl PreviewPanel {
                 original,
             } => {
                 let wrap = self.wrap_override.unwrap_or(wrap);
-                self.suppress_dirty = true;
                 self.editor.update(cx, |editor, cx| {
                     editor.set_highlighter(gpui::SharedString::from(registry_name(&language)), cx);
                     editor.set_soft_wrap(wrap, window, cx);
                     editor.set_value(text, window, cx);
                 });
-                self.suppress_dirty = false;
                 self.state = PaneState::Ready {
                     entry,
                     detail,
@@ -711,13 +748,11 @@ impl PreviewPanel {
                 remote,
                 edit_original,
             } => {
-                self.suppress_dirty = true;
                 self.editor.update(cx, |editor, cx| {
                     editor.set_highlighter(gpui::SharedString::from("markdown"), cx);
                     editor.set_soft_wrap(self.wrap_override.unwrap_or(true), window, cx);
                     editor.set_value(original, window, cx);
                 });
-                self.suppress_dirty = false;
                 self.docview.update(cx, |docview, cx| {
                     docview.set_text(&sanitized, cx);
                 });
@@ -760,30 +795,32 @@ impl PreviewPanel {
                 page,
             } => match render_bitmap(&page.bitmap) {
                 Some(render_image) => {
+                    let pages = Pages {
+                        current: 1,
+                        total: page.pages_total,
+                    };
                     self.state = PaneState::Pdf {
                         entry,
                         detail,
                         bitmap_size: (page.bitmap.width, page.bitmap.height),
                         render_image,
                         zoom: 0.0,
-                        pages: Pages {
-                            current: 1,
-                            total: page.pages_total,
-                        },
+                        pages,
                         pdf,
                         pdf_gen: 0,
                         loading_page: false,
                         page_error: None,
+                        page_label: pdf_page_label(&pages, false, None),
                     };
                     cx.notify();
                 }
                 None => {
                     self.state = PaneState::Error {
-                        name: entry.name().to_string(),
-                        message: format!(
+                        name: SharedString::from(entry.name()),
+                        message: SharedString::from(format!(
                             "Ferret can't preview {} — the rendered page didn't fit its frame.",
                             entry.name()
-                        ),
+                        )),
                     };
                     cx.notify();
                 }
@@ -796,37 +833,41 @@ impl PreviewPanel {
             } => {
                 let Some(first) = image.frames.first() else {
                     self.state = PaneState::Error {
-                        name: entry.name().to_string(),
-                        message: format!(
+                        name: SharedString::from(entry.name()),
+                        message: SharedString::from(format!(
                             "Ferret can't preview {} — nothing decoded.",
                             entry.name()
-                        ),
+                        )),
                     };
                     cx.notify();
                     return;
                 };
                 match render_image(&image) {
                     Some(render_image) => {
-                        let mut footer =
+                        let mut footer: Option<SharedString> =
                             if (first.bitmap.width, first.bitmap.height) != image.natural {
-                                Some(format!(
+                                Some(SharedString::from(format!(
                                     "Scaled from {} × {}.",
                                     image.natural.0, image.natural.1
-                                ))
+                                )))
                             } else {
                                 None
                             };
                         if image.frames_capped {
-                            let note =
-                                format!("Animation shortened to {} frames.", image.frames.len());
+                            let note = SharedString::from(format!(
+                                "Animation shortened to {} frames.",
+                                image.frames.len()
+                            ));
                             footer = Some(match footer {
-                                Some(existing) => format!("{existing} {note}"),
+                                Some(existing) => SharedString::from(format!("{existing} {note}")),
                                 None => note,
                             });
                         }
                         if let Some(trailing) = note {
                             footer = Some(match footer {
-                                Some(existing) => format!("{existing} {trailing}"),
+                                Some(existing) => {
+                                    SharedString::from(format!("{existing} {trailing}"))
+                                }
                                 None => trailing,
                             });
                         }
@@ -842,11 +883,11 @@ impl PreviewPanel {
                     }
                     None => {
                         self.state = PaneState::Error {
-                            name: entry.name().to_string(),
-                            message: format!(
+                            name: SharedString::from(entry.name()),
+                            message: SharedString::from(format!(
                                 "Ferret can't preview {} — the decoded pixels didn't fit their frame.",
                                 entry.name()
-                            ),
+                            )),
                         };
                         cx.notify();
                     }
@@ -934,28 +975,32 @@ impl Focusable for PreviewPanel {
 /// The `Entry` travels with every file outcome: the header buttons and the
 /// type icon need it, and it is one small clone — never file content.
 ///
+/// Header strings are `SharedString` already here (built once on the
+/// background task): the apply step moves them into the state with no second
+/// clone, and `render` re-clones them per frame as refcount bumps.
+///
 /// Shared with the F-75 overlay, which consumes the same outcomes into its
 /// own views — the same pipeline, two surfaces.
 pub(crate) enum LoadOutcome {
     Text {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         text: String,
         language: SmolStr,
         wrap: bool,
-        footer: Option<String>,
+        footer: Option<SharedString>,
         /// The loaded bytes behind the text, for in-place editing. `Some`
         /// only for complete, lossless, atomic-saveable files.
         original: Option<EditOriginal>,
     },
     Markdown {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         /// The file's own source, for the source toggle.
         original: String,
         /// Sanitized source for the document view: no loadable image.
         sanitized: String,
-        footer: Option<String>,
+        footer: Option<SharedString>,
         base: Option<PathBuf>,
         remote: bool,
         /// The loaded bytes behind the source, for in-place editing.
@@ -963,16 +1008,16 @@ pub(crate) enum LoadOutcome {
     },
     Table {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         table: ParsedTable,
         /// Column widths in logical pixels, measured from the sample on the
         /// background task — never measured on the window thread.
         widths: Vec<f32>,
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Pdf {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         /// The complete bytes, shared with page navigation: turning a page
         /// re-renders from this input, never re-reads the file.
         pdf: std::sync::Arc<Vec<u8>>,
@@ -981,20 +1026,20 @@ pub(crate) enum LoadOutcome {
     },
     Unsupported {
         entry: Entry,
-        detail: String,
-        message: String,
+        detail: SharedString,
+        message: SharedString,
     },
     Image {
         entry: Entry,
-        detail: String,
+        detail: SharedString,
         image: ferret_preview::DecodedImage,
         /// A note the pipeline already phrased ("First page."): appended
         /// after the decode footnotes the view derives itself.
-        footer: Option<String>,
+        footer: Option<SharedString>,
     },
     Error {
-        name: String,
-        message: String,
+        name: SharedString,
+        message: SharedString,
     },
 }
 
@@ -1038,11 +1083,24 @@ pub(crate) async fn load_single(
     };
     // The footer needs the total. The listing usually knows it; a point `stat`
     // fills the gap when it does not — except when the read itself proves the
-    // file fits, which costs nothing at all.
+    // file fits, which costs nothing at all. When the read hit the budget cap
+    // the listing size cannot be trusted (the file may have grown since the
+    // listing): re-stat so a truncated prefix never looks complete to the
+    // Edit gate below.
     let total = match known_size {
-        Some(size) => Some(size),
-        None if bytes.len() < budget => None,
-        None => fs.metadata(&path).await.ok().map(|md| md.len),
+        Some(size) if bytes.len() < budget => Some(size),
+        _ if bytes.len() < budget => known_size,
+        _ => match fs.metadata(&path).await.ok().map(|md| md.len) {
+            Some(fresh) => Some(fresh),
+            // No fresh stat and the read hit the cap: never trust a stale
+            // listing size that claims the prefix is whole. Force incomplete
+            // so Edit stays off rather than saving a prefix over the file.
+            None => Some(
+                (bytes.len() as u64)
+                    .saturating_add(1)
+                    .max(known_size.unwrap_or(0)),
+            ),
+        },
     };
     text_outcome(entry, kind, bytes, total, remote, fs, thumbs).await
 }
@@ -1103,11 +1161,11 @@ async fn text_outcome(
             Err(shared) => (*shared).clone(),
         };
     }
-    let preview = ferret_preview::build(kind, bytes, Some(total), base);
+    let preview = ferret_preview::build(kind, bytes, Some(total), base, remote);
     // Kinds with no in-process decoder get one best-effort native question —
     // a local PDF or HEIC answered by the OS — before falling through to
     // metadata. Anything the service declines keeps its `Unsupported`.
-    let preview = if wants_native(&preview) {
+    let preview = if wants_native(entry, &preview) {
         native_preview(fs, thumbs, entry, total)
             .await
             .unwrap_or(preview)
@@ -1139,17 +1197,31 @@ fn edit_original(candidate: Option<(Vec<u8>, FileIdentity, bool)>) -> Option<Edi
 /// Whether a built preview deserves one native question before it settles.
 ///
 /// Only the kinds with no in-process decoder that the OS may cover: an
-/// in-budget PDF, or an image format we recognise but cannot rasterise.
-/// `TooLarge` never asks — past even the head budget is metadata, never an
-/// attempted anything — and neither do text kinds, which already rendered.
-fn wants_native(preview: &Preview) -> bool {
-    matches!(
+/// in-budget PDF, an image format we recognise but cannot rasterise, or a
+/// video file (which classifies `Binary` — the tile layer already shows
+/// posters for these, so the pane asks too rather than showing hex beside
+/// a poster). `TooLarge` never asks — past even the head budget is metadata,
+/// never an attempted anything — and neither do text kinds, which already
+/// rendered.
+fn wants_native(entry: &Entry, preview: &Preview) -> bool {
+    if matches!(
         preview,
         Preview::Unsupported {
             kind: ferret_preview::Kind::Pdf | ferret_preview::Kind::Image,
             reason: ferret_preview::Unsupported::NoRenderer,
         }
-    )
+    ) {
+        return true;
+    }
+    // Video posters: the tile layer asks the service for `mp4/mov/m4v`, so
+    // the pane asks for the same file rather than showing hex beside a
+    // poster. Extension-gated (not magic-gated) exactly like the tiles.
+    if matches!(preview, Preview::Binary { .. }) {
+        return entry
+            .extension()
+            .is_some_and(|ext| matches!(ext, "mp4" | "mov" | "m4v"));
+    }
+    false
 }
 
 /// Build the outcome for a rendered first page: the bytes travel with it so
@@ -1171,10 +1243,28 @@ fn pdf_load_outcome(
         .unwrap_or_else(|| "unknown date".to_string());
     LoadOutcome::Pdf {
         entry: entry.clone(),
-        detail: format!("PDF document · {size_label} · {modified}"),
+        detail: SharedString::from(format!("PDF document · {size_label} · {modified}")),
         pdf,
         page,
     }
+}
+
+/// The PDF footer-bar line, preformatted at apply time.
+///
+/// `render_pdf_bar` runs every frame: building this string there would be a
+/// heap allocation per frame with a heap-allocated error clone beside it.
+/// The state carries the finished line instead, refreshed wherever
+/// `pages`, `loading_page` or `page_error` settles.
+fn pdf_page_label(pages: &Pages, loading: bool, error: Option<&SharedString>) -> SharedString {
+    let mut label = format!("Page {} of {}.", pages.current, pages.total);
+    if loading {
+        label.push_str(" Loading…");
+    }
+    if let Some(note) = error {
+        label.push(' ');
+        label.push_str(note);
+    }
+    SharedString::from(label)
 }
 
 /// Render one PDF page (zero-based) off the window thread, bounded by the
@@ -1210,6 +1300,9 @@ async fn native_preview(
 ) -> Option<Preview> {
     use ferret_preview::config::NATIVE_PANE_PX;
 
+    if !ferret_platform::thumbnail_available() {
+        return None;
+    }
     let local = entry.path.as_local()?;
     if total > ferret_platform::config::NATIVE_THUMBNAIL_INPUT_LIMIT {
         return None;
@@ -1306,7 +1399,7 @@ fn preview_outcome(
             let label = ferret_preview::languages::display_name(&language).to_string();
             LoadOutcome::Text {
                 entry: entry.clone(),
-                detail: format!("{label} · {size_label} · {modified}"),
+                detail: SharedString::from(format!("{label} · {size_label} · {modified}")),
                 text,
                 language,
                 wrap,
@@ -1336,6 +1429,9 @@ fn preview_outcome(
             if table.cut_field {
                 footer.push_str(" · a field was cut to its cap");
             }
+            if table.cut_columns {
+                footer.push_str(" · columns past the width cap hidden");
+            }
             let ragged = grid::ragged_count(&table);
             if ragged > 0 {
                 footer.push_str(&format!(
@@ -1345,31 +1441,34 @@ fn preview_outcome(
             }
             LoadOutcome::Table {
                 entry: entry.clone(),
-                detail: format!("{label} · {size_label} · {modified}"),
+                detail: SharedString::from(format!("{label} · {size_label} · {modified}")),
                 table,
                 widths,
-                footer: Some(footer),
+                footer: Some(SharedString::from(footer)),
             }
         }
         Preview::Binary { head, size } => LoadOutcome::Text {
             entry: entry.clone(),
-            detail: format!("Binary · {} · {modified}", format_size(size)),
+            detail: SharedString::from(format!("Binary · {} · {modified}", format_size(size))),
             text: ferret_preview::text::format_hex(&head),
             language: SmolStr::new("plain"),
             wrap: false,
             footer: (size > head.len() as u64).then(|| {
-                format!(
+                SharedString::from(format!(
                     "First {} of {}.",
                     format_size(head.len() as u64),
                     format_size(size)
-                )
+                ))
             }),
             // Hex is a view, not a buffer: there is nothing to save.
             original: None,
         },
         Preview::Image { image, .. } => LoadOutcome::Image {
             entry: entry.clone(),
-            detail: format!("{} image · {size_label} · {modified}", image.format_name),
+            detail: SharedString::from(format!(
+                "{} image · {size_label} · {modified}",
+                image.format_name
+            )),
             image,
             footer: None,
         },
@@ -1382,16 +1481,22 @@ fn preview_outcome(
             // Native bitmaps ride the image state: fit-to-pane, zoom, and
             // animation-free stills all come along. The kind labels the
             // header, so a PDF reads "PDF document", never "PDF image".
-            let detail = format!("{} · {size_label} · {modified}", kind.display_name());
-            let footer = match (pages, by) {
-                (Some(pages), _) => Some(format!("Page {} of {}.", pages.current, pages.total)),
+            let detail = SharedString::from(format!(
+                "{} · {size_label} · {modified}",
+                kind.display_name()
+            ));
+            let footer: Option<SharedString> = match (pages, by) {
+                (Some(pages), _) => Some(SharedString::from(format!(
+                    "Page {} of {}.",
+                    pages.current, pages.total
+                ))),
                 // The service's best representation of a PDF is its first
                 // page; saying so keeps nobody mistaking the poster for the
                 // document. Other kinds are what they are: one bitmap.
                 (None, ferret_preview::RenderedBy::NativeThumbnail)
                     if matches!(kind, ferret_preview::Kind::Pdf) =>
                 {
-                    Some("First page.".to_string())
+                    Some(SharedString::from("First page."))
                 }
                 _ => None,
             };
@@ -1414,31 +1519,35 @@ fn preview_outcome(
             }
         }
         Preview::Directory { .. } | Preview::Multiple { .. } => LoadOutcome::Error {
-            name: entry.name().to_string(),
-            message: "Ferret can't preview this selection here.".to_string(),
+            name: SharedString::from(entry.name()),
+            message: SharedString::from("Ferret can't preview this selection here."),
         },
         Preview::Unsupported { kind, reason } => {
-            let detail = format!("{} · {size_label} · {modified}", kind.display_name());
-            let message = match reason {
+            let detail = SharedString::from(format!(
+                "{} · {size_label} · {modified}",
+                kind.display_name()
+            ));
+            let message: SharedString = match reason {
                 ferret_preview::Unsupported::TooLarge { size, budget } => format!(
                     "Too large to preview: {} over a {} budget.",
                     format_size(size),
                     format_size(budget as u64)
-                ),
+                )
+                .into(),
                 ferret_preview::Unsupported::Protected => {
                     "This file needs a password to open — Ferret can't preview it. Open it externally."
-                        .to_string()
+                        .into()
                 }
                 ferret_preview::Unsupported::NoRenderer => match kind {
                     ferret_preview::Kind::Image => {
                         "Image preview isn't available in this build — metadata and Open for now."
-                            .to_string()
+                            .into()
                     }
                     ferret_preview::Kind::Pdf => {
                         "Couldn't render this PDF here — it may need a handler this machine doesn't have. Metadata and Open for now."
-                            .to_string()
+                            .into()
                     }
-                    _ => "No preview for this file yet — metadata and Open for now.".to_string(),
+                    _ => "No preview for this file yet — metadata and Open for now.".into(),
                 },
             };
             LoadOutcome::Unsupported {
@@ -1479,7 +1588,7 @@ fn markdown_outcome(
     remote: bool,
     edit_original: Option<EditOriginal>,
 ) -> LoadOutcome {
-    let detail = format!("Markdown · {size_label} · {modified}");
+    let detail = SharedString::from(format!("Markdown · {size_label} · {modified}"));
     let base_dir: Option<PathBuf> = if remote {
         None
     } else {
@@ -1516,8 +1625,8 @@ fn markdown_outcome(
             if !notes.is_empty() {
                 let note = notes.join(" · ") + ".";
                 footer = Some(match footer {
-                    Some(existing) => format!("{existing} {note}"),
-                    None => note,
+                    Some(existing) => SharedString::from(format!("{existing} {note}")),
+                    None => SharedString::from(note),
                 });
             }
             LoadOutcome::Markdown {
@@ -1539,8 +1648,8 @@ fn markdown_outcome(
             };
             let note = format!("Rendered view {why} — showing source.");
             footer = Some(match footer {
-                Some(existing) => format!("{existing} {note}"),
-                None => note,
+                Some(existing) => SharedString::from(format!("{existing} {note}")),
+                None => SharedString::from(note),
             });
             LoadOutcome::Text {
                 entry: entry.clone(),
@@ -1567,8 +1676,7 @@ fn plural(count: usize) -> &'static str {
 /// PDF pages render one at a time: the current page is one upload, and a
 /// page turn replaces it rather than retaining the document.
 fn render_bitmap(bitmap: &Bitmap) -> Option<std::sync::Arc<gpui::RenderImage>> {
-    let buffer = ::image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra.clone())?;
-    let frame = ::image::Frame::from_parts(buffer, 0, 0, ::image::Delay::from_numer_denom_ms(0, 1));
+    let frame = ferret_preview::image::still_frame_with_delay(bitmap, 0)?;
     Some(std::sync::Arc::new(gpui::RenderImage::new(vec![frame])))
 }
 
@@ -1579,36 +1687,19 @@ fn render_bitmap(bitmap: &Bitmap) -> Option<std::sync::Arc<gpui::RenderImage>> {
 /// the pipeline produced. Multi-frame images animate through the element's
 /// own frame advance — no timer task, no per-frame allocation.
 fn render_image(image: &ferret_preview::DecodedImage) -> Option<std::sync::Arc<gpui::RenderImage>> {
-    let frames: Option<Vec<::image::Frame>> = image
-        .frames
-        .iter()
-        .map(|frame| {
-            ::image::RgbaImage::from_raw(
-                frame.bitmap.width,
-                frame.bitmap.height,
-                frame.bitmap.bgra.clone(),
-            )
-            .map(|buffer| {
-                ::image::Frame::from_parts(
-                    buffer,
-                    0,
-                    0,
-                    ::image::Delay::from_numer_denom_ms(frame.delay_ms, 1),
-                )
-            })
-        })
-        .collect();
-    frames.map(|frames| std::sync::Arc::new(gpui::RenderImage::new(frames)))
+    ferret_preview::image::decoded_frames(image)
+        .map(|frames| std::sync::Arc::new(gpui::RenderImage::new(frames)))
 }
 
 /// "Showing the first 2 MiB of 4.1 GB." — or `None` for a whole file.
-fn truncation_footer(truncated: &Truncation) -> Option<String> {
+fn truncation_footer(truncated: &Truncation) -> Option<SharedString> {
     truncated.is_truncated().then(|| {
         format!(
             "Showing the first {} of {}.",
             format_size(truncated.shown),
             format_size(truncated.total)
         )
+        .into()
     })
 }
 
@@ -1616,12 +1707,12 @@ fn vfs_error(name: &str, err: VfsError) -> LoadOutcome {
     // `Denied` shows the error's own `Display` text, which the repo's error
     // convention already requires to be showable to a person unedited.
     // `Gone` keeps the header and offers nothing that would fail.
-    let message = match &err {
-        VfsError::NotFound { .. } => format!("{name} no longer exists."),
-        _ => err.to_string(),
+    let message: SharedString = match &err {
+        VfsError::NotFound { .. } => format!("{name} no longer exists.").into(),
+        _ => err.to_string().into(),
     };
     LoadOutcome::Error {
-        name: name.to_string(),
+        name: SharedString::from(name),
         message,
     }
 }
@@ -1643,7 +1734,7 @@ async fn count_entries(fs: &impl ferret_vfs::Vfs, dir: &VfsPath) -> u64 {
 }
 
 /// Header detail for a file whose kind is not classified yet.
-fn entry_detail_no_kind(entry: &Entry) -> String {
+fn entry_detail_no_kind(entry: &Entry) -> SharedString {
     let size = entry
         .metadata
         .map(|md| format_size(md.len))
@@ -1653,16 +1744,16 @@ fn entry_detail_no_kind(entry: &Entry) -> String {
         .and_then(|md| md.modified)
         .map(format_date)
         .unwrap_or_else(|| "unknown date".to_string());
-    format!("{size} · {modified}")
+    SharedString::from(format!("{size} · {modified}"))
 }
 
-fn directory_detail(entry: &Entry) -> String {
+fn directory_detail(entry: &Entry) -> SharedString {
     let modified = entry
         .metadata
         .and_then(|md| md.modified)
         .map(format_date)
         .unwrap_or_else(|| "unknown date".to_string());
-    format!("Folder · {modified}")
+    SharedString::from(format!("Folder · {modified}"))
 }
 
 #[cfg(test)]
@@ -1685,33 +1776,69 @@ mod tests {
 
     #[test]
     fn only_decoderless_kinds_earn_a_native_question() {
+        fn file_entry(name: &str) -> Entry {
+            Entry::new(VfsPath::local(name), name, EntryKind::File)
+        }
         // An in-budget PDF and an undecodable image: the service may cover
         // both, so both ask exactly once.
-        assert!(wants_native(&unsupported(
-            ferret_preview::Kind::Pdf,
-            ferret_preview::Unsupported::NoRenderer
-        )));
-        assert!(wants_native(&unsupported(
-            ferret_preview::Kind::Image,
-            ferret_preview::Unsupported::NoRenderer
-        )));
+        assert!(wants_native(
+            &file_entry("/x/report.pdf"),
+            &unsupported(
+                ferret_preview::Kind::Pdf,
+                ferret_preview::Unsupported::NoRenderer
+            )
+        ));
+        assert!(wants_native(
+            &file_entry("/x/photo.heic"),
+            &unsupported(
+                ferret_preview::Kind::Image,
+                ferret_preview::Unsupported::NoRenderer
+            )
+        ));
         // Everything else already has its answer: too large is metadata by
         // policy, text rendered, corruption fell to hex.
-        assert!(!wants_native(&unsupported(
-            ferret_preview::Kind::Pdf,
-            ferret_preview::Unsupported::TooLarge { size: 1, budget: 1 }
-        )));
-        assert!(!wants_native(&Preview::Binary {
-            head: vec![0],
-            size: 1
-        }));
-        assert!(!wants_native(&Preview::Directory { entries: None }));
+        assert!(!wants_native(
+            &file_entry("/x/report.pdf"),
+            &unsupported(
+                ferret_preview::Kind::Pdf,
+                ferret_preview::Unsupported::TooLarge { size: 1, budget: 1 }
+            )
+        ));
+        assert!(!wants_native(
+            &file_entry("/x/core.bin"),
+            &Preview::Binary {
+                head: vec![0],
+                size: 1
+            }
+        ));
+        assert!(!wants_native(
+            &file_entry("/x/docs"),
+            &Preview::Directory { entries: None }
+        ));
         // Protected is terminal: a password is required, so no service is
         // asked and nothing is retried in the background.
-        assert!(!wants_native(&unsupported(
-            ferret_preview::Kind::Pdf,
-            ferret_preview::Unsupported::Protected
-        )));
+        assert!(!wants_native(
+            &file_entry("/x/secret.pdf"),
+            &unsupported(
+                ferret_preview::Kind::Pdf,
+                ferret_preview::Unsupported::Protected
+            )
+        ));
+        // Video posters match the tiles: the pane asks where the tiles ask.
+        assert!(wants_native(
+            &file_entry("/x/clip.mp4"),
+            &Preview::Binary {
+                head: vec![0],
+                size: 1
+            }
+        ));
+        assert!(!wants_native(
+            &file_entry("/x/clip.mp4"),
+            &unsupported(
+                ferret_preview::Kind::Pdf,
+                ferret_preview::Unsupported::Protected
+            )
+        ));
     }
 
     #[test]
