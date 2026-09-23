@@ -61,3 +61,24 @@ pub fn thumbnail_provider() -> Arc<dyn ThumbnailProvider> {
         compile_error!("Ferret currently targets macOS and Windows only (D-19).")
     }
 }
+
+/// Whether the platform backend can answer at all.
+///
+/// Callers check this *before* paying canonicalization, disk lookup and an
+/// async hop for an OS-covered format: on Windows every HEIC/PDF/MP4 tile
+/// would otherwise cost all three just to learn the answer is `None`.
+/// macOS answers today; Windows declines until the PV-R05 helper lands.
+pub fn thumbnail_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(target_os = "windows")]
+    {
+        false
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        compile_error!("Ferret currently targets macOS and Windows only (D-19).")
+    }
+}

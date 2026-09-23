@@ -250,8 +250,12 @@ fn request_thumbnail(path: &Path, edge: u32) -> Option<IconBitmap> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Option<IconBitmap>>(1);
     // Heap block: the generator retains the handler and calls it exactly
     // once on its own queue, after this frame returns — a stack block would
-    // dangle. The closure moves only the sender and a `u32`, so it is
-    // `Send + Sync` as the cross-thread call requires.
+    // dangle. `RcBlock` here is an ObjC heap block (atomic runtime retain
+    // count), not a Rust `Rc`: handing it to the generator transfers
+    // ownership to ObjC, which calls it once on its own queue. The closure
+    // moves only the channel sender and a `u32` (both `Send`), and the Rust
+    // handle is not touched from any other thread — which is what makes the
+    // cross-thread call sound despite `RcBlock` being `!Send` in Rust terms.
     let completion = RcBlock::new(
         move |rep: *mut QLThumbnailRepresentation, _error: *mut objc2_foundation_06::NSError| {
             // A nil representation with or without an error is the service
