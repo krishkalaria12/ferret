@@ -107,11 +107,13 @@ pub fn classify(file_name: &str, sniff: &[u8], size: Option<u64>) -> Kind {
     }
 
     // 4. Binary test. BOMs first: UTF-16/32 naturally contain NULs, and
-    // testing NULs before BOMs calls every UTF-16 file binary.
+    // testing NULs before BOMs calls every UTF-16 file binary. A BOM only
+    // proves the encoding, not that the extension was wrong: a BOM-marked
+    // `main.rs` stays Rust and a BOM-marked README stays Markdown.
     if has_bom(sniff) {
-        return Kind::Code {
+        return kind.unwrap_or(Kind::Code {
             language: SmolStr::new("plain"),
-        };
+        });
     }
     if sniff.contains(&0) {
         return Kind::Binary;
@@ -120,7 +122,7 @@ pub fn classify(file_name: &str, sniff: &[u8], size: Option<u64>) -> Kind {
     // 5. Size gate for the text decision. Content sniffing cannot see past
     // its window: a 4 GB log starts with perfectly good UTF-8. Past 64 text
     // budgets the head is not worth decoding as text at all.
-    if size.is_some_and(|len| len > super::config::TEXT_BUDGET as u64 * 64) {
+    if size.is_some_and(|len| len > super::config::TEXT_HEAD_BINARY_LIMIT) {
         return Kind::Binary;
     }
 
@@ -256,12 +258,15 @@ fn is_avif(sniff: &[u8]) -> bool {
 }
 
 /// Whether the sniff opens with a Unicode byte-order mark.
+///
+/// UTF-32 checked before UTF-16: `FF FE 00 00` also starts with `FF FE`, and
+/// the two must not disagree with `text::strip_bom`.
 fn has_bom(sniff: &[u8]) -> bool {
     sniff.starts_with(&[0xEF, 0xBB, 0xBF])
-        || sniff.starts_with(&[0xFF, 0xFE])
-        || sniff.starts_with(&[0xFE, 0xFF])
         || sniff.starts_with(&[0, 0, 0xFE, 0xFF])
         || sniff.starts_with(&[0xFF, 0xFE, 0, 0])
+        || sniff.starts_with(&[0xFF, 0xFE])
+        || sniff.starts_with(&[0xFE, 0xFF])
 }
 
 #[cfg(test)]

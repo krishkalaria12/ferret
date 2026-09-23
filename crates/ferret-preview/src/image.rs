@@ -49,7 +49,10 @@ impl Bitmap {
     pub fn is_well_formed(&self) -> bool {
         self.width > 0
             && self.height > 0
-            && self.bgra.len() == (self.width as usize) * (self.height as usize) * 4
+            && (self.width as usize)
+                .checked_mul(self.height as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .is_some_and(|expected| self.bgra.len() == expected)
     }
 
     /// Wrap straight (unpremultiplied) RGBA bytes as a BGRA bitmap.
@@ -61,7 +64,10 @@ impl Bitmap {
         if width == 0 || height == 0 {
             return None;
         }
-        if rgba.len() != width as usize * height as usize * 4 {
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        if rgba.len() != expected {
             return None;
         }
         let (bgra, has_transparency) = rgba_to_bgra(rgba);
@@ -84,7 +90,10 @@ impl Bitmap {
         if width == 0 || height == 0 {
             return None;
         }
-        if rgba.len() != width as usize * height as usize * 4 {
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        if rgba.len() != expected {
             return None;
         }
         let mut bgra = rgba;
@@ -121,6 +130,40 @@ impl Bitmap {
 pub struct Frame {
     pub bitmap: Bitmap,
     pub delay_ms: u32,
+}
+
+/// Wrap one bitmap as a renderer frame with no delay.
+///
+/// The single place that builds an `RgbaImage` shell around our BGRA bytes:
+/// the renderer uploads the bytes opaquely as BGRA, which is exactly the
+/// layout the pipeline produced. UI crates call this instead of depending on
+/// `image` directly — one edge to the decoder crate, not two.
+pub fn still_frame(bitmap: &Bitmap) -> Option<::image::Frame> {
+    let buffer = ::image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra.clone())?;
+    Some(::image::Frame::new(buffer))
+}
+
+/// Wrap one bitmap as a renderer frame with an explicit delay.
+pub fn still_frame_with_delay(bitmap: &Bitmap, delay_ms: u32) -> Option<::image::Frame> {
+    let buffer = ::image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.bgra.clone())?;
+    Some(::image::Frame::from_parts(
+        buffer,
+        0,
+        0,
+        ::image::Delay::from_numer_denom_ms(delay_ms, 1),
+    ))
+}
+
+/// Wrap every frame of a decoded image for the renderer.
+///
+/// `None` when any frame is malformed — the caller keeps metadata rather
+/// than a partial animation.
+pub fn decoded_frames(image: &DecodedImage) -> Option<Vec<::image::Frame>> {
+    image
+        .frames
+        .iter()
+        .map(|frame| still_frame_with_delay(&frame.bitmap, frame.delay_ms))
+        .collect()
 }
 
 /// A decoded image: natural size plus display-ready frames.
@@ -448,7 +491,7 @@ fn decode_static(
     let mut reader = ::image::ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(decoder_limits);
     let image = reader.decode().map_err(|_| ImageError::Undecodable)?;
-    let bitmap = downscale_to_bitmap(&image, natural);
+    let bitmap = downscale_to_bitmap(image, natural);
     Ok(DecodedImage {
         natural,
         format_name,
@@ -466,26 +509,32 @@ fn decode_animated(
     natural: (u32, u32),
     format_name: &'static str,
 ) -> Result<DecodedImage, ImageError> {
-    let frames = collect_frames(bytes, format)?;
-    if frames.len() <= 1 {
-        let bitmap = frames
-            .first()
-            .map(|frame| downscale_frame(frame, natural))
-            .unwrap_or_else(placeholder_bitmap);
-        return Ok(DecodedImage {
-            natural,
-            format_name,
-            frames: vec![Frame {
-                bitmap,
-                delay_ms: 0,
-            }],
-            frames_capped: false,
-        });
-    }
+    use ::image::AnimationDecoder as _;
+    let cursor = Cursor::new(bytes);
+    // Stream frames with early caps: the previous implementation collected the
+    // entire animation before enforcing `ANIMATION_FRAME_CAP` /
+    // `ANIMATION_MEMORY_CAP`, so a crafted GIF could expand gigabytes before
+    // the cap was consulted. Never materialise frame N+1 once capped.
+    let mut frames: Box<dyn Iterator<Item = Result<::image::Frame, ::image::ImageError>>> =
+        match format {
+            ::image::ImageFormat::Gif => {
+                let decoder = ::image::codecs::gif::GifDecoder::new(cursor)
+                    .map_err(|_| ImageError::Undecodable)?;
+                Box::new(decoder.into_frames())
+            }
+            ::image::ImageFormat::WebP => {
+                let decoder = ::image::codecs::webp::WebPDecoder::new(cursor)
+                    .map_err(|_| ImageError::Undecodable)?;
+                Box::new(decoder.into_frames())
+            }
+            _ => return Err(ImageError::Undecodable),
+        };
     let mut kept = Vec::new();
     let mut retained_bytes = 0usize;
     let mut capped = false;
-    for frame in frames.into_iter().take(ANIMATION_FRAME_CAP + 1) {
+    // One past the cap tells "capped" apart from "exactly the cap".
+    for raw in frames.by_ref().take(ANIMATION_FRAME_CAP + 1) {
+        let frame = raw.map_err(|_| ImageError::Undecodable)?;
         if kept.len() >= ANIMATION_FRAME_CAP {
             capped = true;
             break;
@@ -505,32 +554,22 @@ fn decode_animated(
     if kept.is_empty() {
         return Err(ImageError::Undecodable);
     }
+    // A single-frame "animation" is a still: reuse the static path so the
+    // footer does not claim animation for it.
+    if kept.len() == 1 && !capped {
+        return Ok(DecodedImage {
+            natural,
+            format_name,
+            frames: kept,
+            frames_capped: false,
+        });
+    }
     Ok(DecodedImage {
         natural,
         format_name,
         frames: kept,
         frames_capped: capped,
     })
-}
-
-fn collect_frames(
-    bytes: &[u8],
-    format: ::image::ImageFormat,
-) -> Result<Vec<::image::Frame>, ImageError> {
-    use ::image::AnimationDecoder as _;
-    let cursor = Cursor::new(bytes);
-    let frames: Result<Vec<::image::Frame>, _> = match format {
-        ::image::ImageFormat::Gif => ::image::codecs::gif::GifDecoder::new(cursor)
-            .map_err(|_| ImageError::Undecodable)?
-            .into_frames()
-            .collect(),
-        ::image::ImageFormat::WebP => ::image::codecs::webp::WebPDecoder::new(cursor)
-            .map_err(|_| ImageError::Undecodable)?
-            .into_frames()
-            .collect(),
-        _ => return Err(ImageError::Undecodable),
-    };
-    frames.map_err(|_| ImageError::Undecodable)
 }
 
 /// GIF delays under 10 ms mean "as fast as possible" to encoders and
@@ -548,9 +587,11 @@ fn frame_delay_ms(frame: &::image::Frame) -> u32 {
 }
 
 fn downscale_frame(frame: &::image::Frame, natural: (u32, u32)) -> Bitmap {
+    // Borrow the frame buffer without the intermediate full-res clone: the
+    // resize below copies only the output pixels.
     let rgba = frame.buffer();
     let dynamic = ::image::DynamicImage::ImageRgba8(rgba.clone());
-    downscale_to_bitmap(&dynamic, natural)
+    downscale_to_bitmap(dynamic, natural)
 }
 
 /// Downscale to the long-edge cap with a triangle filter, then BGRA.
@@ -558,7 +599,7 @@ fn downscale_frame(frame: &::image::Frame, natural: (u32, u32)) -> Bitmap {
 /// Triangle at preview sizes: the low-cost baseline, visually compared
 /// against Lanczos before anything heavier is considered. Already-small
 /// images pass through untouched — no resample, no softening.
-fn downscale_to_bitmap(image: &::image::DynamicImage, natural: (u32, u32)) -> Bitmap {
+fn downscale_to_bitmap(image: ::image::DynamicImage, natural: (u32, u32)) -> Bitmap {
     let (width, height) = natural;
     let long_edge = width.max(height);
     let resized = if long_edge > IMAGE_TARGET_LONG_EDGE {
@@ -596,18 +637,6 @@ fn rgba_to_bgra(mut bytes: Vec<u8>) -> (Vec<u8>, bool) {
 /// path, so the view knows when the checkerboard matters.
 pub fn detect_transparency(bgra: &[u8]) -> bool {
     bgra.chunks_exact(4).any(|pixel| pixel[3] != 255)
-}
-
-/// Last-resort 1×1 so an animation with no usable frame still has a body.
-/// Unreachable through `decode` (empty frame lists refuse first); kept so
-/// the frame path below cannot produce a zero-frame image by construction.
-fn placeholder_bitmap() -> Bitmap {
-    Bitmap {
-        width: 1,
-        height: 1,
-        bgra: vec![0, 0, 0, 0],
-        has_transparency: true,
-    }
 }
 
 #[cfg(test)]

@@ -35,6 +35,13 @@ pub const SNIFF_BYTES: usize = 8 * 1024;
 /// it the head is shown with an explicit "first 2 MiB of N" banner.
 pub const TEXT_BUDGET: usize = 2 * 1024 * 1024;
 
+/// Size past which a file is binary for preview purposes even with no NUL.
+///
+/// Content sniffing cannot see past its window: a 4 GB log starts with
+/// perfectly good UTF-8. Past 64 text budgets the head is not worth decoding
+/// as text at all — the binary floor (size + hex head) is the honest answer.
+pub const TEXT_HEAD_BINARY_LIMIT: u64 = TEXT_BUDGET as u64 * 64;
+
 /// Largest rendered-Markdown source.
 ///
 /// An initial rendered-mode limit; structural limits (blocks, depth) and
@@ -62,9 +69,17 @@ pub const MARKDOWN_MAX_DEPTH: usize = 32;
 pub const MARKDOWN_MAX_IMAGES: usize = 16;
 
 /// Largest single image file read for a document image (phase 07 decode).
+///
+/// 8 MiB covers a pasted screenshot at 2x without inviting a 200 MiB camera
+/// RAW someone embedded in a design doc: the per-image pipeline cap still
+/// applies at decode, so this bounds the read, not the pixels.
 pub const MARKDOWN_IMAGE_INPUT: usize = 8 * 1024 * 1024;
 
 /// Largest aggregate decoded document images (phase 07 decode).
+///
+/// 32 MiB holds sixteen 2 MP diagrams with headroom; the first image may
+/// exceed the aggregate alone (it is the document's hero image, not an
+/// attacker), and every later image stops the set rather than replacing it.
 pub const MARKDOWN_IMAGE_DECODED: usize = 32 * 1024 * 1024;
 
 /// Lines handed to the editor, at most.
@@ -93,15 +108,32 @@ pub const TABLE_SNIFF_BYTES: usize = 64 * 1024;
 pub const TABLE_INITIAL_ROWS: usize = 2_000;
 
 /// Largest CSV/TSV input read.
+///
+/// 2 MiB holds a 2000-row sample of ordinary exports; past it the sample is
+/// explicitly labelled, never silently partial. Matches `TEXT_BUDGET` so a
+/// `.csv` renamed `.log` (or the reverse) meets the same cap either way.
 pub const TABLE_BUDGET: usize = 2 * 1024 * 1024;
 
 /// Widest a parsed table may be.
+///
+/// 128 columns covers real exports (which rarely pass 40) while bounding the
+/// grid's per-row delegate work: each column is a measured width plus a
+/// sortable header, and a 10,000-column single-row file must not become
+/// 10,000 columns of layout.
 pub const TABLE_MAX_COLUMNS: usize = 128;
 
 /// Largest single CSV field kept.
+///
+/// 64 KiB holds an embedded JSON blob or a long URL; past it the field is
+/// cut with the `cut_field` flag rather than dropping the row. Per-field
+/// rather than per-row so one pathological cell cannot evict the sample.
 pub const TABLE_MAX_FIELD_BYTES: usize = 64 * 1024;
 
 /// Largest retained cell data across a parsed sample.
+///
+/// 32 MiB is the backstop when many fields are each just under the per-field
+/// cap: 2000 rows × 128 columns of 64 KiB would otherwise be a gigabyte of
+/// `String`s on a background task.
 pub const TABLE_MAX_CELL_BYTES: usize = 32 * 1024 * 1024;
 
 /// Largest image file decoded in-process.
@@ -168,10 +200,19 @@ pub const PDF_RENDER_DEADLINE: std::time::Duration = std::time::Duration::from_s
 
 /// Memory ceiling for the PDF helper.
 ///
-/// Decoder limits alone do not enforce aggregate accounting: input, scratch
-/// and retained page bitmaps all count, and past this a render is refused
-/// rather than attempted.
+/// Reserved for the supervised helper (follow-up): decoder limits bound one
+/// render, but input plus scratch plus retained pages need aggregate
+/// accounting at the process boundary. Unread today by design — enforced
+/// when the helper lands, not asserted away.
 pub const PDF_HELPER_MEMORY: usize = 256 * 1024 * 1024;
+
+/// Largest cache file honoured on thumbnail lookup.
+///
+/// Tile entries are tens of kilobytes; pane entries at [`NATIVE_PANE_PX`]
+/// are legitimately megabytes lossless. Past this a file in the cache
+/// directory is refused before any decode and left alone rather than
+/// deleted, in case a future tile size legitimately exceeds it.
+pub const THUMB_MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Long edge of an icon-view thumbnail tile.
 ///
@@ -213,13 +254,6 @@ pub const HEX_BUDGET: usize = 64 * 1024;
 /// truncated head is useless: within budget the complete bytes are loaded,
 /// past it an explicit TooLarge state.
 pub const PDF_BUDGET: usize = 64 * 1024 * 1024;
-
-/// Largest file handed to a native thumbnail service by path.
-///
-/// Native services receive paths and may read the whole file internally, so
-/// this is a request limit, not a byte budget — Rust read-budget guarantees
-/// do not apply to OS APIs. Documented exception, not an oversight.
-pub const NATIVE_THUMBNAIL_INPUT_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Scale applied to every byte budget on a non-local backend.
 ///

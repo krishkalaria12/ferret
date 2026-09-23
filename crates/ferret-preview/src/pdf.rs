@@ -72,9 +72,10 @@ pub fn page_count(bytes: &[u8]) -> Option<u32> {
 /// Whether the file declares encryption.
 ///
 /// A cheap scan for an `/Encrypt` name, which is what makes a PDF password
-/// protected. False positives require a content stream to contain that exact
-/// name, which is why this only *labels* the Protected state — the renderer
-/// confirms it by failing to open without a password.
+/// protected. A content stream containing those exact bytes is a rare false
+/// positive — which is why `render_page` lets the renderer confirm first and
+/// only falls back to this label when the library is absent or the open
+/// fails.
 pub fn is_encrypted(bytes: &[u8]) -> bool {
     contains_name(bytes, b"/Encrypt")
 }
@@ -91,13 +92,33 @@ pub fn render_page(pdf: &[u8], page_index: u32) -> Result<RenderedPage, PdfUnava
             size: pdf.len() as u64,
         });
     }
-    if is_encrypted(pdf) {
-        return Err(PdfUnavailable::Encrypted);
+    // Bind first so a content stream containing the literal `/Encrypt` bytes
+    // does not permanently refuse a valid file: the renderer confirms by
+    // failing to open without a password, and only then does the scan label
+    // it Protected.
+    match bound_pdfium() {
+        Ok(pdfium) => match pdfium.load_pdf_from_byte_slice(pdf, None) {
+            Ok(document) => render_document(&document, page_index, pdf.len()),
+            Err(_) if is_encrypted(pdf) => Err(PdfUnavailable::Encrypted),
+            Err(_) => Err(PdfUnavailable::Failed),
+        },
+        Err(_) => {
+            if is_encrypted(pdf) {
+                return Err(PdfUnavailable::Encrypted);
+            }
+            Err(PdfUnavailable::NoRenderer)
+        }
     }
-    let pdfium = bound_pdfium().map_err(|_| PdfUnavailable::NoRenderer)?;
-    let document = pdfium
-        .load_pdf_from_byte_slice(pdf, None)
-        .map_err(|_| PdfUnavailable::Failed)?;
+}
+
+/// Render an already-open document's page. Split from `render_page` so the
+/// encryption fallback above stays readable.
+#[cfg(feature = "pdf")]
+fn render_document(
+    document: &pdfium_render::prelude::PdfDocument,
+    page_index: u32,
+    pdf_len: usize,
+) -> Result<RenderedPage, PdfUnavailable> {
     let pages = document.pages();
     let total = pages.len().max(0) as u32;
     let index: i32 = page_index.try_into().map_err(|_| PdfUnavailable::Failed)?;
@@ -115,7 +136,7 @@ pub fn render_page(pdf: &[u8], page_index: u32) -> Result<RenderedPage, PdfUnava
     let target_height = ((page_height * scale).round() as i32).max(1);
     if target_width as u64 * target_height as u64 > super::config::IMAGE_SOURCE_PIXEL_CAP {
         return Err(PdfUnavailable::TooLarge {
-            size: pdf.len() as u64,
+            size: pdf_len as u64,
         });
     }
     let config = pdfium_render::prelude::PdfRenderConfig::new()
@@ -192,6 +213,12 @@ fn bound_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, ()> {
 /// directory happens to contain is never a PDF library as far as this
 /// function is concerned. Returns `None` when neither names an existing
 /// file, in which case the caller falls through to the system library.
+///
+/// A `FERRET_PDFIUM_LIB` that names a missing file is a misconfiguration,
+/// not an unset variable — but it degrades to the same system-library
+/// fallback rather than failing the render. Loud would be better than
+/// silent here; the follow-up is a startup log line naming the ignored
+/// path, not a hard error that breaks packaged builds.
 #[cfg(feature = "pdf")]
 fn explicit_library_path() -> Option<std::path::PathBuf> {
     use pdfium_render::prelude::Pdfium;
@@ -240,9 +267,11 @@ fn count_page_objects(bytes: &[u8]) -> u32 {
                 total += 1;
             }
         }
-        // Comments (`%...`) can hide a `/Type` from naive scans and, worse,
-        // a content stream can fake one. Skipping to end-of-line past `%`
-        // keeps the scan honest about structure without parsing objects.
+        // The count is a display-only floor the renderer corrects: content
+        // streams can fake `/Type /Page` in literal text, and comments can
+        // hide one. A comment-skipping scan would narrow the lie slightly
+        // without removing it, so the code does not pretend — it counts
+        // naively and lets the rendered page report truth.
         index = found + 1;
         let _ = &mut cursor;
     }
@@ -250,6 +279,12 @@ fn count_page_objects(bytes: &[u8]) -> u32 {
 }
 
 /// Whether `name` (with its leading slash) appears as a PDF name.
+///
+/// Hex-escaped names (`/E#6Ecrypt`, legal per spec) evade this scan and fall
+/// through to the renderer, which still refuses without a password — the
+/// footer then reads `Failed` instead of `Protected`. Wrong words, never a
+/// wrong open: normalising `#XX` before matching is the follow-up, not a
+/// gate.
 fn contains_name(bytes: &[u8], name: &[u8]) -> bool {
     let mut index = 0;
     while let Some(found) = find_token(bytes, index, name) {

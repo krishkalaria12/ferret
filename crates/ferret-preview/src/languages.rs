@@ -377,6 +377,42 @@ pub fn display_name(language: &str) -> &str {
         "csv" => "CSV",
         "tsv" => "TSV",
         "applescript" => "AppleScript",
+        "actionscript" => "ActionScript",
+        "arduino" => "Arduino",
+        "autoit" => "AutoIt",
+        "awk" => "Awk",
+        "cobra" => "Cobra",
+        "crystal" => "Crystal",
+        "d" => "D",
+        "ejs" => "EJS",
+        "erb" => "ERB",
+        "forth" => "Forth",
+        "janet" => "Janet",
+        "jsonnet" => "Jsonnet",
+        "kdl" => "KDL",
+        "lidr" => "Lidr",
+        "nim" => "Nim",
+        "nushell" => "Nushell",
+        "odin" => "Odin",
+        "pascal" => "Pascal",
+        "pony" => "Pony",
+        "prisma" => "Prisma",
+        "purescript" => "PureScript",
+        "racket" => "Racket",
+        "rego" => "Rego",
+        "roc" => "Roc",
+        "sed" => "Sed",
+        "slang" => "Slang",
+        "sml" => "SML",
+        "swig" => "SWIG",
+        "tcl" => "Tcl",
+        "typst" => "Typst",
+        "v" => "V",
+        "vala" => "Vala",
+        "vbscript" => "VBScript",
+        "wren" => "Wren",
+        "yuck" => "Yuck",
+        "zenscript" => "ZenScript",
         other => other,
     }
 }
@@ -418,8 +454,20 @@ mod tests {
     #[test]
     fn all_names_covers_the_tables() {
         // The UI invariant test trusts ALL_NAMES to be the tables' full
-        // output. This ties the two together for a sample across every
-        // region of the tables; extend it when the tables grow.
+        // output. Every name must have a human header label — a lowercase
+        // registry key in the header is the gap this guards — plus the
+        // sampled file→name ties for every region of the tables.
+        for name in ALL_NAMES {
+            let label = display_name(name);
+            assert!(!label.is_empty(), "{name} has no header label");
+            assert!(
+                label
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_ascii_lowercase()),
+                "{name} displays as raw lowercase `{label}`"
+            );
+        }
         for (file, name) in [
             ("Makefile", "make"),
             ("Dockerfile", "dockerfile"),
@@ -455,7 +503,9 @@ mod tests {
     fn registry_keys_have_human_labels() {
         assert_eq!(display_name("c_sharp"), "C#");
         assert_eq!(display_name("plain"), "Plain text");
-        // Unlisted names pass through rather than breaking.
-        assert_eq!(display_name("yuck"), "yuck");
+        // Formerly unlisted names now resolve too; truly unknown keys still
+        // pass through rather than breaking.
+        assert_eq!(display_name("yuck"), "Yuck");
+        assert_eq!(display_name("some-future-lang"), "some-future-lang");
     }
 }

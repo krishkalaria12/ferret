@@ -27,6 +27,10 @@ pub struct ParsedTable {
     pub omitted_trailing_record: bool,
     /// A field past [`TABLE_MAX_FIELD_BYTES`] was cut.
     pub cut_field: bool,
+    /// Columns past [`TABLE_MAX_COLUMNS`] were dropped. Like `cut_field` and
+    /// `omitted_trailing_record`, a preview that hides data without saying so
+    /// is the failure these flags exist to prevent.
+    pub cut_columns: bool,
 }
 
 /// Delimiter candidates, in the order ties prefer.
@@ -54,12 +58,18 @@ fn score_delimiter(sample: &[u8], delimiter: u8) -> Option<usize> {
 ///
 /// Quote-aware: a delimiter inside `"..."` does not split, and `""` is an
 /// escaped quote. Records cut by the end of the sample are not counted.
+///
+/// Mirrors the `csv` builder below (`flexible`, `has_headers(false)`,
+/// default quoting: `"` special only at field starts, `""` escaped): the one
+/// intentional divergence is that the scorer treats `"` as special anywhere
+/// in a field, which can only *over*-score a candidate on adversarial input
+/// like `a"b,c` — a wrong-delimiter outcome the parser's own consistency
+/// still bounds, never a misparse.
 fn record_field_counts(sample: &[u8], delimiter: u8, limit: usize) -> Vec<usize> {
     let mut counts = Vec::new();
     let mut fields = 1usize;
     let mut in_quotes = false;
     let mut bytes = sample.iter().peekable();
-    let mut complete = false;
 
     while let Some(byte) = bytes.next() {
         if in_quotes {
@@ -81,7 +91,6 @@ fn record_field_counts(sample: &[u8], delimiter: u8, limit: usize) -> Vec<usize>
                     return counts;
                 }
                 fields = 1;
-                complete = true;
             }
             b'\r' => {
                 if bytes.peek() == Some(&&b'\n') {
@@ -92,15 +101,13 @@ fn record_field_counts(sample: &[u8], delimiter: u8, limit: usize) -> Vec<usize>
                     return counts;
                 }
                 fields = 1;
-                complete = true;
             }
-            _ => complete = false,
+            _ => {}
         }
     }
     // A trailing record without a line ending is complete only if the sample
     // is the whole file — which the scorer cannot know. Leave it out: the
     // parser below makes the same call explicitly.
-    let _ = complete;
     counts
 }
 
@@ -139,7 +146,18 @@ fn is_header(first: &Row, rest: &[Row]) -> bool {
 
 fn is_numeric(field: &str) -> bool {
     let field = field.trim();
-    !field.is_empty() && field.parse::<f64>().is_ok()
+    if field.is_empty() {
+        return false;
+    }
+    // `f64::from_str` accepts `NaN`, `inf` and exponents: a header literally
+    // named `NaN` must not read as numeric. Finite decimal/integer text only.
+    if matches!(
+        field.to_ascii_lowercase().as_str(),
+        "nan" | "inf" | "+inf" | "-inf" | "infinity" | "+infinity" | "-infinity"
+    ) {
+        return false;
+    }
+    field.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
 /// Parse a bounded sample of `text` with `delimiter`.
@@ -154,15 +172,19 @@ pub fn parse(text: &str, delimiter: u8) -> ParsedTable {
         .delimiter(delimiter)
         .flexible(true)
         .has_headers(false)
+        .double_quote(true)
+        .quoting(true)
         .from_reader(text.as_bytes());
 
     let mut rows: Vec<Row> = Vec::new();
     let mut cell_bytes = 0usize;
     let mut cut_field = false;
+    let mut cut_columns = false;
     let mut complete = true;
 
     // Room for one header plus a full sample: the header is removed below,
-    // so the data that survives is a complete `TABLE_INITIAL_ROWS`.
+    // so the data that survives is a complete `TABLE_INITIAL_ROWS`. One extra
+    // record past the cap marks truncation without growing the sample.
     for record in reader.records().take(TABLE_INITIAL_ROWS + 2) {
         let record = match record {
             Ok(record) => record,
@@ -176,6 +198,9 @@ pub fn parse(text: &str, delimiter: u8) -> ParsedTable {
             break;
         }
         let mut row: Row = Vec::with_capacity(record.len().min(TABLE_MAX_COLUMNS));
+        if record.len() > TABLE_MAX_COLUMNS {
+            cut_columns = true;
+        }
         for field in record.iter().take(TABLE_MAX_COLUMNS) {
             let kept = if field.len() > TABLE_MAX_FIELD_BYTES {
                 cut_field = true;
@@ -207,6 +232,13 @@ pub fn parse(text: &str, delimiter: u8) -> ParsedTable {
     } else {
         None
     };
+    // A headerless sample keeps one record too many above: the loop reserves
+    // room for a header that never came. Trim it so `rows` is at most
+    // `TABLE_INITIAL_ROWS` either way.
+    if header.is_none() && rows.len() > TABLE_INITIAL_ROWS {
+        rows.truncate(TABLE_INITIAL_ROWS);
+        complete = false;
+    }
 
     ParsedTable {
         header,
@@ -214,6 +246,7 @@ pub fn parse(text: &str, delimiter: u8) -> ParsedTable {
         delimiter,
         omitted_trailing_record: !complete,
         cut_field,
+        cut_columns,
     }
 }
 
@@ -235,38 +268,40 @@ pub fn sort_sample(rows: &[Row], column: usize, ascending: bool) -> Vec<Row> {
 /// stable order as [`sort_sample`].
 ///
 /// Generic over the cell so the grid can sort its shared strings without
-/// allocating a parallel `String` copy per header click.
+/// allocating a parallel `String` copy per header click. Missing cells sort
+/// last in both directions: the `None` arms are not reversed with the rest.
 pub fn sort_rows<Cell: AsRef<str>>(rows: &mut [Vec<Cell>], column: usize, ascending: bool) {
     rows.sort_by(|a, b| {
-        let ordering = compare_cells(
+        let (x, y) = (
             a.get(column).map(AsRef::as_ref),
             b.get(column).map(AsRef::as_ref),
         );
-        if ascending {
-            ordering
-        } else {
-            ordering.reverse()
+        match (x, y) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (Some(x), Some(y)) => {
+                let ordering = compare_values(x, y);
+                if ascending {
+                    ordering
+                } else {
+                    ordering.reverse()
+                }
+            }
         }
     });
 }
 
-fn compare_cells(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
-    match (a, b) {
-        (None, None) => std::cmp::Ordering::Equal,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (Some(a), Some(b)) => {
-            match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-                (Ok(x), Ok(y)) => x
-                    .partial_cmp(&y)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.cmp(b)),
-                // Numbers sort before text; text sorts as text.
-                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-                (Err(_), Err(_)) => a.cmp(b),
-            }
-        }
+fn compare_values(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
+        (Ok(x), Ok(y)) if x.is_finite() && y.is_finite() => x
+            .partial_cmp(&y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b)),
+        // Numbers sort before text; text sorts as text.
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        _ => a.cmp(b),
     }
 }
 

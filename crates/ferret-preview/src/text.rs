@@ -113,7 +113,7 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedText> {
     let trailing_newline = raw.ends_with('\n');
     let (text, truncated_lines) = cap_lines(&raw);
     Some(DecodedText {
-        text,
+        text: text.into_owned(),
         bom,
         endings,
         trailing_newline,
@@ -162,25 +162,26 @@ fn decode_utf8(bytes: &[u8]) -> Option<(String, bool)> {
 }
 
 fn decode_utf16(bytes: &[u8], little: bool) -> Option<String> {
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| {
-            if little {
-                u16::from_le_bytes([pair[0], pair[1]])
-            } else {
-                u16::from_be_bytes([pair[0], pair[1]])
-            }
-        })
-        .collect();
-    // Strict: a lone surrogate is corruption, not text.
-    let mut out = String::with_capacity(units.len());
-    let mut iter = units.iter().copied().peekable();
-    while let Some(unit) = iter.next() {
+    // A budget cut may end mid-code-unit: drop the trailing byte (it belongs
+    // to the tail past the budget), mirroring the UTF-8 boundary handling.
+    let bytes = if bytes.len() % 2 == 1 {
+        &bytes[..bytes.len() - 1]
+    } else {
+        bytes
+    };
+    // Strict: a lone surrogate is corruption, not text. Decoded streaming
+    // from the byte pairs — no intermediate `Vec<u16>` doubling the input.
+    let mut out = String::with_capacity(bytes.len() / 2);
+    let mut pairs = bytes.chunks_exact(2).map(|pair| {
+        if little {
+            u16::from_le_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_be_bytes([pair[0], pair[1]])
+        }
+    });
+    while let Some(unit) = pairs.next() {
         if (0xD800..0xDC00).contains(&unit) {
-            let low = iter.next()?;
+            let low = pairs.next()?;
             if !(0xDC00..0xE000).contains(&low) {
                 return None;
             }
@@ -196,9 +197,13 @@ fn decode_utf16(bytes: &[u8], little: bool) -> Option<String> {
 }
 
 fn decode_utf32(bytes: &[u8], bom: Bom) -> Option<String> {
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
+    // Same boundary rule as UTF-16: a truncated tail is dropped, not refused.
+    let rem = bytes.len() % 4;
+    let bytes = if rem == 0 {
+        bytes
+    } else {
+        &bytes[..bytes.len() - rem]
+    };
     let mut out = String::with_capacity(bytes.len() / 4);
     for quad in bytes.chunks_exact(4) {
         let code = match bom {
@@ -233,8 +238,22 @@ fn detect_endings(text: &str) -> LineEndings {
 ///
 /// Returns the capped text and whether anything was cut. Cutting is explicit:
 /// the footer names it, so a preview never silently hides the broken row
-/// someone is looking for.
-fn cap_lines(text: &str) -> (String, bool) {
+/// someone is looking for. Returns a borrow when nothing is cut, so the
+/// common small-file case allocates nothing.
+fn cap_lines(text: &str) -> (std::borrow::Cow<'_, str>, bool) {
+    // Fast path: count newlines and scan line lengths without building.
+    let mut lines = 0usize;
+    let mut needs_cut = false;
+    for line in text.split_inclusive('\n') {
+        lines += 1;
+        if lines > TEXT_LINE_CAP || line.len() > TEXT_MAX_LINE_BYTES {
+            needs_cut = true;
+            break;
+        }
+    }
+    if !needs_cut {
+        return (std::borrow::Cow::Borrowed(text), false);
+    }
     let mut out = String::new();
     let mut truncated = false;
     for (index, line) in text.split_inclusive('\n').enumerate() {
@@ -262,7 +281,7 @@ fn cap_lines(text: &str) -> (String, bool) {
     // A file with no `\n` at all still passes through the loop once above,
     // so only the unterminated-tail case needs handling: none — the loop
     // already emitted it.
-    (out, truncated)
+    (std::borrow::Cow::Owned(out), truncated)
 }
 
 /// Rebuild file bytes from edited editor text plus the fidelity snapshot.
@@ -325,20 +344,27 @@ pub fn reencode(original: &DecodedText, text: &str) -> Vec<u8> {
             }
             out
         }
-        // Refused by `saveable`; encode UTF-8 rather than corrupt.
-        Bom::Utf32Le | Bom::Utf32Be => body.into_bytes(),
+        // Refused by `saveable`; encode UTF-8 rather than corrupt. Callers
+        // must gate on `saveable()` first — this arm exists so a missed
+        // check degrades visibly (encoding change) rather than panicking,
+        // and `debug_assert` catches it in tests.
+        Bom::Utf32Le | Bom::Utf32Be => {
+            debug_assert!(false, "reencode called on non-saveable UTF-32");
+            body.into_bytes()
+        }
     }
 }
 
 /// Format the head of a binary file: 16 bytes per row, offset gutter, hex,
 /// printable ASCII column.
 pub fn format_hex(head: &[u8]) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(head.len() * 4);
     for (row, chunk) in head.chunks(16).enumerate() {
-        out.push_str(&format!("{:08x}  ", row * 16));
+        let _ = write!(out, "{:08x}  ", row * 16);
         for i in 0..16 {
             if let Some(byte) = chunk.get(i) {
-                out.push_str(&format!("{byte:02x} "));
+                let _ = write!(out, "{byte:02x} ");
             } else {
                 out.push_str("   ");
             }

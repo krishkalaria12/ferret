@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::config::{THUMB_CACHE_AGE, THUMB_CACHE_BYTES, THUMB_PX};
+use super::config::{NATIVE_PANE_PX, THUMB_CACHE_AGE, THUMB_CACHE_BYTES, THUMB_MAX_ENTRY_BYTES};
 use super::image::Bitmap;
 
 /// A file's cache identity: length plus mtime, the two facts an edit changes.
@@ -38,20 +38,26 @@ pub fn fingerprint(len: u64, modified: Option<SystemTime>) -> Option<(u64, u64, 
     Some((len, elapsed.as_secs(), elapsed.subsec_nanos()))
 }
 
-/// Whether an already-lowercased extension has an in-process decoder behind
-/// it, and so can grow a tile without leaving the process.
+/// Whether an extension has an in-process decoder behind it, and so can grow
+/// a tile without leaving the process.
+///
+/// Lowercases internally: a `PHOTO.JPG` must tile, and one
+/// `to_ascii_lowercase` on a short extension is cheaper than every caller
+/// remembering the contract.
 ///
 /// HEIC/AVIF/RAW go through [`is_native_tileable_extension`] instead:
 /// generating for them in-process would schedule a job that can only fail.
 pub fn is_tileable_extension(ext: &str) -> bool {
     matches!(
-        ext,
+        ext.to_ascii_lowercase().as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "tif" | "tiff" | "bmp" | "ico" | "qoi"
     )
 }
 
-/// Whether an already-lowercased extension may have an OS thumbnail behind
-/// it, worth one best-effort native request.
+/// Whether an extension may have an OS thumbnail behind it, worth one
+/// best-effort native request.
+///
+/// Lowercases internally, same contract as [`is_tileable_extension`].
 ///
 /// The service declines gracefully for anything without a handler, so this
 /// list only bounds *what we ask about*, not what can appear: HEIC/AVIF/RAW
@@ -61,7 +67,7 @@ pub fn is_tileable_extension(ext: &str) -> bool {
 /// plan's acceptance table exists to prevent.
 pub fn is_native_tileable_extension(ext: &str) -> bool {
     matches!(
-        ext,
+        ext.to_ascii_lowercase().as_str(),
         "heic"
             | "heif"
             | "avif"
@@ -118,12 +124,12 @@ impl Fnv1a {
     }
 }
 
-/// Largest cache file honoured on lookup.
+/// Largest stored dimension honoured on lookup.
 ///
-/// Our entries are tens of kilobytes. Anything past this in our directory is
-/// not ours — refused, never decoded, and left alone rather than deleted, in
-/// case a future tile size legitimately exceeds it.
-const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+/// Tiles fit inside the tile square, pane bitmaps inside [`NATIVE_PANE_PX`]:
+/// the bound is the pane size, not the tile size, because both share one
+/// cache directory under different keys.
+const MAX_STORED_EDGE: u32 = NATIVE_PANE_PX;
 
 /// The on-disk thumbnail cache: a directory of `<key>.webp` files.
 ///
@@ -160,7 +166,7 @@ impl ThumbCache {
     pub fn lookup(&self, key: &str) -> Option<Bitmap> {
         let path = self.path_for(key);
         let meta = std::fs::metadata(&path).ok()?;
-        if meta.len() == 0 || meta.len() > MAX_ENTRY_BYTES {
+        if meta.len() == 0 || meta.len() > THUMB_MAX_ENTRY_BYTES {
             return None;
         }
         let bytes = std::fs::read(&path).ok()?;
@@ -168,7 +174,10 @@ impl ThumbCache {
             let _ = std::fs::remove_file(&path);
             return None;
         };
-        if !bitmap.is_well_formed() || bitmap.width > THUMB_PX * 4 || bitmap.height > THUMB_PX * 4 {
+        if !bitmap.is_well_formed()
+            || bitmap.width > MAX_STORED_EDGE
+            || bitmap.height > MAX_STORED_EDGE
+        {
             let _ = std::fs::remove_file(&path);
             return None;
         }
@@ -181,6 +190,12 @@ impl ThumbCache {
     /// next scroll re-requests.
     pub fn store(&self, key: &str, thumb: &Bitmap) -> bool {
         if !thumb.is_well_formed() {
+            return false;
+        }
+        // Refuse to cache what lookup would reject: a pane bitmap must fit
+        // the pane bound, a tile the tile bound — otherwise every selection
+        // re-asks the OS service for an entry that can never hit.
+        if thumb.width > MAX_STORED_EDGE || thumb.height > MAX_STORED_EDGE {
             return false;
         }
         let rgba = ::image::RgbaImage::from_raw(thumb.width, thumb.height, thumb.bgra.clone());
@@ -206,12 +221,26 @@ impl ThumbCache {
         if std::fs::create_dir_all(&self.dir).is_err() {
             return false;
         }
-        let tmp = self.dir.join(format!(".{key}.tmp"));
+        // Unique temp names: two tasks storing the same key must not share
+        // one path, and a crash must leave sweepable `.*.tmp` debris rather
+        // than a single orphaned name the next store reuses blindly.
+        let tmp = self.dir.join(format!(
+            ".{key}.{}.{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0),
+        ));
         if std::fs::write(&tmp, &encoded).is_err() {
             let _ = std::fs::remove_file(&tmp);
             return false;
         }
-        std::fs::rename(&tmp, self.path_for(key)).is_ok()
+        if std::fs::rename(&tmp, self.path_for(key)).is_ok() {
+            return true;
+        }
+        let _ = std::fs::remove_file(&tmp);
+        false
     }
 
     /// Fit a decoded first frame inside the tile square, aspect preserved.
@@ -262,6 +291,27 @@ impl ThumbCache {
             .collect();
         for path in plan_eviction(entries, now) {
             let _ = std::fs::remove_file(path);
+        }
+        self.sweep_tmp();
+    }
+
+    /// Delete crashed-store `.*.tmp` debris. `inventory` only tracks
+    /// `*.webp`, so without this a crash between write and rename orphans a
+    /// temp file forever.
+    fn sweep_tmp(&self) {
+        let Ok(dir) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for child in dir.flatten() {
+            let path = child.path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if !name.starts_with('.') || !name.ends_with(".tmp") {
+                continue;
+            }
+            let _ = std::fs::remove_file(&path);
         }
     }
 
@@ -336,7 +386,18 @@ fn plan_eviction(
 }
 
 fn decode_entry(bytes: &[u8]) -> Option<Bitmap> {
-    let image = ::image::load_from_memory_with_format(bytes, ::image::ImageFormat::WebP).ok()?;
+    // Cache entries are attacker-influenced input by definition (the cache
+    // dir is user-writable): decode under explicit limits, before the dim
+    // check below runs. A planted 1 MiB WebP can otherwise decode to a huge
+    // raster first.
+    let mut reader =
+        ::image::ImageReader::with_format(std::io::Cursor::new(bytes), ::image::ImageFormat::WebP);
+    let mut limits = ::image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
     let rgba = image.to_rgba8();
     let (width, height) = (rgba.width(), rgba.height());
     let mut bgra = rgba.into_raw();
@@ -356,6 +417,7 @@ fn decode_entry(bytes: &[u8]) -> Option<Bitmap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::THUMB_PX;
     use crate::image::{Bitmap, decode};
     use ::image::{DynamicImage, Rgba, RgbaImage};
 
@@ -517,7 +579,10 @@ mod tests {
         let (cache, _guard) = test_cache("keys");
         let key = thumb_key(Path::new("/pics/p.png"), 1, 2, 3, THUMB_PX);
         std::fs::create_dir_all(&cache.dir).unwrap();
-        std::fs::write(cache.path_for(&key), vec![0u8; 2 * 1024 * 1024]).unwrap();
+        // Past `THUMB_MAX_ENTRY_BYTES` (8 MiB: pane entries at 1024 px are
+        // legitimately megabytes): refused before any decode, and kept — it
+        // may be a future tile size, not corruption.
+        std::fs::write(cache.path_for(&key), vec![0u8; 10 * 1024 * 1024]).unwrap();
         assert!(cache.lookup(&key).is_none());
         // Refused, not deleted: it may be a future tile size, not corruption.
         assert!(cache.path_for(&key).exists());

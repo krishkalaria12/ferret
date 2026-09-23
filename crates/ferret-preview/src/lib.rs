@@ -12,8 +12,11 @@
 //! GPUI type, which is what keeps this crate's tests running without a
 //! window.
 //!
-//! Layout follows the repository conventions: the error type and [`Result`]
-//! alias live in `errors.rs`, every tunable lives in [`config`].
+//! Layout follows the repository conventions: every tunable lives in
+//! [`config`]; fallible leaves (`image`, `svg`, `pdf`) define their own
+//! error types beside the code, and the infallible pipeline (`build`)
+//! reports through [`Preview`]/[`Unsupported`] rather than a crate-wide
+//! error enum.
 
 pub mod classify;
 pub mod config;
@@ -26,10 +29,7 @@ pub mod table;
 pub mod text;
 pub mod thumbs;
 
-mod errors;
-
 pub use classify::Kind;
-pub use errors::{PreviewError, Result};
 pub use image::{Bitmap, DecodedImage, Frame, ImageError};
 pub use pdf::{PdfUnavailable, RenderedPage, is_encrypted, page_count, render_page};
 pub use svg::{SvgError, looks_like_svg};
@@ -202,9 +202,18 @@ pub fn budget_for(kind: &Kind, remote: bool) -> usize {
 /// `bytes` holds up to the budget; `total` is the full file length when the
 /// listing already knows it (otherwise the bytes in hand). `base` is the
 /// containing directory, required for Markdown and ignored otherwise.
+/// `remote` must match the `remote` passed to [`budget_for`] for the read:
+/// the `TooLarge` footer cites the effective budget, and a remote read capped
+/// at a quarter of the local budget must not claim the local one.
 /// Undecodable text falls back to the hex floor; undecodable hex is
 /// impossible, so this only fails on programmer error (an empty kind map).
-pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> Preview {
+pub fn build(
+    kind: Kind,
+    bytes: Vec<u8>,
+    total: Option<u64>,
+    base: VfsPath,
+    remote: bool,
+) -> Preview {
     let total = total.unwrap_or(bytes.len() as u64);
     match kind {
         Kind::Markdown => {
@@ -269,7 +278,7 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                 // A vector image wearing a raster extension (or the reverse):
                 // the bounded rasteriser gets one chance before the fallbacks.
                 Err(image::ImageError::Undecodable) if svg::looks_like_svg(&bytes) => {
-                    svg_preview(bytes, total)
+                    svg_preview(bytes, total, remote)
                 }
                 // A corrupt image must still show its size: the hex floor.
                 Err(image::ImageError::Undecodable) => Preview::Binary {
@@ -285,7 +294,7 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                 // Past even the head budget for a kind that cannot be
                 // partially rendered: metadata, never an attempted decode.
                 Err(image::ImageError::TooLarge { .. }) => {
-                    let budget = budget_for(&kind, false);
+                    let budget = budget_for(&kind, remote);
                     Preview::Unsupported {
                         kind,
                         reason: Unsupported::TooLarge {
@@ -296,9 +305,9 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
                 }
             }
         }
-        Kind::Svg => svg_preview(bytes, total),
+        Kind::Svg => svg_preview(bytes, total, remote),
         Kind::Pdf => {
-            let budget = budget_for(&kind, false);
+            let budget = budget_for(&kind, remote);
             if total > budget as u64 {
                 Preview::Unsupported {
                     kind,
@@ -328,7 +337,7 @@ pub fn build(kind: Kind, bytes: Vec<u8>, total: Option<u64>, base: VfsPath) -> P
 /// Build the [`Preview`] for SVG bytes: rasterise bounded, fall back to
 /// labelled XML source for files that claim the extension without parsing,
 /// and to the hex floor only for bytes that are neither.
-fn svg_preview(bytes: Vec<u8>, total: u64) -> Preview {
+fn svg_preview(bytes: Vec<u8>, total: u64, remote: bool) -> Preview {
     let shown = bytes.len() as u64;
     match svg::render(&bytes) {
         Ok(image) => Preview::Image {
@@ -336,7 +345,7 @@ fn svg_preview(bytes: Vec<u8>, total: u64) -> Preview {
             truncated: Truncation { shown, total },
         },
         Err(svg::SvgError::TooLarge) => {
-            let budget = budget_for(&Kind::Svg, false);
+            let budget = budget_for(&Kind::Svg, remote);
             Preview::Unsupported {
                 kind: Kind::Svg,
                 reason: Unsupported::TooLarge {
@@ -369,7 +378,7 @@ mod tests {
         let kind = classify(name, sniff, size);
         let budget = budget_for(&kind, false);
         let capped = bytes[..bytes.len().min(budget)].to_vec();
-        build(kind, capped, size, VfsPath::local("/preview"))
+        build(kind, capped, size, VfsPath::local("/preview"), false)
     }
 
     #[test]

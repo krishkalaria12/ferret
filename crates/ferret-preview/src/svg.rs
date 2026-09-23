@@ -37,11 +37,14 @@ pub enum SvgError {
 }
 
 /// Whether bytes look like an SVG document: optional BOM, whitespace and
-/// comments skipped, then `<svg` or an XML prolog.
+/// comments skipped, then `<svg`, a `DOCTYPE svg`, or an XML prolog followed
+/// by `<svg` within a bounded prefix.
 ///
 /// Pure and cheap — the pipeline asks this before spending a parse, and the
 /// classifier never sees it (classification is by `.svg` extension, so an
-/// HTML file with inline SVG keeps previewing as HTML).
+/// HTML file with inline SVG keeps previewing as HTML). A bare `<?xml`
+/// without `<svg` is *not* enough: any mislabelled XML would otherwise pay a
+/// full `usvg` parse before falling back to source.
 pub fn looks_like_svg(bytes: &[u8]) -> bool {
     let mut body = bytes;
     if let Some(stripped) = body.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
@@ -58,11 +61,21 @@ pub fn looks_like_svg(bytes: &[u8]) -> bool {
             break;
         }
     }
-    body.starts_with(b"<svg")
+    if body.starts_with(b"<svg")
         || body.starts_with(b"<SVG")
-        || body.starts_with(b"<?xml")
         || body.starts_with(b"<!DOCTYPE svg")
         || body.starts_with(b"<!DOCTYPE SVG")
+    {
+        return true;
+    }
+    // An XML prolog is only a maybe: require `<svg` within the first 4 KiB
+    // after it, case-insensitively, so a 2 MiB XML bomb does not pass the
+    // sniff on the prolog alone.
+    if body.starts_with(b"<?xml") {
+        let window = &body[..body.len().min(4096)];
+        return find_bytes(window, b"<svg").is_some() || find_bytes(window, b"<SVG").is_some();
+    }
+    false
 }
 
 /// Rasterise bounded SVG bytes into display-ready frames.
@@ -73,9 +86,19 @@ pub fn render(bytes: &[u8]) -> Result<DecodedImage, SvgError> {
     if !looks_like_svg(bytes) {
         return Err(SvgError::Unparseable);
     }
+    // Entity expansion happens inside `Tree::from_data`, before the node cap
+    // below runs: a 10 KiB billion-laughs payload could OOM the parse. Reject
+    // internal subsets up front — legitimate icons almost never define
+    // entities, and the cost of refusing one is a source fallback.
+    if has_internal_subset(bytes) {
+        return Err(SvgError::Unparseable);
+    }
     // No resource directory: external files, fonts and network locations
-    // referenced from the document resolve to nothing. Text still renders
-    // through the system font database, which the caller loads once.
+    // referenced from the document resolve to nothing. `usvg` 0.46 renders
+    // `<text>` through an empty font database by default (no system font
+    // scan per file): text elements come out blank rather than slow, which
+    // is the safe direction — a source fallback would be noisier than an
+    // honest gap, and a per-file font scan would be a perf cliff.
     let options = usvg::Options {
         resources_dir: None,
         ..usvg::Options::default()
@@ -92,6 +115,11 @@ pub fn render(bytes: &[u8]) -> Result<DecodedImage, SvgError> {
     }
     // Render at display scale directly: vectors gain nothing from rendering
     // huge and downscaling, and the output stays bounded by construction.
+    // The output cap reuses `IMAGE_SOURCE_PIXEL_CAP` (16 MP) while the raster
+    // path never re-checks post-scale: for SVG the check matters because a
+    // 4096-long-edge square scales to 16.7 MP, just past the source cap, and
+    // refusing it is the conservative answer. One semantic ("no bitmap past
+    // 16 MP anywhere") shared by both paths.
     let long_edge = natural.0.max(natural.1).max(1);
     let scale = if long_edge > IMAGE_TARGET_LONG_EDGE {
         IMAGE_TARGET_LONG_EDGE as f32 / long_edge as f32
@@ -163,6 +191,46 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// Whether the source declares a `DOCTYPE` with an internal subset or any
+/// entity: the billion-laughs shape. Case-insensitive on the keyword; the
+/// match is a cheap byte scan, not a parse.
+fn has_internal_subset(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(SVG_BUDGET)];
+    // ASCII-case-insensitive search for `<!doctype` then `[` or `<!entity`.
+    for (i, window) in head.windows(9).enumerate() {
+        if window[0] == b'<'
+            && window[1] == b'!'
+            && window[2].eq_ignore_ascii_case(&b'd')
+            && window[3].eq_ignore_ascii_case(&b'o')
+            && window[4].eq_ignore_ascii_case(&b'c')
+            && window[5].eq_ignore_ascii_case(&b't')
+            && window[6].eq_ignore_ascii_case(&b'y')
+            && window[7].eq_ignore_ascii_case(&b'p')
+            && window[8].eq_ignore_ascii_case(&b'e')
+        {
+            // From here to `>` containing `[` means an internal subset.
+            let rest = &head[i..];
+            if let Some(end) = find_bytes(rest, b">")
+                && rest[..end].contains(&b'[')
+            {
+                return true;
+            }
+        }
+        if window[0] == b'<'
+            && window[1] == b'!'
+            && window[2].eq_ignore_ascii_case(&b'e')
+            && window[3].eq_ignore_ascii_case(&b'n')
+            && window[4].eq_ignore_ascii_case(&b't')
+            && window[5].eq_ignore_ascii_case(&b'i')
+            && window[6].eq_ignore_ascii_case(&b't')
+            && window[7].eq_ignore_ascii_case(&b'y')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

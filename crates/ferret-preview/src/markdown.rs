@@ -84,10 +84,13 @@ pub struct LoadedDocImage {
 /// the document.
 ///
 /// Each file is read under [`MARKDOWN_IMAGE_INPUT`](super::config::MARKDOWN_IMAGE_INPUT),
-/// decoded through the same capped pipeline as F-33, and kept while the
-/// aggregate decoded bytes stay within
-/// [`MARKDOWN_IMAGE_DECODED`](super::config::MARKDOWN_IMAGE_DECODED). Runs on
-/// the caller's background task; nothing here touches a window.
+/// decoded through the same capped pipeline as F-33 (raster via `image`,
+/// `.svg` via the bounded rasteriser), and kept while the aggregate decoded
+/// bytes stay within
+/// [`MARKDOWN_IMAGE_DECODED`](super::config::MARKDOWN_IMAGE_DECODED). The
+/// first image may exceed the aggregate alone — it is the document's hero
+/// image, not an attacker, and the per-image pipeline cap still bounds it.
+/// Runs on the caller's background task; nothing here touches a window.
 ///
 /// The paths are the canonical absolute paths `decide` verified at sanitize
 /// time — no traversal is possible at load, only a file that changed since.
@@ -106,8 +109,21 @@ pub async fn load_doc_images(
         let Ok(bytes) = fs.read(&path, MARKDOWN_IMAGE_INPUT).await else {
             continue;
         };
-        let Ok(mut decoded) = super::image::decode(&bytes) else {
-            continue;
+        let mut decoded = if image
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+        {
+            match super::svg::render(&bytes) {
+                Ok(decoded) => decoded,
+                Err(_) => continue,
+            }
+        } else {
+            match super::image::decode(&bytes) {
+                Ok(decoded) => decoded,
+                Err(_) => continue,
+            }
         };
         decoded.frames.truncate(1);
         decoded.frames_capped = false;
@@ -424,12 +440,15 @@ fn decide(url: &str, canonical_base: Option<&Path>) -> Verdict {
         return Verdict::Unsafe(UnsafeReason::Scheme);
     }
     if url.starts_with("//") {
+        // Forward-slash UNC (`//host/share`) on Windows: bucketed Remote
+        // rather than Absolute, but blocked either way — the taxonomy differs,
+        // the footer wording follows the bucket, and neither reaches the disk.
         return Verdict::Remote;
     }
     // Strip query and fragment for path analysis.
     let path_text = url.split(['?', '#']).next().unwrap_or_default();
     if path_text.is_empty() {
-        return Verdict::Unsafe(UnsafeReason::Scheme);
+        return Verdict::Unsafe(UnsafeReason::Unresolvable);
     }
     if is_absolute_path(path_text) {
         return Verdict::Unsafe(UnsafeReason::Absolute);
@@ -490,7 +509,12 @@ pub fn url_scheme(url: &str) -> Option<String> {
 }
 
 /// Absolute on either platform: `/x`, `C:\x`, `C:/x`, `\\host\x`.
-/// Checked unconditionally — a UNC path is rejected on macOS too.
+///
+/// Checked unconditionally — a UNC path is rejected on macOS too. A bare
+/// `C:foo` (drive-relative, no slash) is also absolute: on Windows it
+/// resolves against the per-drive CWD and can escape the document directory,
+/// on macOS it is a literal filename but refusing everywhere keeps the policy
+/// platform-independent.
 ///
 /// Shared with link-click handling.
 pub fn is_absolute_path(path: &str) -> bool {
@@ -498,11 +522,7 @@ pub fn is_absolute_path(path: &str) -> bool {
         return true;
     }
     let bytes = path.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
-    {
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return true;
     }
     false
@@ -705,11 +725,23 @@ mod tests {
     fn windows_paths_are_blocked_on_every_platform() {
         let fixture = Fixture::new();
         let out = sanitize(
-            "![a](C:\\Windows\\x.png)\n\n![b](\\\\\\\\host\\\\share\\\\x.png)\n",
+            "![a](C:\\Windows\\x.png)\n\n![b](\\\\\\\\host\\\\share\\\\x.png)\n\n![c](C:foo.png)\n",
             Some(fixture.doc()),
         )
         .unwrap();
-        assert_eq!(out.blocked_unsafe, 2);
+        // `C:foo` is drive-relative: on Windows it resolves against the
+        // per-drive CWD and can escape, so it is Absolute everywhere.
+        assert_eq!(out.blocked_unsafe, 3);
+    }
+
+    #[test]
+    fn empty_targets_are_unresolvable_not_scheme() {
+        assert!(is_absolute_path("C:foo"));
+        assert!(is_absolute_path("C:"));
+        assert!(!is_absolute_path("img/a.png"));
+        let fixture = Fixture::new();
+        let out = sanitize("![]()\n", Some(fixture.doc())).unwrap();
+        assert_eq!(out.blocked_unsafe, 1);
     }
 
     #[test]
