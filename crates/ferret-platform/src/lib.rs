@@ -14,6 +14,7 @@
 pub mod config;
 mod errors;
 mod icon;
+mod thumbnail;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -22,6 +23,7 @@ mod windows;
 
 pub use errors::{PlatformError, Result};
 pub use icon::{IconBitmap, IconKey, IconProvider, icon_provider};
+pub use thumbnail::{ThumbnailProvider, thumbnail_available, thumbnail_provider};
 
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};

@@ -25,6 +25,25 @@ fn main() {
             // Global app state before any view reads it.
             cx.set_global(ferret_ui_state());
 
+            // The thumbnail cache is bounded off the render path: a sweep on
+            // startup, then daily. Eviction failures stay silent — a cache
+            // that cannot be read stays big, which is not an error the user
+            // can act on.
+            {
+                use ferret_ui::THUMB_EVICT_INTERVAL;
+                let thumbs = cx.global::<FerretState>().thumb_cache.clone();
+                let exec = cx.background_executor().clone();
+                exec.clone()
+                    .spawn(async move {
+                        thumbs.evict();
+                        loop {
+                            exec.timer(THUMB_EVICT_INTERVAL).await;
+                            thumbs.evict();
+                        }
+                    })
+                    .detach();
+            }
+
             register_actions(cx);
             bind_keys(cx);
             apply_startup_theme(cx);
@@ -47,6 +66,14 @@ fn register_actions(cx: &mut App) {
     // place a config write is allowed to block.
     cx.on_app_quit(|cx: &mut App| {
         ferret_ui::flush_pending_saves(cx);
+        // Quitting cannot ask about unsaved preview edits — the application
+        // is already going away — so dirty buffers are preserved as recovery
+        // copies instead of being discarded silently (PV-Q02). No autosave,
+        // no surprise writes to the user's files: copies live in the cache
+        // directory, and their paths go to stderr where scripts can see them.
+        for copy in ferret_ui::preserve_edit_recovery_copies(cx) {
+            eprintln!("ferret: unsaved edits preserved in {}", copy.display());
+        }
         // Mounts first, then the runtime: closing a session politely needs the
         // runtime that owns its actor to still be there.
         ferret_ui::disconnect_mounts(cx);
@@ -148,6 +175,178 @@ fn bind_keys(cx: &mut App) {
             "ctrl-shift-v",
             browser_actions::TerminalPaste,
             Some(context::TERMINAL),
+        ),
+        // Preview pane (F-30). The toggle stays global like the terminal's:
+        // it is how you get the pane back when it has focus nowhere else.
+        KeyBinding::new("cmd-alt-p", browser_actions::TogglePreview, None),
+        KeyBinding::new(
+            "ctrl-alt-p",
+            browser_actions::TogglePreview,
+            OUTSIDE_TERMINAL,
+        ),
+        KeyBinding::new("cmd-alt-right", browser_actions::FocusPreview, None),
+        KeyBinding::new(
+            "ctrl-alt-right",
+            browser_actions::FocusPreview,
+            OUTSIDE_TERMINAL,
+        ),
+        // `Esc` returns focus to the list, but only from inside the preview —
+        // elsewhere it keeps whatever meaning it already had.
+        KeyBinding::new(
+            "escape",
+            browser_actions::FocusFilePane,
+            Some(context::PREVIEW),
+        ),
+        // Image/PDF zoom. Cmd pairs stay global like the terminal toggle;
+        // Ctrl pairs stay out of the terminal, where they belong to the shell.
+        KeyBinding::new("cmd-=", browser_actions::PreviewZoomIn, None),
+        KeyBinding::new("ctrl-=", browser_actions::PreviewZoomIn, OUTSIDE_TERMINAL),
+        KeyBinding::new("cmd--", browser_actions::PreviewZoomOut, None),
+        KeyBinding::new("ctrl--", browser_actions::PreviewZoomOut, OUTSIDE_TERMINAL),
+        KeyBinding::new("cmd-0", browser_actions::PreviewZoomReset, None),
+        KeyBinding::new(
+            "ctrl-0",
+            browser_actions::PreviewZoomReset,
+            OUTSIDE_TERMINAL,
+        ),
+        // In-place save (F-36). Scoped to the preview: everywhere else
+        // Cmd/Ctrl-S keeps whatever meaning it already had, and inside the
+        // file pane it must not shadow anything.
+        KeyBinding::new(
+            "cmd-s",
+            browser_actions::PreviewEditSave,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-s",
+            browser_actions::PreviewEditSave,
+            Some(context::PREVIEW),
+        ),
+        // Preview-local actions (F-30–F-36, F-75). Every binding needs a
+        // Windows equivalent: `cmd`/`ctrl` pairs stay out of the terminal
+        // where the shell owns the key, and `pageup`/`pagedown`/`alt-z` are
+        // the same physical keys on both platforms so one binding covers
+        // both. All scoped to PREVIEW (or OVERLAY for the overlay's own
+        // page turns) so they never shadow typing in a text field — except
+        // `alt-z`, which the editor does not bind.
+        //
+        // PDF pages: `pageup`/`pagedown`, the keys a paged document earns.
+        KeyBinding::new(
+            "pagedown",
+            browser_actions::PreviewPdfNext,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "pageup",
+            browser_actions::PreviewPdfPrev,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "pagedown",
+            browser_actions::PreviewPdfNext,
+            Some(context::OVERLAY),
+        ),
+        KeyBinding::new(
+            "pageup",
+            browser_actions::PreviewPdfPrev,
+            Some(context::OVERLAY),
+        ),
+        // Markdown rendered/source.
+        KeyBinding::new(
+            "cmd-shift-m",
+            browser_actions::PreviewToggleSource,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-m",
+            browser_actions::PreviewToggleSource,
+            Some(context::PREVIEW),
+        ),
+        // Soft wrap, after the editor convention (`alt-z`).
+        KeyBinding::new(
+            "alt-z",
+            browser_actions::PreviewToggleWrap,
+            Some(context::PREVIEW),
+        ),
+        // CSV header inference.
+        KeyBinding::new(
+            "cmd-shift-h",
+            browser_actions::PreviewToggleCsvHeader,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-h",
+            browser_actions::PreviewToggleCsvHeader,
+            Some(context::PREVIEW),
+        ),
+        // Line numbers (persisted).
+        KeyBinding::new(
+            "cmd-shift-l",
+            browser_actions::PreviewToggleLineNumbers,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-l",
+            browser_actions::PreviewToggleLineNumbers,
+            Some(context::PREVIEW),
+        ),
+        // Enter and leave edit mode. Save keeps `cmd-s` above; Revert stays
+        // menu-only (with Cancel on the guard dialog) rather than taking a
+        // key a shell or the editor already owns.
+        KeyBinding::new(
+            "cmd-e",
+            browser_actions::PreviewEditBegin,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-e",
+            browser_actions::PreviewEditBegin,
+            Some(context::PREVIEW),
+        ),
+        // The previewed file: open, reveal, copy path.
+        KeyBinding::new(
+            "cmd-o",
+            browser_actions::PreviewOpen,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-o",
+            browser_actions::PreviewOpen,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "cmd-shift-o",
+            browser_actions::PreviewReveal,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-o",
+            browser_actions::PreviewReveal,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "cmd-alt-c",
+            browser_actions::PreviewCopyPath,
+            Some(context::PREVIEW),
+        ),
+        KeyBinding::new(
+            "ctrl-alt-c",
+            browser_actions::PreviewCopyPath,
+            Some(context::PREVIEW),
+        ),
+        // Full-window preview (F-75). `space` is the same key on both
+        // platforms, so one binding covers macOS and Windows. Scoped to the
+        // file list on open — never a text field — and to the overlay
+        // itself on close, where no text field exists to steal from.
+        KeyBinding::new(
+            "space",
+            browser_actions::PreviewOverlayToggle,
+            Some(context::FILE_PANE),
+        ),
+        KeyBinding::new(
+            "space",
+            browser_actions::PreviewOverlayToggle,
+            Some(context::OVERLAY),
         ),
         // View modes.
         KeyBinding::new("cmd-1", browser_actions::ViewAsList, None),
@@ -442,7 +641,7 @@ fn open_main_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{KeyBindingContextPredicate, KeyContext};
+    use gpui::{KeyBinding, KeyBindingContextPredicate, KeyContext};
 
     /// `KeyBinding::new` panics on a predicate it cannot parse, and every one
     /// here runs at startup — a typo in `!Terminal` would be a launch crash
@@ -462,5 +661,47 @@ mod tests {
             predicate.depth_of(&context("FilePane")).is_some(),
             "and must still work everywhere else"
         );
+    }
+
+    /// `KeyBinding::new` panics on a keystroke string it cannot parse, and
+    /// every binding here runs at startup — a typo would be a launch crash
+    /// rather than a wrong keystroke. The preview bindings use modifier
+    /// combinations (`cmd-alt-p`) no other binding exercises, so they get
+    /// their own construction test.
+    #[test]
+    fn the_preview_bindings_parse() {
+        use ferret_ui::actions as browser_actions;
+
+        // Construction is the assertion: an unparseable keystroke panics.
+        let _ = KeyBinding::new("cmd-alt-p", browser_actions::TogglePreview, None);
+        let _ = KeyBinding::new(
+            "ctrl-alt-p",
+            browser_actions::TogglePreview,
+            Some("!Terminal"),
+        );
+        let _ = KeyBinding::new("cmd-alt-right", browser_actions::FocusPreview, None);
+        let _ = KeyBinding::new(
+            "ctrl-alt-right",
+            browser_actions::FocusPreview,
+            Some("!Terminal"),
+        );
+        let _ = KeyBinding::new(
+            "escape",
+            browser_actions::FocusFilePane,
+            Some(browser_actions::context::PREVIEW),
+        );
+        let _ = KeyBinding::new("cmd-=", browser_actions::PreviewZoomIn, None);
+        let _ = KeyBinding::new("cmd--", browser_actions::PreviewZoomOut, None);
+        let _ = KeyBinding::new("cmd-0", browser_actions::PreviewZoomReset, None);
+
+        // And the Preview context itself parses, or the `Esc` binding above
+        // is scoped to a context that never matches.
+        let preview = vec![
+            KeyContext::try_from(browser_actions::context::PREVIEW)
+                .expect("the Preview context must parse"),
+        ];
+        let predicate = KeyBindingContextPredicate::parse(browser_actions::context::PREVIEW)
+            .expect("the Preview predicate must parse");
+        assert!(predicate.depth_of(&preview).is_some());
     }
 }

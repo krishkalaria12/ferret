@@ -1005,8 +1005,8 @@ footer {
       <p>A resizable pane on the right that renders the selected file. It stays open while
       you navigate, swapping content as the selection changes. A registry maps file type to
       a provider; unknown types fall back to a plain-text or hex view with a size cap.</p>
-      <p><em>Behaviour:</em> never read a whole file to preview it. Providers get a streaming
-      handle and a byte budget. Selection changes are debounced so arrow-keying down a list
+      <p><em>Behaviour:</em> never read without a size cap to preview a file. The current VFS returns a bounded
+      buffer; large text/table files show a labelled sample, while PDF and images may require complete input within their cap. Selection changes are debounced so arrow-keying down a list
       does not spawn a hundred reads.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-preview</code></dd>
@@ -1020,7 +1020,7 @@ footer {
     <summary><span class="fid">F-31</span><span class="fname">Markdown rendering <span class="pill p-core">core</span></span></summary>
     <div class="fbody">
       <p>Rendered Markdown with headings, lists, tables, code blocks, links and inline code —
-      not a source dump. Tables render as real tables.</p>
+      not a source dump. Tables render as real tables. Reuse the Rust <code>markdown-rs</code> parser already behind <code>gpui-component::TextView</code>, with bounded layout and a controlled local-image resolver; see <a href="preview-plan.html#providers">the preview plan</a>.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-preview</code></dd>
         <dt>Components</dt><dd><code>text</code> (built-in Markdown renderer)</dd>
@@ -1034,8 +1034,9 @@ footer {
     <div class="fbody">
       <p>Source files render with syntax highlighting across the common languages.
       <code>gpui-component</code> ships tree-sitter grammars for 35 languages behind the
-      <code>tree-sitter-languages</code> feature; enable the set we want rather than all of
-      them, since each grammar costs compile time and binary size.</p>
+      <code>tree-sitter-languages</code> feature; enable the built-in set and add verified grammars through the public registry.
+      Official builds must highlight at least 60 distinct languages; aliases and identification-only
+      entries do not count. See <a href="preview-plan.html#languages">Q-02 and the coverage gate</a>.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-preview</code></dd>
         <dt>Components</dt><dd><code>highlighter</code></dd>
@@ -1059,16 +1060,18 @@ footer {
   </details>
 
   <details class="feat">
-    <summary><span class="fid">F-34</span><span class="fname">PDF preview <span class="pill p-warn">unresolved</span></span></summary>
+    <summary><span class="fid">F-34</span><span class="fname">PDF preview <span class="pill p-core">planned</span></span></summary>
     <div class="fbody">
-      <p>First page, or a scrollable page view, in the preview pane.</p>
-      <p><em>Behaviour:</em> there is no clean cross-platform pure-Rust PDF renderer. macOS
-      has PDFKit; Windows needs <code>pdfium</code> (a large C++ blob). See §10 — this is a
-      genuine open question and may ship as macOS-only in v1.0 with an "open
-      externally" fallback on Windows.</p>
+      <p>Page one, page navigation, fit and zoom in the persistent preview pane on macOS and Windows.</p>
+      <p><em>Decision (Q-01):</em> official builds bundle a pinned Pdfium binary through
+      <code>pdfium-render</code>, rendering bounded bitmaps in a supervised helper. OS thumbnails
+      extend coverage but do not determine PDF availability. Complete input is capped; protected,
+      damaged and oversized files have explicit fallback states. Continuous scrolling is a follow-up.
+      Packaging, ABI, notices and clean-install checks are release gates; see
+      <a href="preview-plan.html#pdf">the detailed preview plan</a>.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-preview</code></dd>
-        <dt>Phase</dt><dd>3 (macOS) · 9 (Windows)</dd>
+        <dt>Phase</dt><dd>3 (both platforms)</dd>
       </dl>
     </div>
   </details>
@@ -1077,8 +1080,8 @@ footer {
     <summary><span class="fid">F-35</span><span class="fname">CSV rendered as a grid</span></summary>
     <div class="fbody">
       <p>CSV and TSV files render as a sortable, scrollable table instead of raw text.
-      Header row detection, delimiter sniffing, and virtualised rows so a 500&nbsp;MB export
-      still opens.</p>
+      Quote-aware delimiter sniffing, reversible header detection and virtualised rows over a
+      bounded sample let a 500&nbsp;MB export open without reading it all. Sorting is explicitly sample-only.</p>
       <dl class="meta">
         <dt>Crate</dt><dd><code>ferret-preview</code></dd>
         <dt>Components</dt><dd><code>table</code></dd>
@@ -1521,7 +1524,7 @@ footer {
         <tr><td class="crate">ferret-terminal</td><td>service</td><td>PTY spawn, VT parsing, grid model, scrollback, cwd sync, SSH-backed sessions.</td><td><code>alacritty_terminal</code></td></tr>
         <tr><td class="crate">ferret-git</td><td>service</td><td>Repository discovery, status cache, branch and ahead/behind, stage, commit, pull, push.</td><td>the <code>git</code> binary (see D-04)</td></tr>
         <tr><td class="crate">ferret-search</td><td>service</td><td>Filename and content search, filters, streaming results, cancellation.</td><td><code>ignore</code>, <code>grep-searcher</code>, <code>grep-regex</code></td></tr>
-        <tr><td class="crate">ferret-preview</td><td>service</td><td>Provider registry and the providers: markdown, code, image, PDF, CSV, plain, binary.</td><td>image decoders; PDF backend TBD</td></tr>
+        <tr><td class="crate">ferret-preview</td><td>service</td><td>Provider registry and the providers: markdown, code, image, PDF, CSV, plain, binary.</td><td>image decoders; pdfium-render + bundled Pdfium (official builds)</td></tr>
         <tr><td class="crate">ferret-settings</td><td>service</td><td><span class="pill p-done">exists</span> The settings schema (D-21), per-folder view preferences (D-16) and the keymap. Still to come: live reload, session state, theme loading.</td><td><code>serde_json</code>, <code>dirs</code></td></tr>
         <tr><td class="crate">ferret-platform</td><td>service</td><td>Per-OS shims: trash, reveal, open-with, volume enumeration, standard directories, shell integration, keychain.</td><td><code>trash</code>, <code>opener</code>, <code>dirs</code>, <code>windows</code></td></tr>
       </tbody>
@@ -1615,8 +1618,8 @@ footer {
         </tr>
         <tr>
           <td>PDF rendering (F-34)</td>
-          <td class="yes">PDFKit</td><td class="no">no clean option</td>
-          <td>Unresolved — see Q-01.</td>
+          <td class="yes">Bundled Pdfium</td><td class="yes">Bundled Pdfium</td>
+          <td>Planned: isolated page rendering and package validation on both platforms — see Q-01 and preview-plan.html.</td>
         </tr>
         <tr>
           <td>Menus &amp; shortcuts (F-81)</td>
@@ -2007,8 +2010,8 @@ footer {
       <caption>To decide</caption>
       <thead><tr><th class="id">ID</th><th>Question</th><th>Needed by</th></tr></thead>
       <tbody>
-        <tr><td class="id">Q-01</td><td>How does PDF preview (F-34) work on Windows? Bundle <code>pdfium</code> and accept the binary size and build complexity, or ship macOS-only in v1.0 with an "open externally" fallback?</td><td>Phase 3</td></tr>
-        <tr><td class="id">Q-02</td><td>Which tree-sitter grammars ship by default (F-32)? All 35 costs build time and binary size; too few looks broken. Is a runtime-loadable grammar path worth the complexity?</td><td>Phase 3</td></tr>
+        <tr><td class="id">Q-01</td><td><strong>Decided, not implemented:</strong> official builds bundle Pdfium on macOS and Windows for page rendering and navigation. Native thumbnails are additional coverage, not the PDF guarantee. See <a href="preview-plan.html#pdf">PV-D08 and release gates</a>.</td><td>Phase 3 · decided</td></tr>
+        <tr><td class="id">Q-02</td><td><strong>Decided, not implemented:</strong> built-in tree-sitter set plus compiled extended grammars, at least 60 distinct verified languages in official builds. No runtime grammar loading. See <a href="preview-plan.html#languages">coverage manifest and build-cost gates</a>.</td><td>Phase 3 · decided</td></tr>
         <tr><td class="id">Q-03</td><td><s>What is the per-folder preferences store (F-06)?</s> <strong>Answered:</strong> a bounded LRU capped at 4,000 folders — see D-16. Implemented in <code>ferret-vfs</code>.</td><td><span class="pill p-done">closed</span></td></tr>
         <tr><td class="id">Q-04</td><td>Is undo (F-60) full or partial? Undoing a move is easy; undoing a delete-to-trash is possible; undoing an overwrite is not without a staging copy. Where is the line, and how is it communicated?</td><td>Phase 6</td></tr>
         <tr><td class="id">Q-05</td><td>Does the terminal support multiple sessions per tab, or exactly one? Multiple means tabs-within-tabs and a more complex sync model (F-11).</td><td>Phase 2</td></tr>

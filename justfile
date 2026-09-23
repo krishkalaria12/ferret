@@ -40,5 +40,5 @@ test:
 # run alone.
 budget:
     cargo test -p ferret-ui --features dhat-heap \
-        folder::alloc_budget::frame_allocation_budget -- \
-        --exact --nocapture --test-threads=1
+        allocation_budget -- \
+        --nocapture --test-threads=1

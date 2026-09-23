@@ -19,6 +19,11 @@ trash.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
+block2.workspace = true
+objc2-06.workspace = true
+objc2-foundation-06.workspace = true
+objc2-app-kit-06.workspace = true
+objc2-quick-look-thumbnailing.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true

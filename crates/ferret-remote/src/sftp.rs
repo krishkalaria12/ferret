@@ -142,6 +142,10 @@ impl Vfs for SftpVfs {
             symlinks: true,
             permissions: true,
             atomic_rename: self.atomic_rename,
+            // No identity-checked atomic replacement over SFTP: a remote
+            // write cannot offer the conflict refusal `write_atomic`
+            // requires, so in-place preview editing stays unavailable there.
+            atomic_write: false,
             watch: false,
             metadata_in_listing: true,
             hidden_in_listing: true,

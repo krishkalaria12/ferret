@@ -26,3 +26,6 @@ smol.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
 trash.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

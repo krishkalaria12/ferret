@@ -91,6 +91,7 @@ impl Render for Browser {
         let folder_gone = self.active_folder_is_gone(cx);
         let dragging = self.sidebar_drag.is_some()
             || self.terminal_drag.is_some()
+            || self.preview_drag.is_some()
             || self.tab_drag.is_some()
             || self.favorite_drag.is_some();
 
@@ -105,6 +106,7 @@ impl Render for Browser {
                 el.on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                     this.update_sidebar_drag(event.position.x, cx);
                     this.update_terminal_drag(event.position.y, cx);
+                    this.update_preview_drag(event.position.x, cx);
                 }))
                 .on_mouse_up(
                     gpui::MouseButton::Left,
@@ -158,9 +160,9 @@ impl Render for Browser {
                 let dir = this.active().folder.read(cx).dir.clone();
                 this.push_tab(dir, window, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &actions::CloseTab, _, cx| this.close_tab(this.active, cx)),
-            )
+            .on_action(cx.listener(|this, _: &actions::CloseTab, window, cx| {
+                this.close_tab(this.active, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &actions::FocusPathBar, window, cx| {
                 this.begin_path_edit(window, cx)
             }))
@@ -249,6 +251,85 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::CommitChanges, window, cx| {
                 this.open_commit_dialog(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::TogglePreview, window, cx| {
+                this.toggle_preview(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::FocusPreview, window, cx| {
+                this.focus_preview(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::FocusFilePane, window, cx| {
+                this.focus_file_pane(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::PreviewOpen, window, cx| {
+                this.preview_open(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::PreviewReveal, window, cx| {
+                this.preview_reveal(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewCopyPath, _, cx| this.preview_copy_path(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewToggleWrap, window, cx| {
+                    this.preview_toggle_wrap(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewToggleSource, _, cx| {
+                    this.preview_toggle_source(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewZoomIn, _, cx| this.preview_zoom(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewZoomOut, _, cx| this.preview_zoom(-1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewZoomReset, _, cx| {
+                    this.preview_zoom_reset(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewToggleLineNumbers, window, cx| {
+                    this.preview_toggle_line_numbers(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewToggleCsvHeader, _, cx| {
+                    this.preview_toggle_csv_header(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewOverlayToggle, window, cx| {
+                    this.toggle_preview_overlay(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewPdfPrev, window, cx| {
+                    this.preview_pdf_step(-1, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewPdfNext, window, cx| {
+                    this.preview_pdf_step(1, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewEditBegin, window, cx| {
+                    this.preview_begin_edit(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewEditSave, window, cx| {
+                    this.preview_save_edit(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::PreviewEditRevert, window, cx| {
+                    this.preview_revert_edit(window, cx)
+                }),
+            )
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
@@ -311,7 +392,21 @@ impl Render for Browser {
                             .when(self.terminal_visible, |el| {
                                 el.child(self.render_terminal_panel(window, cx))
                             }),
-                    ),
+                    )
+                    // The preview spans the content height beside the file
+                    // pane and the terminal: a right sibling of the whole
+                    // centre column, with independent visibility and an
+                    // independent persisted size.
+                    .when(self.preview_showing(window), |el| {
+                        el.child(self.render_preview_divider(cx)).child(
+                            div()
+                                .w(px(self.preview_width))
+                                .h_full()
+                                .flex_shrink_0()
+                                .overflow_hidden()
+                                .child(self.preview.clone()),
+                        )
+                    }),
             )
     }
 }

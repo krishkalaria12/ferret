@@ -197,6 +197,14 @@ impl Browser {
         }
 
         let platform = cx.global::<FerretState>().platform.clone();
+        let thumbs = cx.global::<FerretState>().rendered_thumbs.clone();
+        // Privacy, synchronously: a trashed photo's tile must not survive in
+        // memory. The disk entry expires by age/cap (its key needs the stat
+        // of a file that is about to vanish, so it cannot be derived here) —
+        // memory is what the next frame could paint.
+        for path in &local {
+            thumbs.remove(path);
+        }
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let mut failures = Vec::new();
@@ -299,6 +307,11 @@ impl Browser {
         // A mount has no watcher, so nothing else will notice the rows are
         // gone. The reload is scheduled here rather than left to the user.
         let needs_reload = paths.iter().any(|path| !path.is_local());
+        // Same privacy drop as trashing: memory tiles go synchronously.
+        let thumbs = cx.global::<FerretState>().rendered_thumbs.clone();
+        for path in &paths {
+            thumbs.remove(path);
+        }
         // Through the Vfs, not the platform: deleting irreversibly is
         // filesystem mechanics with nothing OS-specific in it, and
         // `RemoveMode::Permanent` is where the parallel tree delete lives

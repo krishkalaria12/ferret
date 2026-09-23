@@ -22,6 +22,15 @@ impl FilePane {
     /// model. Watcher delivery is asynchronous, so the first render may still
     /// have no row; `render` retains this request until a `RowsChanged` event
     /// makes the path available.
+    /// Whether the inline rename editor is open.
+    ///
+    /// The editor lives inside the file pane's own key context, so a bare
+    /// `space` binding would fire while typing a name. The F-75 toggle
+    /// checks this first and stays shut.
+    pub(crate) fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
     pub fn request_rename_when_visible(&mut self, path: VfsPath, cx: &mut Context<Self>) {
         self.pending_rename = Some(path);
         cx.notify();

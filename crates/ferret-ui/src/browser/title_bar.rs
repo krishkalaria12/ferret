@@ -153,6 +153,17 @@ impl Browser {
                     .when(!self.terminal_visible, |button| button.ghost())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))),
             )
+            // The phase-3 slot in the title bar's right cluster
+            // (`docs/ui-base.html` §5): the preview toggle.
+            .child(
+                Button::new("preview-toggle")
+                    .with_size(px(TOOLBAR_BUTTON_SIZE))
+                    .icon(Icon::new(gpui_component::IconName::PanelRight))
+                    .tooltip("Toggle Preview")
+                    .when(self.preview_visible, |button| button.primary())
+                    .when(!self.preview_visible, |button| button.ghost())
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))),
+            )
             .child(
                 tool_button(
                     "theme",

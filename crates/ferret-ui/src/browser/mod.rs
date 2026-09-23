@@ -43,6 +43,7 @@ use crate::actions;
 use crate::folder::{Folder, FolderEvent, ListingProfile, SortRules};
 use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
+use crate::preview::{PreviewOverlay, PreviewPanel};
 use crate::state::FerretState;
 
 use commit_dialog::CommitDialog;
@@ -61,6 +62,7 @@ mod git_bar;
 mod mutations;
 mod path_bar;
 mod power_search;
+mod preview_panel;
 mod render;
 mod send_to;
 mod sidebar;
@@ -183,6 +185,14 @@ pub struct Browser {
     /// Logical pixels, clamped to `settings::MIN/MAX_TERMINAL_HEIGHT`.
     terminal_height: f32,
     terminal_drag: Option<TerminalDrag>,
+    /// The preview pane (F-30): one entity per window, fed by the active
+    /// tab's selection. Mounted once; it swaps its `Preview`, never itself.
+    preview: Entity<PreviewPanel>,
+    preview_visible: bool,
+    /// Logical pixels, clamped to `settings::MIN/MAX_PREVIEW_WIDTH`.
+    preview_width: f32,
+    /// Live drag state for the preview divider.
+    preview_drag: Option<preview_panel::PreviewDrag>,
     terminal_sync: TerminalSyncState,
     terminal_focus: gpui::FocusHandle,
     terminal_session: Option<TerminalSession>,
@@ -259,6 +269,22 @@ pub struct Browser {
     /// The commit dialog's state, kept across opens so a message survives an
     /// accidental Escape. `None` until the dialog is opened for the first time.
     commit_dialog: Option<Entity<CommitDialog>>,
+    /// An edit-guard answer held while the Save it depends on is in flight.
+    ///
+    /// Save is async: the dialog closes at once, and this remembers where to
+    /// go when the backend answers. `None` while no guarded save is pending.
+    /// See `preview_panel.rs` (PV-Q02).
+    guard_after_save: Option<preview_panel::GuardPending>,
+    /// Whether the unsaved-changes dialog is currently open. A second
+    /// selection change while it stands replaces the pending action rather
+    /// than stacking a second copy of the same dialog.
+    guard_open: bool,
+    /// The full-window preview overlay (F-75), while open. The dialog layer
+    /// owns the presentation; this remembers the entity for focus and the
+    /// flag for toggle semantics, so a second `space` closes rather than
+    /// stacking a second copy.
+    preview_overlay: Option<Entity<PreviewOverlay>>,
+    overlay_open: bool,
     /// Reused while opening and editing saved SSH endpoints. Input state must
     /// live in an entity because a dialog builder runs again every frame.
     connection_dialog: Option<Entity<ConnectionDialog>>,
@@ -359,7 +385,16 @@ impl Browser {
         );
 
         let sidebar_visible = cx.global::<FerretState>().settings.sidebar.visible;
-        let terminal_settings = &cx.global::<FerretState>().settings.terminal;
+        let (terminal_visible, terminal_height, terminal_sync) = {
+            let terminal = &cx.global::<FerretState>().settings.terminal;
+            (terminal.visible, terminal.height, terminal.sync_default)
+        };
+        let (preview_visible, preview_width) = {
+            let preview = &cx.global::<FerretState>().settings.preview;
+            (preview.visible, preview.width)
+        };
+        let browser_handle = cx.weak_entity();
+        let preview = cx.new(|cx| PreviewPanel::new(window, cx, browser_handle.clone()));
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -371,10 +406,14 @@ impl Browser {
             sidebar_reveal: if sidebar_visible { 1. } else { 0. },
             sidebar_animation: None,
             sidebar_drag: None,
-            terminal_visible: terminal_settings.visible,
-            terminal_height: terminal_settings.height,
+            terminal_visible,
+            terminal_height,
             terminal_drag: None,
-            terminal_sync: TerminalSyncState::from_default(terminal_settings.sync_default),
+            preview,
+            preview_visible,
+            preview_width,
+            preview_drag: None,
+            terminal_sync: TerminalSyncState::from_default(terminal_sync),
             terminal_focus: cx.focus_handle(),
             terminal_session: None,
             terminal_error: None,
@@ -401,6 +440,10 @@ impl Browser {
             sidebar_focus: cx.focus_handle(),
             git: GitPanel::new(),
             commit_dialog: None,
+            guard_after_save: None,
+            guard_open: false,
+            preview_overlay: None,
+            overlay_open: false,
             connection_dialog: None,
             transfer: None,
             transfer_task: None,
@@ -420,10 +463,11 @@ impl Browser {
     // Cross-region plumbing
 
     /// Release ends whichever drag is in flight; a pointer-up carries no clue
-    /// as to which one it was, so all three are settled together.
+    /// as to which one it was, so all four are settled together.
     fn end_drags(&mut self, cx: &mut Context<Self>) {
         self.end_sidebar_drag(cx);
         self.end_terminal_drag(cx);
+        self.end_preview_drag(cx);
         self.end_tab_drag(cx);
         self.end_favorite_drag(cx);
     }

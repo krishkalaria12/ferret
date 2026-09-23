@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ferret-git.workspace = true
 ferret-platform.workspace = true
+ferret-preview.workspace = true
 ferret-remote.workspace = true
 ferret-search.workspace = true
 ferret-settings.workspace = true
@@ -20,24 +21,136 @@ arc-swap.workspace = true
 foldhash.workspace = true
 futures.workspace = true
 gpui.workspace = true
-image.workspace = true
 jiff.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
 smallvec.workspace = true
 smol_str.workspace = true
 
-gpui-component.workspace = true
+# The built-in grammars behind F-32, one feature per grammar. Never
+# optional as a set: a code preview with no colour is a broken feature, not
+# a fast build. The extended set (phase 05) lives behind `languages-extended`
+# instead, so iterating on anything else can skip those 30 generated-C
+# crates without losing the core set.
+#
+# Deliberately the per-grammar features rather than the `tree-sitter-languages`
+# umbrella: the umbrella pulls `tree-sitter-sql`, whose `tree-sitter-sequel`
+# pins `cc ~1.2.1` on every 0.3.x — unresolvable against the workspace's
+# `cc 1.4.4`, which `ring`, `libsqlite3-sys` and the rest all need. Downgrading
+# `cc` for one SQL grammar would risk every native build in the tree, so `.sql`
+# previews as labelled plain text until upstream relaxes the pin. 34 of 35.
+gpui-component = { workspace = true, features = [
+    "tree-sitter-astro",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cmake",
+    "tree-sitter-cpp",
+    "tree-sitter-csharp",
+    "tree-sitter-css",
+    "tree-sitter-diff",
+    "tree-sitter-ejs",
+    "tree-sitter-elixir",
+    "tree-sitter-erb",
+    "tree-sitter-go",
+    "tree-sitter-graphql",
+    "tree-sitter-html",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-jsdoc",
+    "tree-sitter-kotlin",
+    "tree-sitter-lua",
+    "tree-sitter-make",
+    "tree-sitter-markdown",
+    "tree-sitter-php",
+    "tree-sitter-proto",
+    "tree-sitter-python",
+    "tree-sitter-ruby",
+    "tree-sitter-rust",
+    "tree-sitter-scala",
+    "tree-sitter-svelte",
+    "tree-sitter-swift",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+    "tree-sitter-zig",
+] }
 gpui-component-assets.workspace = true
 rust-embed.workspace = true
 smol.workspace = true
 dirs.workspace = true
 serde_json.workspace = true
 serde = { workspace = true }
+tree-sitter.workspace = true
+tree-sitter-language.workspace = true
 
 dhat = { workspace = true, optional = true }
 
+# Q-02. One optional dependency per extended grammar; versions live in the
+# workspace table. The queries are NOT trusted from these packages — they are
+# vendored into `assets/queries/` with provenance and 41-slot adaptations.
+tree-sitter-containerfile = { workspace = true, optional = true }
+tree-sitter-dart = { workspace = true, optional = true }
+tree-sitter-erlang = { workspace = true, optional = true }
+tree-sitter-groovy = { workspace = true, optional = true }
+tree-sitter-haskell = { workspace = true, optional = true }
+tree-sitter-hcl = { workspace = true, optional = true }
+tree-sitter-ini = { workspace = true, optional = true }
+tree-sitter-julia = { workspace = true, optional = true }
+tree-sitter-nix = { workspace = true, optional = true }
+tree-sitter-ocaml = { workspace = true, optional = true }
+tree-sitter-perl = { workspace = true, optional = true }
+tree-sitter-powershell = { workspace = true, optional = true }
+tree-sitter-r = { workspace = true, optional = true }
+tree-sitter-vue-next = { workspace = true, optional = true }
+tree-sitter-xml = { workspace = true, optional = true }
+tree-sitter-solidity = { workspace = true, optional = true }
+tree-sitter-prisma-io = { workspace = true, optional = true }
+tree-sitter-jsonnet = { workspace = true, optional = true }
+tree-sitter-vim = { workspace = true, optional = true }
+tree-sitter-nginx = { workspace = true, optional = true }
+tree-sitter-fortran = { workspace = true, optional = true }
+tree-sitter-ada = { workspace = true, optional = true }
+tree-sitter-elm = { workspace = true, optional = true }
+tree-sitter-gleam = { workspace = true, optional = true }
+tree-sitter-wgsl-bevy = { workspace = true, optional = true }
+tree-sitter-glsl = { workspace = true, optional = true }
+tree-sitter-asm = { workspace = true, optional = true }
+
 [features]
+# Full highlighting: the 34 built-ins plus the extended registrations in
+# `preview/grammars.rs`. On for normal builds; `--no-default-features` drops
+# it for iterating on anything else, and the built-ins keep working.
+default = ["languages-extended"]
+languages-extended = [
+    "dep:tree-sitter-containerfile",
+    "dep:tree-sitter-dart",
+    "dep:tree-sitter-erlang",
+    "dep:tree-sitter-groovy",
+    "dep:tree-sitter-haskell",
+    "dep:tree-sitter-hcl",
+    "dep:tree-sitter-ini",
+    "dep:tree-sitter-julia",
+    "dep:tree-sitter-nix",
+    "dep:tree-sitter-ocaml",
+    "dep:tree-sitter-perl",
+    "dep:tree-sitter-powershell",
+    "dep:tree-sitter-r",
+    "dep:tree-sitter-vue-next",
+    "dep:tree-sitter-xml",
+    "dep:tree-sitter-solidity",
+    "dep:tree-sitter-prisma-io",
+    "dep:tree-sitter-jsonnet",
+    "dep:tree-sitter-vim",
+    "dep:tree-sitter-nginx",
+    "dep:tree-sitter-fortran",
+    "dep:tree-sitter-ada",
+    "dep:tree-sitter-elm",
+    "dep:tree-sitter-gleam",
+    "dep:tree-sitter-wgsl-bevy",
+    "dep:tree-sitter-glsl",
+    "dep:tree-sitter-asm",
+]
 # The allocations-per-frame budget (`docs/audit.html` §11).
 #
 # Installs dhat as the global allocator for the test binary, so it must be run

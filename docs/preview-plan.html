@@ -1,0 +1,927 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Ferret Preview Pane — implementation plan</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --paper: #ffffff;
+      --paper-2: #edf3fa;
+      --ink: #182331;
+      --muted: #607084;
+      --faint: #8794a5;
+      --line: #d6e0eb;
+      --accent: #0878e8;
+      --accent-soft: #dceeff;
+      --good: #13795b;
+      --warn: #9a5b00;
+      --risk: #b93845;
+      --code: #e7eef7;
+      --shadow: 0 18px 55px rgba(34, 57, 84, .10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10161f;
+        --paper: #161f2a;
+        --paper-2: #1c2835;
+        --ink: #e8eef5;
+        --muted: #a6b4c4;
+        --faint: #7e8b9a;
+        --line: #2b3a49;
+        --accent: #4da3ff;
+        --accent-soft: #173b60;
+        --good: #55c69a;
+        --warn: #f0b35b;
+        --risk: #ff7d89;
+        --code: #213040;
+        --shadow: 0 20px 65px rgba(0, 0, 0, .32);
+      }
+    }
+    :root[data-theme="light"] {
+      --bg: #f4f7fb; --paper: #ffffff; --paper-2: #edf3fa; --ink: #182331;
+      --muted: #607084; --faint: #8794a5; --line: #d6e0eb; --accent: #0878e8;
+      --accent-soft: #dceeff; --good: #13795b; --warn: #9a5b00; --risk: #b93845;
+      --code: #e7eef7; --shadow: 0 18px 55px rgba(34, 57, 84, .10);
+    }
+    :root[data-theme="dark"] {
+      --bg: #10161f; --paper: #161f2a; --paper-2: #1c2835; --ink: #e8eef5;
+      --muted: #a6b4c4; --faint: #7e8b9a; --line: #2b3a49; --accent: #4da3ff;
+      --accent-soft: #173b60; --good: #55c69a; --warn: #f0b35b; --risk: #ff7d89;
+      --code: #213040; --shadow: 0 20px 65px rgba(0, 0, 0, .32);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6; text-rendering: optimizeLegibility;
+    }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    code, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+    code { background: var(--code); border-radius: 4px; padding: .08rem .3rem; font-size: .9em; }
+    button { font: inherit; }
+    .shell { display: grid; grid-template-columns: 17rem minmax(0, 1fr); max-width: 96rem; margin: 0 auto; }
+    .rail {
+      position: sticky; top: 0; height: 100vh; padding: 2rem 1.5rem;
+      border-right: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 92%, transparent);
+      overflow-y: auto;
+    }
+    .brand { display: flex; align-items: center; gap: .7rem; margin-bottom: 1.8rem; }
+    .brand-mark { width: 1.7rem; height: 1.7rem; border: 2px solid var(--accent); border-radius: 50%; position: relative; }
+    .brand-mark::after { content: ""; position: absolute; width: .7rem; height: 2px; right: -.5rem; bottom: .1rem; background: var(--accent); transform: rotate(45deg); }
+    .brand b { letter-spacing: -.02em; }
+    .rail-label { color: var(--faint); font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; }
+    nav ol { list-style: none; margin: .55rem 0 1.5rem; padding: 0; }
+    nav a { display: block; padding: .31rem .4rem; color: var(--muted); text-decoration: none; border-left: 2px solid transparent; }
+    nav a:hover, nav a:focus-visible { color: var(--ink); border-left-color: var(--accent); background: var(--accent-soft); outline: none; }
+    .theme { border: 1px solid var(--line); border-radius: 5px; background: var(--paper); color: var(--ink); padding: .35rem .6rem; cursor: pointer; }
+    .doc { min-width: 0; padding: 4.5rem clamp(1.5rem, 5vw, 5.5rem) 8rem; }
+    .masthead { max-width: 68rem; padding-bottom: 3.2rem; border-bottom: 1px solid var(--line); }
+    .eyebrow, .section-tag { color: var(--accent); font-size: .72rem; font-weight: 760; text-transform: uppercase; letter-spacing: .13em; }
+    h1, h2, h3 { line-height: 1.18; text-wrap: balance; }
+    h1 { max-width: 16ch; margin: .75rem 0 1.2rem; font-size: clamp(2.8rem, 7vw, 6.4rem); letter-spacing: -.065em; font-weight: 780; }
+    h2 { margin: .4rem 0 .9rem; font-size: clamp(1.8rem, 3.3vw, 3rem); letter-spacing: -.04em; }
+    h3 { margin: 2.1rem 0 .65rem; font-size: 1.12rem; letter-spacing: -.018em; }
+    h4 { margin: 1.25rem 0 .35rem; }
+    .lede { max-width: 62ch; color: var(--muted); font-size: 1.18rem; }
+    .facts { display: grid; grid-template-columns: repeat(4, minmax(8rem, 1fr)); gap: 1px; margin-top: 2.3rem; background: var(--line); border: 1px solid var(--line); }
+    .facts div { background: var(--paper); padding: .85rem 1rem; }
+    dt { color: var(--faint); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+    dd { margin: .15rem 0 0; font-weight: 650; }
+    section { max-width: 68rem; padding: 4rem 0 1rem; }
+    .intro { max-width: 65ch; color: var(--muted); font-size: 1.05rem; }
+    .callout { margin: 1.4rem 0; padding: 1rem 1.15rem; border-left: 3px solid var(--accent); background: var(--paper-2); }
+    .callout strong { display: block; margin-bottom: .25rem; }
+    .callout.warn { border-left-color: var(--warn); }
+    .callout.risk { border-left-color: var(--risk); }
+    .callout.good { border-left-color: var(--good); }
+    pre.callout { max-width: 100%; overflow-x: auto; }
+    pre.callout code { display: block; width: max-content; min-width: 100%; background: transparent; padding: 0; }
+    .decision { display: grid; grid-template-columns: 7rem 1fr; border-top: 1px solid var(--line); padding: .9rem 0; gap: 1rem; }
+    .decision b { color: var(--accent); }
+    .decision p { margin: 0; }
+    .scroller { overflow-x: auto; border: 1px solid var(--line); background: var(--paper); margin: 1.2rem 0; }
+    table { width: 100%; min-width: 46rem; border-collapse: collapse; font-size: .9rem; }
+    caption { text-align: left; padding: .75rem 1rem; color: var(--muted); font-weight: 700; }
+    th { background: var(--paper-2); color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; text-align: left; }
+    th, td { padding: .72rem .85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .yes { color: var(--good); font-weight: 720; }
+    .no { color: var(--risk); font-weight: 720; }
+    .hold { color: var(--warn); font-weight: 720; }
+    .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; margin: 1.4rem 0; }
+    .flow div { min-height: 8rem; padding: 1rem; background: var(--paper); border: 1px solid var(--line); box-shadow: var(--shadow); }
+    .flow small { display: block; color: var(--accent); font-weight: 750; margin-bottom: .45rem; }
+    .flow b { display: block; margin-bottom: .35rem; }
+    .flow p { margin: 0; color: var(--muted); font-size: .88rem; }
+    .ui-map { padding: 1rem; border: 1px solid var(--line); background: var(--paper); }
+    .anatomy { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 1px; margin: 1.4rem 0; background: var(--line); border: 1px solid var(--line); font-size: .86rem; }
+    .anatomy .cell { background: var(--paper); padding: .8rem .9rem; }
+    .anatomy .cell b { display: block; }
+    .anatomy .cell span { color: var(--muted); }
+    .anatomy .full { grid-column: 1 / -1; }
+    .chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0 0; }
+    .chip { padding: .24rem .52rem; background: var(--paper-2); border: 1px solid var(--line); border-radius: 5px; font-size: .82rem; }
+    .chip.active { color: white; background: var(--accent); border-color: var(--accent); }
+    .chip.ghost { color: var(--faint); }
+    ul, ol { padding-left: 1.3rem; }
+    li + li { margin-top: .4rem; }
+    .phase { display: grid; grid-template-columns: 4.7rem minmax(0, 1fr); gap: 1.2rem; padding: 1.25rem 0; border-top: 1px solid var(--line); }
+    .phase-id { color: var(--accent); font: 740 .78rem ui-monospace, monospace; }
+    .phase h3 { margin: 0 0 .35rem; }
+    .phase p { margin: 0; }
+    .phase p + p { margin-top: .45rem; }
+    .accept { color: var(--good); font-size: .9rem; }
+    details { border-top: 1px solid var(--line); padding: .75rem 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    .fid { display: inline-block; min-width: 3.6rem; color: var(--accent); font: 740 .78rem ui-monospace, monospace; }
+    .sources li { margin-bottom: .55rem; }
+    .foot { max-width: 68rem; margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--faint); font-size: .82rem; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 900px) {
+      .shell { display: block; }
+      .rail { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav ol { columns: 2; }
+      .doc { padding-top: 2.5rem; }
+      .facts { grid-template-columns: repeat(2, 1fr); }
+      .flow { grid-template-columns: repeat(2, 1fr); }
+      .anatomy { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      nav ol { columns: 1; }
+      .facts, .flow { grid-template-columns: 1fr; }
+      .decision, .phase { grid-template-columns: 1fr; gap: .25rem; }
+    }
+    @media print {
+      .rail { display: none; }
+      .shell { display: block; max-width: none; }
+      .doc { padding: 0; }
+      section { break-inside: auto; }
+      a { color: inherit; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><b>ferret/preview</b></div>
+    <span class="rail-label">Plan index</span>
+    <nav aria-label="Plan sections">
+      <ol>
+        <li><a href="#verdict">Executive verdict</a></li>
+        <li><a href="#scope">Source &amp; scope</a></li>
+        <li><a href="#anatomy">Pane anatomy</a></li>
+        <li><a href="#states">Every state</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#classification">Classification</a></li>
+        <li><a href="#providers">The providers</a></li>
+        <li><a href="#languages">60+ languages</a></li>
+        <li><a href="#pdf">PDF and the rest</a></li>
+        <li><a href="#libraries">Library decisions</a></li>
+        <li><a href="#performance">Performance contract</a></li>
+        <li><a href="#security">Safety &amp; privacy</a></li>
+        <li><a href="#remote">Remote mounts</a></li>
+        <li><a href="#editing">Edit mode</a></li>
+        <li><a href="#config">Tunables</a></li>
+        <li><a href="#delivery">Build sequence</a></li>
+        <li><a href="#verification">Verification</a></li>
+        <li><a href="#risks">Risks &amp; questions</a></li>
+        <li><a href="#sources">Research sources</a></li>
+      </ol>
+    </nav>
+    <button class="theme" id="theme" type="button" aria-label="Toggle light and dark theme">Toggle theme</button>
+  </aside>
+
+  <main class="doc">
+    <header class="masthead">
+      <p class="eyebrow">Detailed implementation plan · F-30–F-36 · F-75 · 6 Sep 2026</p>
+      <h1>Beautiful previews for every file type.</h1>
+      <p class="lede">A resizable pane on the right that renders whatever is selected — Markdown as a document, source as highlighted code across sixty-plus languages, images, PDFs, CSV as a grid — and keeps rendering it as you arrow down a directory, with bounded reads, bounded memory, and responsive navigation.</p>
+      <div class="callout"><strong>The product requirement</strong><span>Select a file and see its content in a persistent right-hand pane: beautifully rendered Markdown, syntax-highlighted code in at least 60 distinct languages, PDF pages and images. The supplied reference establishes the side-by-side layout, a quiet header and an uninterrupted reading surface beside the browser and terminal. Ordinary supported files must render; metadata fallback is for unsupported, damaged, protected or over-budget inputs, not a substitute for promised PDF support. This document is a plan only.</span></div>
+      <dl class="facts">
+        <div><dt>Owner</dt><dd><code>ferret-preview</code> + <code>ferret-ui</code></dd></div>
+        <div><dt>Phase</dt><dd>3 — depends on 1</dd></div>
+        <div><dt>Targets</dt><dd>macOS · Windows</dd></div>
+        <div><dt>Primary gate</dt><dd>Zero dropped frames arrow-keying</dd></div>
+      </dl>
+    </header>
+
+    <section id="verdict">
+      <span class="section-tag">Decision summary</span>
+      <h2>Executive verdict</h2>
+      <p class="intro">Almost every renderer this feature needs is already compiled into the tree and switched off. <code>gpui-component</code> ships a Markdown document view, a Rope-backed virtualised code editor, a tree-sitter highlighter with a <em>publicly extensible</em> language registry, and a table; <code>gpui</code> decodes fifteen image formats and SVG; <code>ferret-vfs</code>’s <code>read</code> already takes a byte budget. The work is not writing renderers. The work is a classifier, a byte budget, one background pipeline, and the two or three places where the stock behaviour is actively wrong for a file manager.</p>
+
+      <div class="callout good"><strong>Recommended baseline</strong><span>Turn on <code>gpui-component</code>’s <code>tree-sitter-languages</code> feature for 35 grammars; register roughly 30 more through the public <code>LanguageRegistry</code> for 65+; render Markdown with <code>TextView</code>, code with a read-only <code>Editor</code>, images with our own capped decode into a <code>RenderImage</code>, tabular data with <code>table</code>, PDF through a bundled, isolated Pdfium backend, and additional document/media formats through the operating system’s thumbnail service behind one <code>ferret-platform</code> trait.</span></div>
+
+      <div class="decision"><b>PV-D01</b><p><strong>One registry, one <code>Preview</code> value.</strong> Classification and reading happen once, on a background thread, and produce a plain data value. The <code>Render</code> impl only reads it. This is gate 7 (“no per-frame work may be O(the directory)”) applied to a pane whose input is O(the file).</p></div>
+      <div class="decision"><b>PV-D02</b><p><strong><code>ferret-preview</code> is GPUI-free; the pane lives in <code>ferret-ui</code>.</strong> Only <code>ferret-ui</code> may depend on <code>gpui-component</code>, and every renderer worth reusing is inside it. So the crate seam falls between <em>what to show</em> — sniffing, budgets, decoding, parsing, caching, all testable without opening a window — and <em>how to draw it</em>.</p></div>
+      <div class="decision"><b>PV-D03</b><p><strong>No unbounded file reads.</strong> Rust providers use <code>Vfs::read(path, budget)</code>. Small files may be read completely; native path-based thumbnail APIs are a separate, explicitly gated exception (see PDF). Budgets are per kind and live in <code>ferret-preview/src/config.rs</code>. A file past its budget previews its head with an explicit “first 2 MB of 4.1 GB” banner — never a spinner that never ends, never a blank pane.</p></div>
+      <div class="decision"><b>PV-D04</b><p><strong>Code preview and edit mode are the same component.</strong> <code>gpui-component</code>’s <code>Editor</code> with <code>readonly(true)</code> gives virtualised line layout, selection, in-pane find, line numbers, folding and tree-sitter highlighting. F-36 reuses that renderer, adding a complete lossless buffer, save capability and navigation guards. Upstream states the editor is built for “large text up to about 50K lines”, so the line cap in PV-D03 is not a preference — it is that ceiling, enforced before we hand text over.</p></div>
+      <div class="decision"><b>PV-D05</b><p><strong>Extend the highlighter; do not replace it.</strong> <code>LanguageRegistry::register(name, &amp;LanguageConfig)</code> is public and takes a <code>tree_sitter::Language</code> plus query strings, so additional grammar crates drop straight in and are picked up by the editor <em>and</em> by Markdown’s fenced code blocks with no second theme mapping. This answers <strong>Q-02</strong>.</p></div>
+      <div class="decision"><b>PV-D06</b><p><strong>Identifying a language and highlighting it are different jobs.</strong> A table of ~240 extensions resolves a language <em>name</em>; 65+ of those names have a grammar behind them. An <code>.applescript</code> file previews as monospaced text labelled AppleScript, not as “unsupported binary”. Coverage of the header is total; coverage of colour is finite and honest.</p></div>
+      <div class="decision"><b>PV-D07</b><p><strong>The OS extends format coverage.</strong> Quick Look on macOS and <code>IShellItemImageFactory</code> on Windows provide best-effort thumbnails for installed document and media handlers. HEIC, RAW, Office and video support is capability-dependent, not universal. One <code>ThumbnailProvider</code> trait in <code>ferret-platform</code>, shaped exactly like the existing <code>IconProvider</code> and bound by the same rule: never called on the render path.</p></div>
+      <div class="decision"><b>PV-D08</b><p><strong>Reliable PDF rendering is part of the release.</strong> Ship a pinned Pdfium binary with official macOS and Windows builds, behind the Rust <code>pdfium-render</code> wrapper in a supervised helper. A native thumbnail may give an early cached image, but installed shell handlers never decide whether ordinary PDFs work. Page one and page navigation ship in Phase 3; continuous multi-page scrolling is later. Developer builds may disable <code>pdf</code>, but that reduced build does not satisfy F-34.</p></div>
+
+      <div class="decision"><b>PV-D09</b><p><strong>Decode images ourselves; never hand <code>img()</code> a user’s path.</strong> GPUI’s asset loader does a blocking whole-file <code>fs::read</code> and a full-resolution decode. That is correct for the app’s own bundled assets and wrong for a 200-megapixel TIFF someone arrow-keyed past. Probe the header for dimensions, refuse past a pixel cap, decode with limits off-thread, downscale to the pane, and hand GPUI a finished <code>RenderImage</code>.</p></div>
+      <div class="decision"><b>PV-D10</b><p><strong>The preview never touches the network.</strong> GPUI resolves a non-<code>file</code> image URI by fetching it over HTTP. A README in a downloaded folder must not be able to make this machine call out — that is a tracking pixel with a file manager attached. Markdown resources pass through a bounded, document-scoped resolver and arrive as decoded bitmaps; raw URI and path image loading is forbidden. Remote selected files may use their explicit VFS connection; document resources never initiate additional network access.</p></div>
+      <div class="decision"><b>PV-D11</b><p><strong>One generation, debounced, cancel-by-drop.</strong> The same contract the listing and Power Search already use. An uninterrupted key-repeat sweep settles on one request; every result carries its generation and a stale one is discarded defensively.</p></div>
+      <div class="decision"><b>PV-D12</b><p><strong>A remote preview is the same code with a smaller budget.</strong> <code>Vfs::read</code> already spans backends, so SFTP needs no provider of its own — it needs quarter budgets, an explicit “loading over the network” state, and <code>capabilities_for(path)</code> deciding whether the Edit button exists at all.</p></div>
+      <div class="decision"><b>PV-D13</b><p><strong>Edit saves atomically or refuses.</strong> Temp file in the same directory, flush, rename; line endings, final newline and permissions preserved; an identity/content change since load blocks the save, subject to the filesystem race limitations detailed in Edit mode. This needs a genuinely new <code>Vfs</code> method — the trait has no write today — and it is the one place in this plan where R-06 (data loss) is in play.</p></div>
+    </section>
+
+    <section id="scope">
+      <span class="section-tag">Traceability</span>
+      <h2>Source, scope, and non-goals</h2>
+      <p class="intro">The reference screenshot is a product reference, not an instruction. <code>docs/plan.html</code> stays authoritative: F-30 the pane, F-31 Markdown, F-32 highlighted code, F-33 images and thumbnails, F-34 PDF, F-35 CSV grid, F-36 in-place editing, plus F-75 space-to-preview. The base shell’s gates — virtualisation, focus, both themes, both platforms, run it, no O(n) per frame — apply unchanged.</p>
+
+      <div class="scroller">
+        <table>
+          <caption>Reference-to-plan mapping</caption>
+          <thead><tr><th>Reference element</th><th>Commitment</th><th>Plan treatment</th></tr></thead>
+          <tbody>
+            <tr><td>Right-hand pane, full height beside the list and terminal</td><td>F-30</td><td>Right sibling of the browser’s main column, drag-resizable divider reusing the sidebar’s pattern, width persisted in <code>settings.preview.width</code>.</td></tr>
+            <tr><td>Pane stays open while navigating</td><td>F-30</td><td>The pane is mounted once and swaps its <code>Preview</code>; entities for the editor and document view are reused across selections rather than rebuilt.</td></tr>
+            <tr><td>Syntax-highlighted Python, no chrome</td><td>F-32</td><td>Read-only <code>Editor</code>, theme-driven syntax colours, line numbers off by default and toggleable.</td></tr>
+            <tr><td><em>Edit</em> button, pane header, right-aligned</td><td>F-36</td><td>Present only for complete, lossless text on a backend with the atomic-save capability. General write permission is insufficient.</td></tr>
+            <tr><td>Toolbar preview toggle</td><td>F-30</td><td>Already reserved in <code>docs/ui-base.html</code> §5 as a phase-3 slot in the title bar’s right cluster.</td></tr>
+            <tr><td>Preview survives the terminal being open</td><td>F-30</td><td>Terminal is a horizontal split under the file pane; preview is a vertical split to the right of that whole column. Independent visibility and independent persisted size.</td></tr>
+            <tr><td>Selection shows without opening anything</td><td>F-30 / F-75</td><td>Same providers, two surfaces: the docked pane, and <kbd>Space</kbd>’s full-window overlay.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Explicit non-goals</h3>
+      <ul>
+        <li><strong>Not an editor.</strong> No LSP, no multi-file, no project, no diagnostics, no format-on-save. F-36 is “fix a typo in a config file without leaving the file manager”, and the moment it grows a second file it has become the wrong product.</li>
+        <li><strong>Not a viewer for everything.</strong> Where neither Rust nor the OS can render a type, the pane shows metadata and an <em>Open with…</em> affordance. That is a finished state, not a failure state.</li>
+        <li><strong>No transcoding.</strong> Video and audio get a poster frame and metadata; playback is out of scope for phase 3 and probably forever.</li>
+        <li><strong>No archive browsing.</strong> A <code>.zip</code> previews as its manifest at most. Mounting archives as folders is a different feature and belongs with the VFS backends.</li>
+        <li><strong>No thumbnails in list view.</strong> F-33’s thumbnails are for icon view. A 200,000-row list must not sprout 200,000 decode jobs.</li>
+      </ul>
+    </section>
+
+    <section id="anatomy">
+      <span class="section-tag">Product experience</span>
+      <h2>Pane anatomy</h2>
+      <p class="intro">Two rows: a header that is identical for every file type, and a body that is entirely the provider’s. Keeping the header type-independent is what makes arrow-keying feel like one surface rather than seven.</p>
+
+      <div class="anatomy" role="img" aria-label="Diagram of the preview pane: a header row with the file name, kind and size on the left and Edit and overflow buttons on the right, above a body region that fills the rest of the pane.">
+        <div class="cell full"><b>Divider · 1 px + 6 px grab slop</b><span>Drag-resizable, <code>ResizeLeftRight</code> cursor, hover tint at <code>primary/35%</code>. Double-click restores the default width. Same code shape as <code>render_sidebar_divider</code>.</span></div>
+        <div class="cell"><b>Header · left</b><span>File name (truncated middle, never wrapped), then a muted second line: kind · size · modified. The kind is the resolved language or format name — “Python”, “PNG image”, “PDF document” — not the extension.</span></div>
+        <div class="cell"><b>Header · right</b><span><em>Edit</em> (F-36, conditional) · overflow menu: Open with…, Reveal, Copy path, Word wrap, Line numbers, Show hidden characters.</span></div>
+        <div class="cell full"><b>Body</b><span>One provider, filling the remaining height, scrolling in its own container. Nothing here is shared between providers except the scroll position reset on selection change.</span></div>
+        <div class="cell full"><b>Footer · only when it has something to say</b><span>A single muted line for truncation, capping, decode fallback or staleness: “Showing the first 2 MB of 4.1 GB.” · “Scaled from 9504 × 6336.” · “Page 1 of 812.” Absent otherwise — an always-present status strip becomes furniture nobody reads.</span></div>
+      </div>
+
+      <h3>Visual quality is part of acceptance</h3>
+      <p>Use a quiet shared surface and thin divider, with content given most of the pane. Default width is 42% of the available browser workspace, clamped to 320–720 logical px and persisted after resize. Preserve the terminal beneath the file list, with the preview spanning the remaining content height as in the reference. At small window sizes collapse the preview before the sidebar; never squeeze the file pane below its base minimum.</p>
+      <p>Markdown uses 16 px body text, 1.6 line height, a maximum 72-character reading measure and 24 px padding (16 px in narrow panes). Give headings a clear hierarchy, code fences a subtle themed background and horizontal scrolling, tables aligned cells, and images preserved aspect ratio. Code uses the configured monospace font at a 14 px baseline with 1.5 line height and line numbers off by default. Images use fit-to-pane with an alpha checkerboard where needed; PDF pages keep their document-white background against the themed surround. All values are initial design defaults to validate at 1180 × 760, 760 × 480 and 1×/2× scaling, in both themes.</p>
+      <p>Test the actual reading experience: selecting README → Python → PDF → image retains the pane width, never moves list focus, resets body scroll and never pairs a new filename with old content. Copy/select must work in text; icons and controls have accessible names, keyboard focus rings and disabled states. Opening the larger overlay reuses the current bitmap immediately, then requests a bounded higher-resolution replacement if needed.</p>
+      <h3>Pointer and keyboard contract</h3>
+      <div class="scroller">
+        <table>
+          <caption>Preview pane input</caption>
+          <thead><tr><th>Input</th><th>macOS</th><th>Windows</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>Toggle the pane</td><td><kbd>⌘⌥P</kbd></td><td><kbd>Ctrl+Alt+P</kbd></td><td>Also the title-bar toggle. Collapses to zero, remembers the last width.</td></tr>
+            <tr><td>Full-size preview (F-75)</td><td><kbd>Space</kbd></td><td><kbd>Space</kbd></td><td>Overlay over the window using the same providers at pane-independent size. <kbd>Esc</kbd> or <kbd>Space</kbd> closes. Never steals <kbd>Space</kbd> while a text field has focus.</td></tr>
+            <tr><td>Focus the preview</td><td><kbd>⌘⌥→</kbd></td><td><kbd>Ctrl+Alt+→</kbd></td><td>Moves keyboard focus into the body so the code view scrolls and selects. Arrow keys then belong to the preview, not the list — gate 2 applies to this pane too.</td></tr>
+            <tr><td>Return focus to the list</td><td><kbd>Esc</kbd></td><td><kbd>Esc</kbd></td><td>Only when the preview is not in edit mode with unsaved changes.</td></tr>
+            <tr><td>Find in preview</td><td><kbd>⌘F</kbd></td><td><kbd>Ctrl+F</kbd></td><td>The editor’s own search, available in read-only mode. Only while the preview has focus; otherwise <kbd>⌘F</kbd> is Power Search.</td></tr>
+            <tr><td>Zoom an image / PDF</td><td><kbd>⌘=</kbd> / <kbd>⌘-</kbd> / <kbd>⌘0</kbd>, pinch, scroll</td><td><kbd>Ctrl+=</kbd> / <kbd>Ctrl+-</kbd> / <kbd>Ctrl+0</kbd>, <kbd>Ctrl</kbd>+scroll</td><td>Fit-to-pane is the default; zoom is per-preview and resets on selection change.</td></tr>
+            <tr><td>Drag the divider</td><td colspan="2">Pointer</td><td>Clamped to <code>MIN/MAX_PREVIEW_WIDTH</code>; below the minimum window width the pane collapses before the sidebar does (<code>docs/plan.html</code> §3).</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="states">
+      <span class="section-tag">Completeness</span>
+      <h2>Every state the pane can be in</h2>
+      <p class="intro">Enumerated the way <code>docs/ui-base.html</code> enumerates the file pane’s states, because the ones that get skipped are exactly the ones users hit: the empty directory, the 4 GB log, the permission-denied file, the network that went away mid-read.</p>
+
+      <div class="scroller">
+        <table>
+          <caption>Preview states</caption>
+          <thead><tr><th>State</th><th>Trigger</th><th>What the pane shows</th></tr></thead>
+          <tbody>
+            <tr><td><code>Empty</code></td><td>Nothing selected</td><td>Muted centred line: the folder’s name, item count and total size. Not a blank rectangle.</td></tr>
+            <tr><td><code>Multiple</code></td><td>2+ rows selected</td><td>Count, combined size, and a kind breakdown (“12 items · 4 folders, 8 images · 240 MB”). No file is read.</td></tr>
+            <tr><td><code>Directory</code></td><td>A folder is selected</td><td>Name, item count, modified, and — on demand, never automatically — a Calculate size action. Folder sizes are a walk and must be asked for.</td></tr>
+            <tr><td><code>Loading</code></td><td>Read in flight past 120 ms</td><td>Skeleton in the body only; the header is already populated from the <code>Entry</code> we have. Under 120 ms nothing appears, so the common case never flashes.</td></tr>
+            <tr><td><code>Ready</code></td><td>Provider produced a value</td><td>The provider’s body.</td></tr>
+            <tr><td><code>Truncated</code></td><td>File exceeds its kind’s budget</td><td>The head of the file, plus the footer line naming both numbers. Fully interactive.</td></tr>
+            <tr><td><code>TooLarge</code></td><td>Beyond even the head budget for a kind that cannot be partially rendered (image, PDF)</td><td>Metadata and <em>Open with…</em>. Never an attempted decode.</td></tr>
+            <tr><td><code>Unsupported</code></td><td>No provider, and the OS thumbnail service declined</td><td>Type icon at large size, kind, size, and <em>Open with…</em>.</td></tr>
+            <tr><td><code>Denied</code></td><td><code>VfsError::PermissionDenied</code></td><td>The error’s own <code>Display</code> text — which the repo’s error convention already requires to be showable to a person unedited.</td></tr>
+            <tr><td><code>Gone</code></td><td>File deleted or renamed under us</td><td>Same treatment as the browser’s existing “folder gone” banner: say so, keep the header, offer nothing that would fail.</td></tr>
+            <tr><td><code>Failed</code></td><td>Decode or parse error</td><td>The reason, one line, plus the binary fallback if bytes were read. A corrupt PNG must still show its size.</td></tr>
+            <tr><td><code>Protected</code></td><td>Encrypted PDF</td><td>Explain that a password is required; Open externally. No repeated background retries.</td></tr>
+            <tr><td><code>Saving / Conflict</code></td><td>Save in flight or external file change</td><td>Keep the pinned buffer; disable duplicate saves. Conflict offers reload after discard confirmation or cancel to retain edits.</td></tr>
+            <tr><td><code>Editing</code></td><td>F-36 engaged</td><td>Writable editor, dirty indicator in the header, Save / Revert. Selection changes are blocked while dirty until the user answers.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn"><strong>Both themes, at every state</strong><span>Gate 3 is easy to satisfy for the ready state and easy to miss for the other eleven. The skeleton, the truncation footer, the denied text and the syntax palette each need a light and a dark value. Syntax colours come from the theme’s <code>SyntaxColors</code> block in <code>crates/ferret-ui/themes/ferret.json</code> — 41 named slots, and a slot defined only for dark is a bug by the repo’s own rule.</span></div>
+    </section>
+
+    <section id="architecture">
+      <span class="section-tag">Architecture</span>
+      <h2>Four crates, one seam</h2>
+      <p class="intro">The layering rule decides this before taste does: no service crate may depend on <code>ferret-ui</code>, and only <code>ferret-ui</code> may depend on <code>gpui-component</code>. Every renderer worth having is inside <code>gpui-component</code>. So the seam is data in, elements out.</p>
+
+      <div class="flow">
+        <div><small>1 · ferret-vfs</small><b>Bytes, budgeted</b><p><code>read(path, budget)</code> exists and is already capped. F-36 adds a capability-gated atomic save contract; the existing read returns a bounded buffer, not a streaming or range handle.</p></div>
+        <div><small>2 · ferret-preview</small><b>What to show</b><p>GPUI-free. Sniffing, classification, decoding, CSV parsing, thumbnail cache. Returns a <code>Preview</code>.</p></div>
+        <div><small>3 · ferret-platform</small><b>What the OS can show</b><p><code>ThumbnailProvider</code>: Quick Look and the shell thumbnail service, returning the existing <code>IconBitmap</code>.</p></div>
+        <div><small>4 · ferret-ui</small><b>How to draw it</b><p><code>preview/</code>: the pane, the divider, the header, and one render arm per <code>Preview</code> variant. Owns the language registry wiring.</p></div>
+      </div>
+
+      <h3>The value the pipeline produces</h3>
+      <pre class="callout"><code>// crates/ferret-preview/src/preview.rs
+pub enum Preview {
+    /// F-31. Source plus the directory it lives in, which is what makes
+    /// relative image links resolvable — and, per PV-D10, resolvable only
+    /// downward from there.
+    Markdown { source: String, base: VfsPath, truncated: Truncation },
+
+    /// F-32. `language` is a registry name ("rust", "nix"), never an
+    /// extension. `Plain` is a language, not an absence of one.
+    Code { text: String, language: SmolStr, truncated: Truncation },
+
+    /// F-33. Already decoded, already downscaled, in the BGRA layout
+    /// `RenderImage` wants (validate stride and alpha convention). `natural` is the size before scaling, so the
+    /// footer can be honest about it.
+    Image { bitmap: Bitmap, natural: (u32, u32), frames: BoundedFrames },
+
+    /// F-34 and everything the OS knows how to draw. `by` records which
+    /// path produced it, because "Quick Look" and "pdfium" fail differently.
+    Rendered { bitmap: Bitmap, pages: Option&lt;Pages&gt;, by: RenderedBy },
+
+    /// F-35. Header row detected, delimiter sniffed, rows virtualised.
+    Table { header: Option&lt;Row&gt;, rows: Vec&lt;Row&gt;, delimiter: u8, truncated: Truncation },
+
+    /// The floor. Hex plus printable ASCII for the head of the file.
+    Binary { head: Vec&lt;u8&gt;, size: u64 },
+
+    Directory { entries: Option&lt;u64&gt; },
+    Multiple { count: usize, bytes: u64, kinds: SmallVec&lt;[(Kind, usize); 4]&gt; },
+    Unsupported { kind: Kind, reason: Unsupported },
+}</code></pre>
+
+      <p>Two properties of this enum are load-bearing. It is <code>Send</code> and owns everything it points at, so it crosses from a background task to the view without borrowing anything that might have been dropped. And it carries no GPUI type — <code>Bitmap</code> is width, height and a BGRA <code>Vec&lt;u8&gt;</code>, the same shape <code>ferret_platform::IconBitmap</code> already validates at the <code>unsafe</code> boundary — which is what keeps the crate’s tests running without a window. This is a shape sketch, not a complete API: carry source identity and generation in a result envelope, distinguish unknown sizes from zero, and use shared immutable buffers so pane and overlay do not clone payloads. PDF values hold a helper-session token and current page metadata; page requests remain outside Render. Encodings and losslessness are preserved alongside text.</p>
+
+      <p>Host supervised native work in a helper mode of the existing executable initially: <code>ferret</code> owns process launch/lifecycle, <code>ferret-preview</code> owns bounded requests and Pdfium work, and <code>ferret-platform</code> owns OS thumbnail calls. Use a versioned private IPC protocol with checked lengths, dimensions, request IDs and no arbitrary commands. A process boundary contains crashes but is not a security sandbox; constrain capabilities and resource use explicitly. Add another crate only if helper code gains an independent responsibility.</p>
+      <h3>Where the pieces live</h3>
+      <pre class="callout"><code>crates/ferret-preview/          # GPUI-free
+├── src/lib.rs                  # `Preview`, `Kind`, `preview_for(...)`
+├── src/classify.rs             # extension table → sniff → UTF-8 → Kind
+├── src/languages.rs            # extension → language *name* (~240 entries)
+├── src/text.rs                 # budgeted read, BOM, line endings, line cap
+├── src/image.rs                # header probe, capped decode, downscale
+├── src/table.rs                # delimiter sniff, header detection, rows
+├── src/thumbs.rs               # the on-disk thumbnail cache
+├── src/errors.rs               # PreviewError + Result alias
+└── src/config.rs               # every budget in one file
+
+crates/ferret-platform/
+└── src/thumbnail.rs            # ThumbnailProvider; macos.rs + windows.rs impls
+
+crates/ferret-ui/src/preview/
+├── mod.rs                      # the Preview pane entity and its public surface
+├── render.rs                   # one arm per variant
+├── header.rs                   # name, kind, size, Edit, overflow
+├── grammars.rs                 # the extra tree-sitter registrations (PV-D05)
+├── edit.rs                     # F-36
+└── overlay.rs                  # F-75</code></pre>
+
+      <div class="callout"><strong>Why the grammars live in <code>ferret-ui</code> and the names live in <code>ferret-preview</code></strong><span><code>LanguageRegistry</code> is a <code>gpui-component</code> type, so the <code>tree-sitter-*</code> crates have to be <code>ferret-ui</code> dependencies. The extension-to-name table has no such constraint and belongs with classification. The two halves are kept honest by one test in <code>ferret-ui</code>: every name <code>ferret_preview::languages</code> can emit must either resolve in the registry or appear in an explicit <code>IDENTIFIED_BUT_UNHIGHLIGHTED</code> list. A grammar added without a name, or a name added without a decision about its grammar, fails that test.</span></div>
+    </section>
+
+    <section id="classification">
+      <span class="section-tag">Classification</span>
+      <h2>Deciding what a file is</h2>
+      <p class="intro">Extension first because it is free and usually right; content second because it is the only thing that is <em>reliably</em> right. A <code>.txt</code> that is actually a 900 MB core dump must not reach the text renderer, and a <code>Makefile</code> with no extension at all must.</p>
+
+      <ol>
+        <li><strong>Name table.</strong> Exact filenames before extensions: <code>Makefile</code>, <code>Dockerfile</code>, <code>Cargo.lock</code>, <code>.gitignore</code>, <code>CMakeLists.txt</code>, <code>go.sum</code>, <code>Justfile</code>, <code>.env</code>. This is the case a pure extension map gets wrong every time, and it covers a lot of what sits in a repository root.</li>
+        <li><strong>Extension table.</strong> ~240 entries mapping to a <code>Kind</code> and, for text kinds, a language name. Built once as a static <code>phf</code>-shaped match — a plain <code>match</code> on a lowercased <code>SmolStr</code>, which the icon layer already established as the right representation for an extension.</li>
+        <li><strong>Magic bytes.</strong> The first <code>SNIFF_BYTES</code> (8 KiB) decide format for anything the name did not settle, and <em>override</em> the name for images and archives: PNG, JPEG, GIF, WebP, TIFF, BMP, ICO, AVIF, QOI, PDF (<code>%PDF-</code>), Zip, Gzip, ELF, Mach-O, PE, and the UTF-8/16/32 BOMs.</li>
+        <li><strong>Binary test.</strong> Check BOMs before testing NUL bytes: UTF-16/32 naturally contain NULs. Strictly decode BOM-marked text; otherwise validate UTF-8, allowing an incomplete trailing code point only at the read boundary. Unknown invalid text falls back to hex. Lossy display must be labelled and never editable.</li>
+        <li><strong>Size gate.</strong> Applied last, per kind, before any full read is attempted.</li>
+      </ol>
+
+      <div class="callout warn"><strong>The sniff is a second read, and that is fine</strong><span>Reading 8 KiB and then reading 2 MiB looks wasteful until you price the alternative: reading 2 MiB of a 4 GB video to discover it is a video. The sniff is one <code>read(path, SNIFF_BYTES)</code>; the current API has no offset or continuation handle, so the provider rereads the prefix within its final budget. Count both calls and their bytes in benchmarks; do not concatenate the sniff with a second read from offset zero.</span></div>
+
+      <p>Symlinks are resolved for classification and <em>reported</em> in the header — a symlink to a 4 GB file previews the target under the target’s budget, and the header says where it points. A broken symlink is a <code>Gone</code>-adjacent state with the dangling target named, not a silent empty pane. A symlink loop is bounded by <code>Vfs::canonicalize</code>, which already exists for the per-folder preference key.</p>
+    </section>
+
+    <section id="providers">
+      <span class="section-tag">The renderers</span>
+      <h2>The providers, one at a time</h2>
+
+      <details open>
+        <summary><span class="fid">F-31</span> Markdown — <code>TextView</code></summary>
+        <p><code>gpui-component</code>’s <code>TextView</code> parses Markdown into a document tree and renders headings, lists, tables as real tables, block quotes, task lists, links, inline code and fenced code blocks — the fences highlighted through the same <code>LanguageRegistry</code> the code provider uses, so a Rust block in a README and a <code>.rs</code> file get identical colours for free.</p>
+        <p><strong>Rust library decision:</strong> reuse <code>markdown-rs</code> (crate <code>markdown</code>, locked at 1.0.0), which the pinned component already calls through <code>markdown::to_mdast</code> in <code>text/format/markdown.rs</code>. It supplies parsing; <code>TextView</code> supplies native GPUI layout. An HTML-producing crate alone does not supply a native renderer. Keep CommonMark plus GFM tables, task lists and strikethrough; executable MDX, raw HTML rendering, math and diagram execution are out of scope.</p>
+        <ul>
+          <li><strong>Own persistent state.</strong> Hold one <code>TextViewState</code> per active document and update it outside Render. Background parsing does not prove virtualised layout: benchmark nested lists, wide tables, many fences and long paragraphs before accepting the rendered mode.</li>
+          <li><strong>Resolve resources structurally.</strong> Inspect parsed image nodes, including reference images and HTML image syntax; never use regex rewriting. Raw HTML and MDX constructs remain inert source text. Default all images to alt text until a renderer hook can inject only validated, predecoded bitmaps. The pinned URI-based image helper is not such a hook; a small reviewed component extension is a prerequisite for local images. Do not rewrite to <code>file://</code>.</li>
+          <li><strong>Document-scoped images.</strong> Permit only relative local paths beneath the canonical document directory. Reject absolute paths, URI schemes, UNC paths, traversal, and symlink/junction escapes. Open and verify the resolved file identity before reading, then apply the same byte, pixel and memory limits as F-33. Deny resources from remote mounts by default. At most 16 images, 8 MiB encoded and 32 MiB decoded in aggregate per document; placeholders retain alt text.</li>
+          <li><strong>Link policy.</strong> Same-document anchors scroll within the document. Relative file links navigate only on a click through the browser’s normal navigation and dirty-buffer guard. External <code>https</code>, <code>http</code> and <code>mailto</code> links require an explicit click with destination confirmation; reject all other schemes. Never auto-open a link or execute a Markdown task checkbox.</li>
+          <li><strong>Graceful fallback.</strong> Offer Rendered / Source without changing the file. If layout exceeds its gate or syntax is unsupported, show bounded read-only source with a reason. Start with 256 KiB rendered Markdown, 4,000 blocks and nesting depth 32; exceeding structural limits falls back to source. Parsing deadlines are cooperative unless isolated in a process.</li>
+        </ul>
+        <p><strong>Alternatives:</strong> <a href="https://github.com/pulldown-cmark/pulldown-cmark">pulldown-cmark</a> is the fallback if measured parser performance or event-level resource control requires an adapter. Do not add a second parser by default or round-trip source through HTML. <a href="https://github.com/wooorm/markdown-rs">markdown-rs</a> already provides an AST suitable for structural policy; integration and layout limits still need proof.</p>
+
+      </details>
+
+      <details open>
+        <summary><span class="fid">F-32</span> Code — read-only <code>Editor</code></summary>
+        <p><code>EditorState::new(window, cx).language(name).line_number(false).soft_wrap(false)</code>, rendered through <code>Editor::new(&amp;state).readonly(true)</code>. Its element lays out only the visible line range, so a 20,000-line file costs the same per frame as a 20-line one.</p>
+        <p>The pane owns one <code>Entity&lt;EditorState&gt;</code> and calls <code>set_value</code> plus <code>set_highlighter</code> when the selection changes, for the same reason as Markdown. Scroll position resets; the language changes with the file; the renderer is shared with F-36, which additionally requires lossless encoding metadata, a complete buffer, save capability and navigation guards.</p>
+        <p>Line numbers default off — the reference screenshot has none and a preview is for reading, not for citing — and are a persisted toggle in the overflow menu. Soft wrap defaults off for code and on for plain text and logs, which is the split that matches how people actually read those two things.</p>
+      </details>
+
+      <details open>
+        <summary><span class="fid">F-33</span> Images — our decode, GPUI’s draw</summary>
+        <p><code>gpui::img()</code> already handles AVIF, JPEG, PNG, GIF, WebP, TIFF, TGA, DDS, BMP, ICO, HDR, EXR, the PNM family, QOI and SVG, with animated GIF and animated WebP decoded to frame sequences. The formats are not the problem. The <em>path</em> is: GPUI’s loader does a blocking whole-file read and a full-resolution decode, which is right for a bundled 24 px icon and catastrophic for a photographer’s directory.</p>
+        <p>So <code>ferret-preview::image</code> owns the pipeline and GPUI only draws the result:</p>
+        <ol>
+          <li>Probe the header for dimensions without decoding. Past <code>IMAGE_SOURCE_PIXEL_CAP</code> the answer is <code>TooLarge</code> and no allocation happens at all.</li>
+          <li>Read under the kind’s byte budget, decode off-thread with the decoder’s own allocation limits set.</li>
+          <li>Downscale to the pane’s long edge at the window’s scale factor, capped at 4096 px, with a triangle filter — a low-cost baseline to compare visually against Lanczos; triangle filtering is bilinear, not a distinct quality class.</li>
+          <li>Convert to BGRA and hand <code>ferret-ui</code> a <code>Bitmap</code>, which becomes one <code>RenderImage</code>.</li>
+        </ol>
+        <p><strong>Animation.</strong> Animated GIF and WebP are decoded to frames and played only in the docked pane and the F-75 overlay, never in icon-view thumbnails — a directory of forty animated GIFs must not become forty running animations. A frame count past <code>ANIMATION_FRAME_CAP</code> falls back to the first frame with a footer note.</p>
+        <p><strong>SVG.</strong> Rasterise off-thread into a bounded bitmap. First verify the pinned SVG renderer can disable external images, fonts and filesystem/network resolution; otherwise show source. Cap source bytes, node count, nesting, filter intermediates and output pixels: viewBox dimensions alone do not bound complexity. Debounce resizing and reuse the last bitmap while a replacement is prepared.</p>
+        <p><strong>HEIC and RAW.</strong> The <code>image</code> crate decodes neither, and they are two of the most common things in a real Pictures folder. Both use PV-D07’s best-effort OS thumbnail path. Codec and handler availability varies; absent support shows metadata and Open externally.</p>
+        <p><strong>Thumbnails.</strong> Icon view asks <code>ferret-preview::thumbs</code>, which is a disk cache under the user’s cache directory keyed by a hash of <em>canonical path, mtime, size and target pixel size</em>. Size in the key is the part that is easy to omit and matters: a file edited without its mtime changing is rare, but a file replaced with one of a different length is not. Entries are 128 px WebP, evicted by age past <code>THUMB_CACHE_AGE</code> and by total bytes past <code>THUMB_CACHE_BYTES</code>, oldest first. Generation is bounded to visible tiles plus a small lookahead, on <code>ferret_vfs::pool</code>, never on a fourth thread pool.</p>
+      </details>
+
+      <details open>
+        <summary><span class="fid">F-35</span> CSV and TSV — <code>table</code></summary>
+        <p>Delimiter sniffed from the first 64 KiB by scoring comma, tab, semicolon and pipe on consistency of field count across the first 20 complete logical records parsed with quote handling — the frequency-only heuristic gets European semicolon-delimited exports wrong often enough to matter. Header detection: the first row is a header if every one of its fields is non-numeric and at least one subsequent row has a numeric field in the same column.</p>
+        <p>Parsed with the <code>csv</code> crate, because RFC 4180 quoting — embedded delimiters, embedded newlines, doubled quotes — is precisely the kind of thing that looks like twenty lines of hand-rolled code and is wrong on real data. The initial implementation parses a bounded 2 MiB prefix into at most 2,000 records, 128 columns and 32 MiB of cell data, with a 64 KiB per-field limit. Render with the virtualised <code>table</code>; a 500 MB file opens as an explicitly labelled sample. Scrolling never silently reads the rest. True incremental loading requires a future cancellable streaming/range VFS contract.</p>
+        <p>Column sorting is offered only within what has been loaded, and says so, rather than pretending to sort a file it has not read. Header inference is a reversible toggle; use Column 1…N when uncertain. Ragged records get a marker; unrecoverable syntax shows a byte/record location and a source fallback. An incomplete final record at the byte cap is omitted with an explicit truncation note — a preview that hides the broken row is worse than useless for the person trying to find it.</p>
+      </details>
+
+      <details open>
+        <summary><span class="fid">F-30</span> Plain text, logs, and the binary floor</summary>
+        <p>Text with no language resolves to the <code>Plain</code> language and renders in the same editor with soft wrap on. Line endings are detected and reported in the header (LF / CRLF / mixed) because that is load-bearing information the moment F-36 is involved. A UTF-16 or UTF-8 BOM is decoded and noted. Invalid sequences may render as U+FFFD only in an explicitly labelled lossy read-only view; unknown invalid text defaults to hex.</p>
+        <p>Binary is the floor and is a real view, not an apology: 16 bytes per row, offset gutter, hex, printable ASCII column, for the first <code>HEX_BUDGET</code> bytes. It is what makes “what actually is this file” answerable without leaving the app.</p>
+      </details>
+
+      <details open>
+        <summary><span class="fid">F-75</span> Space-to-preview</summary>
+        <p>The same <code>Preview</code> value rendered into a full-window overlay mounted on <code>Root</code>’s dialog layer. Deliberately <em>not</em> deferring to macOS Quick Look’s own panel: sharing the provider means the two surfaces cannot disagree, and the overlay works identically on Windows where there is no Quick Look panel to defer to. The OS thumbnail service is still used underneath for types we cannot render — it is a data source, not a UI.</p>
+        <p>Because the value is already computed for the docked pane, <kbd>Space</kbd> on an already-previewed selection opens instantly with no read at all. When the pane is closed, the overlay runs the same pipeline on demand.</p>
+      </details>
+    </section>
+
+    <section id="languages">
+      <span class="section-tag">Q-02, answered</span>
+      <h2>Sixty-plus languages without a second highlighter</h2>
+      <p class="intro"><code>gpui-component</code> ships 35 grammars behind its <code>tree-sitter-languages</code> feature — which Ferret currently does not enable, so today’s editor has no highlighting at all. Turning it on is step one. Getting from 35 to 65+ is the interesting part, and the mechanism already exists: <code>LanguageRegistry::register</code> is public, takes a <code>tree_sitter::Language</code> and query strings, and is consulted by the editor and by Markdown fences alike.</p>
+
+      <div class="scroller">
+        <table>
+          <caption>How Ferret gets to 65+</caption>
+          <thead><tr><th>Tier</th><th>Count</th><th>Source</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td>Built in</td><td>35</td><td><code>gpui-component/tree-sitter-languages</code>: Rust, Go, Python, TS/TSX/JS, C/C++/C#, Java, Kotlin, Swift, Scala, Ruby, PHP, Elixir, Zig, Lua, Bash, SQL, HTML/CSS, JSON, YAML, TOML, Markdown, Make, CMake, Proto, GraphQL, Svelte, Astro, Diff, EJS/ERB, JSDoc.</td><td>Already in <code>Cargo.lock</code>’s dependency graph; a feature flip.</td></tr>
+            <tr><td>Ferret extended</td><td>~30</td><td>Registered from crates.io grammar crates in <code>ferret-ui/src/preview/grammars.rs</code>: Dockerfile, Nix, HCL/Terraform, XML, INI, Vue, Dart, Haskell, OCaml, Erlang, Clojure, Julia, R, Perl, PowerShell, Fish, Groovy, Solidity, Prisma, Jsonnet, Vim, LaTeX, Nginx, Fortran, Ada, Elm, Gleam, WGSL/GLSL, Assembly, Just.</td><td>One <code>register</code> call each; each grammar is generated C compiled once.</td></tr>
+            <tr><td>Identified only</td><td>~150 more extensions</td><td>Resolved to a language name and rendered as plain monospaced text with the correct label.</td><td>A table entry. Zero build cost.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <pre class="callout"><code>// crates/ferret-ui/src/preview/grammars.rs
+//
+// Called once from `ferret_ui::init`. The registry is a process-wide
+// `LazyLock` behind a mutex inside gpui-component, so it is
+// accessed in a deterministic, duplicate-checked pass before the first
+// preview, not lazily on first use of each language, or the first file of a
+// given type renders unhighlighted and the second does not.
+pub(crate) fn register_extended() {
+    let registry = LanguageRegistry::singleton();
+    for (name, config) in EXTENDED {
+        registry.register(name, config);
+    }
+}</code></pre>
+
+      <div class="callout"><strong>The capture-name detail that decides whether this looks right</strong><span>gpui-component resolves a tree-sitter capture to a style through 41 named slots, and falls back by dotted prefix — <code>keyword.modifier</code> resolves to <code>keyword</code>. Upstream grammar crates ship nvim-flavoured queries full of names like <code>@variable.parameter</code> and <code>@function.method</code>, and that fallback is exactly what makes them usable unmodified. Where a grammar’s query is genuinely poor, the fix is a hand-written <code>highlights.scm</code> in our own tree — which is what gpui-component itself does for twelve of its languages — not a different highlighter.</span></div>
+
+      <h3>What “60+ languages” must prove</h3>
+      <p>The list above is a candidate manifest, not a verified count. Release requires at least 60 distinct source/configuration languages with passing highlight fixtures; do not count aliases, filename extensions, JSDoc injections or TSX twice to reach the number. For each entry record the canonical name, aliases, filename patterns, crate version/license, tree-sitter ABI, query dependencies and a small representative fixture. Compile queries at startup validation, test meaningful spans and fenced-code aliases, and smoke-test both target platforms. Query inheritance and embedded-language injections may need explicit adaptation; registration alone is not proof of correctness. Full syntax highlighting means lexical/syntactic colour, not LSP semantic analysis.</p>
+      <p>Official builds include the full verified set. Forward feature opt-outs explicitly from <code>ferret</code>; disabling default features on the workspace root does not automatically disable defaults on transitive dependencies. Registration occurs once in deterministic order; duplicate names are rejected by our validation.</p>
+      <h3>Why not syntect</h3>
+      <p><code>syntect</code> with <code>two-face</code> would reach 250 languages in one dependency. It is the wrong trade here for three reasons, in order of weight. It would be a <em>second</em> highlighter: the editor and the Markdown fences are already driven by tree-sitter, so syntect output would need its own theme mapping and the same file could get two different colourings depending on where it appeared. Its parser output would need a new span adapter into the native editor. Reconsider only if the tree-sitter coverage gate cannot meet the required language set; the decision is integration cost, not an assumption that uncommon languages are unimportant.</p>
+
+      <h3>The cost, stated plainly</h3>
+      <p>Cold-build and stripped-binary deltas are unmeasured; record both for the locked grammar set on macOS and Windows before release. That is a real cost paid by every contributor on every clean build, and R-07 already names build friction as a live risk. So the extended set sits behind a <strong>default-on <code>languages-extended</code> feature</strong> forwarded from the binary crate to <code>ferret-ui</code>: on for anyone who builds normally, and <code>--no-default-features</code> away for someone iterating on the file pane who does not care about Gleam. The built-in 35 are never optional — a code preview with no colour is a broken feature, not a fast build.</p>
+    </section>
+
+    <section id="pdf">
+      <span class="section-tag">Q-01, answered</span>
+      <h2>PDF, and everything else the OS already knows</h2>
+      <p class="intro">Q-01 is resolved in favour of reliable PDF coverage: official builds bundle Pdfium and use <code>pdfium-render</code> to render bounded page bitmaps in a helper process. This accepts packaging cost to meet the product requirement. Native thumbnails remain a fast path and extend coverage to other document types; they cannot replace a guaranteed PDF backend.</p>
+      <h3>PDF acceptance contract</h3>
+      <p>Render page one automatically, show “Page 1 of N”, and provide Previous / Next plus a page-number field, fit-to-width and zoom. Keep only the current page and at most one neighbour within the shared bitmap budget. Parse and render off-process; cancel stale requests and terminate a timed-out helper. Never execute PDF JavaScript, launch actions, attachments or embedded media. Encrypted PDFs show a Protected state and Open externally in v1; corrupt or over-budget files have explicit failure states.</p>
+      <p>PDFs require random access and can place their index at the end. Load complete bytes only for files within <code>PDF_BUDGET</code> (64 MiB local, 16 MiB remote), not a truncated head; larger files show TooLarge. Supply bounded bytes to the helper rather than an unrestricted path. A five-second render deadline and 256 MiB helper memory ceiling are initial targets to verify on both platforms. Start by testing page rendering on clean installations with no PDF thumbnail handler.</p>
+
+      <div class="scroller">
+        <table>
+          <caption>One trait, two implementations</caption>
+          <thead><tr><th></th><th>macOS</th><th>Windows</th></tr></thead>
+          <tbody>
+            <tr><td>API</td><td><code>QLThumbnailGenerator</code> (QuickLookThumbnailing), via <code>objc2-quick-look-thumbnailing</code></td><td><code>IShellItemImageFactory::GetImage</code>, via <code>SHCreateItemFromParsingName</code></td></tr>
+            <tr><td>Covers</td><td>PDF, Pages/Numbers/Keynote, Office, HEIC, RAW, video posters, Sketch, and anything with a Quick Look extension installed</td><td>PDF, Office, video posters and RAW only where a compatible thumbnail provider/codec is installed; default-viewer association is insufficient</td></tr>
+            <tr><td>Output</td><td>CGImage → BGRA <code>IconBitmap</code></td><td>HBITMAP → BGRA <code>IconBitmap</code></td></tr>
+            <tr><td>Threading</td><td>Async with a completion block; generation uses the system service; validate all returned dimensions and buffer lengths before importing</td><td>Blocking and disk-touching — Microsoft’s own guidance is not to call it on the UI thread without <code>SIIGBF_MEMORYONLY</code>. Run in a supervised helper process with a dedicated COM apartment, not on the shared CPU pool.</td></tr>
+            <tr><td>Failure</td><td>Returns an error; we fall through to <code>Unsupported</code></td><td><code>SIIGBF_THUMBNAILONLY</code> fails rather than silently returning an icon, which is what we want — an icon dressed as a preview is a lie</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>This is the same shape as the icon work already in the tree. <code>ferret-platform</code>’s <code>IconProvider</code> established the rules — synchronous <code>lookup</code> answers from cache only, resolution happens off the render path — and <code>ThumbnailProvider</code> inherits them, with one difference: thumbnails key on the <em>path</em>, not the type, so the cache is the disk cache from F-33 rather than a small in-memory map.</p>
+
+      <div class="callout good"><strong>What this buys beyond PDF</strong><span>The reference asks for “PDFs, images, and more”. The OS thumbnail service <em>is</em> the “and more”: supported documents gain thumbnails without a dedicated renderer for each. Coverage must be recorded on clean macOS and Windows installations, including missing-handler cases. It also means Ferret’s previews match Finder’s and Explorer’s, which is the standard a file-manager replacement is actually judged against.</span></div>
+
+      <div class="callout warn"><strong>Packaging is a release gate</strong><span><a href="https://github.com/ajrcarey/pdfium-render">pdfium-render</a> binds a separate native library; adding the Rust crate does not install Pdfium. Pin matching wrapper/ABI and platform binaries with checksums, account for their complete redistribution notices, sign/notarize the helper and libraries, and load only an application-controlled absolute path. Smoke-test every shipped architecture from a packaged installation. Missing Pdfium is a packaging failure for official builds, with a recoverable metadata view rather than a crash. Continuous page scrolling, PDF text selection and search are follow-ups, not implied by bitmap rendering.</span></div>
+
+    </section>
+
+    <section id="libraries">
+      <span class="section-tag">Dependencies</span>
+      <h2>Library decisions</h2>
+      <p class="intro">The dependency policy is “do not add one when GPUI, <code>gpui-component</code>, the standard library or a small local helper already solves the problem clearly”, and every entry in the workspace manifest carries the job it does. Held to that, this feature is remarkably cheap: most of what it needs is already compiled.</p>
+
+      <div class="scroller">
+        <table>
+          <caption>What this feature adds, and what it deliberately does not</caption>
+          <thead><tr><th>Need</th><th>Answer</th><th>New?</th><th>Justification</th></tr></thead>
+          <tbody>
+            <tr><td>Markdown parse + render</td><td><code>markdown-rs</code> + <code>gpui-component</code> <code>TextView</code></td><td class="yes">No</td><td>Existing Rust parser and native renderer. A safe bitmap resource hook and bounded layout are acceptance gates, not assumed capabilities.</td></tr>
+            <tr><td>Code view, virtualised</td><td><code>gpui-component</code> <code>Editor</code></td><td class="yes">No</td><td>Rope-backed native reading surface; edit mode shares layout but adds a separate safety contract.</td></tr>
+            <tr><td>Syntax highlighting</td><td><code>gpui-component</code> <code>tree-sitter-languages</code></td><td class="hold">Feature flip</td><td>35 grammars already in the graph; enabling costs build time, not a new dependency edge.</td></tr>
+            <tr><td>~30 more grammars</td><td><code>tree-sitter-*</code> crates</td><td class="no">Yes</td><td>Registered through the public registry. Behind a default-on feature so the build cost is opt-out (R-07).</td></tr>
+            <tr><td>Image decode</td><td><code>image</code></td><td class="hold">Feature flip</td><td>Already a workspace dependency at <code>default-features = false</code> for buffer types only. Codecs get enabled; Cargo unions features with GPUI’s own use, so no second copy.</td></tr>
+            <tr><td>Downscaling</td><td><code>image</code>’s <code>resize</code></td><td class="yes">No</td><td>Triangle filter at preview sizes. A dedicated resampler is not worth a dependency for one call site.</td></tr>
+            <tr><td>SVG</td><td><code>gpui</code> <code>svg_renderer</code></td><td class="yes">No</td><td>Already used for every bundled icon; rescales with the pane.</td></tr>
+            <tr><td>CSV / TSV</td><td><code>csv</code></td><td class="no">Yes</td><td>RFC 4180 quoting, embedded newlines and doubled quotes. Small, no transitive weight, and hand-rolling it is wrong on real exports.</td></tr>
+            <tr><td>PDF, Office, HEIC, RAW, video</td><td>OS thumbnail service</td><td class="no">Platform bindings</td><td><code>objc2-quick-look-thumbnailing</code> + <code>block2</code> on macOS; Windows uses typed <code>windows</code> COM bindings in the supervised helper; verify the dependency version and feature set.</td></tr>
+            <tr><td>PDF pages</td><td><code>pdfium-render</code> + pinned Pdfium binary</td><td class="no">Required in releases</td><td>Bundled on both platforms; isolated page rasterisation. Developer opt-out only. Packaging, ABI and notices verified before release.</td></tr>
+            <tr><td>Hex view</td><td>Local helper</td><td class="yes">No</td><td>Forty lines of formatting. A crate for this would be the policy violation the policy exists to prevent.</td></tr>
+            <tr><td>Text encoding detection</td><td>Local helper</td><td class="yes">No</td><td>BOM sniff plus UTF-8 validation. Full charset detection (<code>chardetng</code>) is a real dependency for a case — legacy Shift-JIS source in a file manager — rare enough to defer until someone asks.</td></tr>
+            <tr><td>Highlighting the other 200 languages</td><td><s><code>syntect</code> + <code>two-face</code></s></td><td class="no">Rejected</td><td>A second highlighter with a second theme mapping, whose additional integration cost is not justified before the tree-sitter coverage gate. See §8.</td></tr>
+            <tr><td>HEIC in-process</td><td><s><code>libheif-rs</code></s></td><td class="no">Rejected</td><td>Links a C library on both platforms to duplicate something the OS already does natively and better.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn"><strong>Windows decision: typed COM in a supervised helper</strong><span>Use the <code>windows</code> crate for thumbnail COM interfaces, with a version checked against the lockfile. Keep COM objects and a message pump on one apartment thread inside a supervised thumbnail helper. A worker-thread timeout cannot terminate native code or contain a process crash. The helper has one active request, a bounded pending queue, a five-second deadline and restart backoff. If this isolation is not ready, ship metadata fallback rather than claim the hazard is caught.</span></div>
+      <p><strong>Native exception to byte budgets.</strong> Native thumbnail services receive paths and may read the whole file internally. Limit requests to local regular files no larger than 64 MiB; exclude network shares and known cloud placeholders to avoid hydration. These checks reduce exposure but cannot prove zero provider I/O. Strict bounded-I/O mode disables native providers. Document this exception rather than applying Rust read-budget guarantees to OS APIs.</p>
+
+    </section>
+
+    <section id="performance">
+      <span class="section-tag">Contract</span>
+      <h2>Performance contract</h2>
+      <p class="intro">Phase 3’s acceptance in <code>docs/plan.html</code> is “arrow-keying down a directory of mixed file types renders each preview without a dropped frame”. That sentence is the whole contract, and it is satisfied by four rules.</p>
+
+      <ol>
+        <li><strong>Debounce, then one generation.</strong> A selection change bumps <code>preview_generation</code> and schedules work at <code>PREVIEW_DEBOUNCE</code> (80 ms). Continuous key-repeat produces one settled request. Drop cancels interest, not an already-running blocking syscall or decoder. Keep one active preview job and one replaceable pending request, check cancellation between stages, and reject stale generations on arrival. Clear the old body immediately so new metadata never labels old content. Closing the pane cancels interest; the overlay may retain it. Watcher updates invalidate clean previews; dirty buffers enter Conflict.</li>
+        <li><strong>Nothing O(the file) on the main thread.</strong> Reading, sniffing, decoding, downscaling and CSV parsing all run on <code>ferret_vfs::pool</code> or through <code>smol::unblock</code>. Library work is included in the budget: measure state updates, parsing, highlighting and layout. Run data-parallel work only inside <code>ferret_vfs::pool</code>; do not create implicit Rayon pools. File I/O may use the existing blocking executor. Long-line files get a 16 KiB displayed-line cap or source fallback before layout.</li>
+        <li><strong>The render path reads, and only reads.</strong> <code>Render</code> for the preview pane matches on a <code>Preview</code> and builds elements. It does not clone the text, re-derive a language, re-scan for line endings or rebuild a bitmap. <code>just budget</code> is the mechanical check, and the preview pane joins the allocation-budget test with its own case: arrow through ten files of ten kinds and assert the per-frame allocation count is flat.</li>
+        <li><strong>Budgets are hard, and stated.</strong> Every read is capped; every cap has a footer line when it bites. Rust reads and decodes are bounded; native providers have the explicitly documented exception above. A 128 MiB aggregate working-memory target includes input, decoder scratch, RGBA/BGRA copies and retained frames; a separate 64 MiB resident bitmap budget includes GPU uploads. Reserve before starting a job, fall back on refusal, and measure process/GPU peaks because decoder limits alone do not enforce this accounting.</li>
+      </ol>
+
+      <p>Measure release builds with machine, OS, refresh rate, fixture size and cold/warm cache recorded. Report p50/p95 over 30 settled selections and compare 60 Hz frame times against the same navigation with preview disabled. Initial gate: p95 frame ≤ 16.7 ms and no preview-attributable stall over 33 ms. At 120 Hz also report missed 8.3 ms intervals. Selection-to-content includes the 80 ms debounce: target ≤ 150 ms p95 for small text/Markdown and ≤ 500 ms for ordinary images/PDF page one. A cache hit should appear on the next frame. CPU-only xtask measurements cannot certify GPUI frame, layout or GPU upload performance.</p>
+      <div class="scroller">
+        <table>
+          <caption>Proposed targets — to be measured, not existing results</caption>
+          <thead><tr><th>Path</th><th>Target</th><th>How it is checked</th></tr></thead>
+          <tbody>
+            <tr><td>Selection → header populated</td><td>Same frame</td><td>The header renders from the <code>Entry</code> the list already holds. No read involved.</td></tr>
+            <tr><td>Selection → small text preview</td><td>&lt; 30 ms after debounce</td><td>Local read of ≤ 2 MiB plus a tree-sitter parse.</td></tr>
+            <tr><td>Selection → 8 MP JPEG</td><td>&lt; 120 ms after debounce</td><td>Probe, decode, downscale, upload.</td></tr>
+            <tr><td>Arrow-key sweep, 200 rows</td><td>Zero dropped frames; ≤ 2 VFS reads after one uninterrupted sweep</td><td>Extend <code>cargo xtask bench</code> with a preview sweep over the mixed fixture.</td></tr>
+            <tr><td>Icon-view thumbnails, 500 tiles</td><td>Zero dropped frames; bounded in-flight decodes</td><td>Visible-plus-lookahead only; cache hits avoid source decoding but still decode the cached WebP.</td></tr>
+            <tr><td>Preview pane per-frame allocations</td><td>Bounded with input size per kind</td><td><code>just budget</code>, new case. Compare small and capped inputs of the same kind; allocations need not be equal across different renderers.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="security">
+      <span class="section-tag">Safety</span>
+      <h2>Safety and privacy</h2>
+      <p class="intro">A preview pane renders files the user did not write, did not choose and may have just downloaded. That is a different threat model from an editor opening a project, and three things follow from it.</p>
+
+      <ul>
+        <li><strong>No document-initiated network (PV-D10).</strong> The single most likely quiet failure in this whole feature is a Markdown file with <code>![](https://tracker.example/pixel.png)</code> silently confirming to a third party that this machine opened this file. GPUI will happily fetch it. All raw resource URLs are blocked; the resolver alone supplies bounded bitmaps. Verify with a request-counting local HTTP server and assert zero requests, including HTML, reference images and SVG resources.</li>
+        <li><strong>No path escapes.</strong> A rewritten relative image URL is normalised and rejected if it leaves the document’s directory. <code>![](../../../.ssh/id_rsa)</code> renders as alt text. Canonical containment and opened-file identity are required as well as lexical normalisation; test symlinks, Windows junctions, UNC/device paths and encoded traversal.</li>
+        <li><strong>Every decoder gets limits.</strong> Decompression bombs are the standard attack on exactly this surface — a 40 KB PNG that decodes to 60 GB. The pixel cap is checked from the header <em>before</em> allocation, and the decoder’s own <code>Limits</code> are set as the backstop for formats where the header lies.</li>
+        <li><strong>The OS renders out-of-process where it can.</strong> Quick Look generation runs outside our address space, so a malformed PDF crashes Apple’s helper and returns an error, not a crash. Windows native failures must be contained in the supervised helper; Rust panic handling and a thread timeout do not catch access violations or stop a hung COM call.</li>
+        <li><strong>Nothing the preview reads is ever written back.</strong> Except through F-36, which is explicit, confirmed and atomic.</li>
+      </ul>
+    </section>
+
+    <section id="remote">
+      <span class="section-tag">Mounts</span>
+      <h2>Remote mounts</h2>
+      <p class="intro">Phase 8 compatibility, not an existing implementation: the current VFS exposes backend-wide <code>capabilities()</code> and bounded-buffer <code>read</code>. A future mount router must supply per-path capabilities and explicit freshness. No Router, <code>capabilities_for</code> or <code>invalidate</code> API exists today; these names below describe required semantics, not methods ready to call.</p>
+
+      <ul>
+        <li><strong>Budgets scale down.</strong> <code>REMOTE_BUDGET_SCALE</code> is ¼. A 2 MiB text budget over a 200 ms-RTT link is several seconds of waiting for something the user was arrow-keying past; 512 KiB is a preview.</li>
+        <li><strong>The loading state is not optional.</strong> Locally the 120 ms threshold means the skeleton rarely appears. Remotely it always will, and it says “Reading over the connection” rather than showing a generic spinner, because the user needs to know which kind of slow this is.</li>
+        <li><strong>Ask <code>capabilities_for(path)</code>, never <code>capabilities()</code>.</strong> The Edit button’s existence is a property of the backend the file is on. A read-only mount shows no Edit button rather than an Edit button that fails on save.</li>
+        <li><strong>There is no watcher.</strong> Do not assume a remote watcher or cache lifetime. Manual refresh must request fresh metadata and bytes from the future backend, bypassing cached metadata. Its invalidation API is deferred with the mount implementation.</li>
+        <li><strong>The OS thumbnail path is local-only.</strong> Quick Look and the shell take a filesystem path. A remote PDF downloads completely only within its reduced budget and uses Pdfium, or shows metadata and <em>Open with…</em>, which for a mount means downloading it deliberately. It does not silently pull 40 MB over SSH because someone moved the selection.</li>
+      </ul>
+    </section>
+
+    <section id="editing">
+      <span class="section-tag">F-36</span>
+      <h2>Edit mode</h2>
+      <p class="intro">The smallest feature in this plan with the largest downside. R-06 names data loss as the worst thing this product can do, and in-place save is the one place the preview pane can do it.</p>
+
+      <p><strong>Proposed local save surface.</strong> The trait has <code>read</code> but no write, so this and <code>FileIdentity</code> are proposed new types/API, subject to the conflict contract below:</p>
+      <pre class="callout"><code>/// Replace a file's contents, atomically.
+///
+/// Writes a temporary file in the *same directory* — a different filesystem
+/// makes the final step a copy, which is exactly what atomicity rules out —
+/// flushes it, then renames over the target. A reader either sees the old
+/// bytes or the new ones, never a truncated file, and a crash mid-write
+/// leaves the original intact.
+///
+/// `expect` is the identity the caller last saw. A mismatch is refused
+/// rather than resolved: the file changed under the editor, and only the
+/// person looking at both versions can say what should win.
+async fn write_atomic(
+    &amp;self,
+    path: &amp;VfsPath,
+    contents: &amp;[u8],
+    expect: FileIdentity,
+) -&gt; Result&lt;FileIdentity&gt;;</code></pre>
+
+      <p>Around that:</p>
+      <ul>
+        <li><strong>Preserved on save:</strong> the file's existing line endings (a CRLF file stays CRLF even though the editor works in LF), the presence or absence of a trailing newline, the BOM if there was one, and Unix permission bits. Ownership where the platform allows it.</li>
+        <li><strong>Refused:</strong> binary files; files that were truncated by the budget, because saving a truncated buffer would destroy the tail; and any file whose mtime or size changed since load.</li>
+        <li><strong>Confirmed:</strong> navigating away with unsaved changes. The selection change is blocked, not queued — a preview that silently discards an edit because the user pressed <kbd>↓</kbd> is the data-loss failure in miniature.</li>
+        <li><strong>Windows:</strong> implement replacement with verified <code>ReplaceFileW</code> semantics, including ACLs, sharing violations and open handles. Never delete the destination first. On Unix, sync the temporary file and parent directory where supported. Atomic visibility and crash durability are distinct; report durability failures without blindly retrying a replacement that may have committed.</li>
+        <li><strong>Remote:</strong> SFTP has no atomic replace primitive that is universally available. editing stays disabled unless the backend explicitly advertises atomic replacement with the required conflict checks. A generic writable or rename capability is insufficient; there is no delete-then-rename fallback.</li>
+      </ul>
+
+      <p><strong>Conflict and fidelity contract.</strong> Snapshot original bytes plus file identity (mount, resolved path, file ID where available, size, high-resolution mtime and content hash). Revalidate immediately before replacement; same-size/same-mtime edits still conflict. Ordinary filesystem replacement is not compare-and-swap against arbitrary external writers: there remains a check-to-replace race. Preserve a recoverable pre-save copy and expose conflicts honestly; do not promise strict concurrency safety. Route the user mutation through <code>ferret-ops</code> under D-09, with storage mechanics in <code>ferret-vfs</code>. A successful save returns the new identity; ambiguous completion triggers a read-back rather than automatic retry.</p>
+      <p>V1 editing is limited to complete, losslessly decoded UTF-8/UTF-16 text with uniform LF or CRLF. Preserve encoding, BOM and final-newline state from the original buffer; unmodified Save is a no-op. Mixed endings, invalid encoding, UTF-32, symlinks/reparse points and multiply linked files remain read-only until their fidelity semantics are explicitly implemented. Verify Unix mode and relevant macOS extended metadata, Windows ACLs/attributes and replacement behavior; fail before changing content if required metadata cannot be preserved. Saving and Conflict are explicit UI states. No autosave.</p>
+      <p>Tests for this are the highest-value tests in the feature, against temp directories: CRLF round-trip, no-trailing-newline round-trip, BOM round-trip, permission preservation, concurrent-modification refusal, and a byte-identical round-trip of a file that was opened and saved without being edited.</p>
+    </section>
+
+    <section id="config">
+      <span class="section-tag">Tunables</span>
+      <h2>Every budget in one file</h2>
+      <p class="intro">Per the repository convention, these live in <code>crates/ferret-preview/src/config.rs</code>, public so tests assert against the same constants the code uses, each documented with why the number is what it is.</p>
+
+      <div class="scroller">
+        <table>
+          <caption><code>ferret-preview::config</code></caption>
+          <thead><tr><th>Constant</th><th>Value</th><th>Reasoning</th></tr></thead>
+          <tbody>
+            <tr><td><code>PREVIEW_DEBOUNCE</code></td><td>80 ms</td><td>Below the ~110 ms a deliberate single arrow-press takes, above the ~30 ms of key-repeat. One read for a sweep, no perceptible delay for a single move.</td></tr>
+            <tr><td><code>LOADING_THRESHOLD</code></td><td>120 ms</td><td>Under this, the skeleton would flash and be gone. Local reads almost never reach it; remote ones always do.</td></tr>
+            <tr><td><code>SNIFF_BYTES</code></td><td>8 KiB</td><td>Every magic number we care about is in the first 32 bytes; 8 KiB is what a binary/UTF-8 decision needs to be reliable, the final bounded read currently rereads this prefix.</td></tr>
+            <tr><td><code>TEXT_BUDGET</code></td><td>2 MiB</td><td>Comfortably past any hand-written source file, well short of a log.</td></tr>
+            <tr><td><code>TEXT_LINE_CAP</code></td><td>20 000 lines</td><td>Not a preference. Upstream states the editor targets “about 50K lines”; 20 000 is a conservative starting point; first-paint performance still requires measurement.</td></tr>
+            <tr><td><code>MARKDOWN_BUDGET</code></td><td>256 KiB</td><td>Initial rendered-mode limit; structural limits and layout measurements decide whether to raise it. Source fallback remains available.</td></tr>
+            <tr><td><code>TABLE_SNIFF_BYTES</code></td><td>64 KiB</td><td>Enough rows for delimiter scoring and header detection to be stable on wide exports.</td></tr>
+            <tr><td><code>TABLE_INITIAL_ROWS</code></td><td>2 000</td><td>Maximum records in the bounded sample; no automatic full-file loading.</td></tr>
+            <tr><td><code>IMAGE_BUDGET</code></td><td>64 MiB</td><td>Covers essentially every photograph; refuses the pathological.</td></tr>
+            <tr><td><code>IMAGE_SOURCE_PIXEL_CAP</code></td><td>16 MP initial</td><td>Conservative fallback for full-raster decoders under the memory budget. Larger sources need proven decoder-level subsampling; otherwise native thumbnail or TooLarge.</td></tr>
+            <tr><td><code>IMAGE_TARGET_LONG_EDGE</code></td><td>4096 px</td><td>Sharp at any pane width on a 2× display, bounded regardless of how wide the window gets.</td></tr>
+            <tr><td><code>ANIMATION_FRAME_CAP</code></td><td>240</td><td>Ten seconds at 24 fps. Past it, the first frame and a footer note.</td></tr>
+            <tr><td><code>HEX_BUDGET</code></td><td>64 KiB</td><td>4 096 rows of hex. Nobody scrolls further, and it bounds the one view with no structure to virtualise against.</td></tr>
+            <tr><td><code>THUMB_PX</code></td><td>128</td><td>Icon view’s largest tile at 2×.</td></tr>
+            <tr><td><code>THUMB_CACHE_BYTES</code></td><td>512 MiB</td><td>Bounded on purpose; evicted oldest-first.</td></tr>
+            <tr><td><code>THUMB_CACHE_AGE</code></td><td>30 days</td><td>A directory not visited in a month should not still be costing disk.</td></tr>
+            <tr><td><code>REMOTE_BUDGET_SCALE</code></td><td>¼</td><td>Applied to every byte budget when <code>capabilities_for</code> reports a non-local backend.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Additional tunables defined with their consumers: <code>TEXT_MAX_LINE_BYTES</code> 16 KiB; Markdown 4,000 blocks / depth 32 / 16 images / 8 MiB image input / 32 MiB decoded images; CSV 2 MiB input / 128 columns / 64 KiB per field / 32 MiB retained cells; <code>PDF_BUDGET</code> 64 MiB; native thumbnail input 64 MiB; shared Rust working-memory target 128 MiB; resident bitmaps 64 MiB; native/PDF helper memory ceiling 256 MiB and deadline 5 seconds. Animation retains at most 32 MiB and 240 frames, stopping at whichever limit comes first; reduced-motion uses frame one. Queue limits: one active plus one replaceable pending preview, two thumbnail jobs, visible tiles plus one viewport lookahead. These are proposed starting values, not measured guarantees.</p>
+      <p>The user-facing subset — pane visible, pane width, word wrap, line numbers, thumbnails on/off, cache size — belongs to <code>ferret-settings</code> as a new <code>preview</code> block beside <code>sidebar</code> and <code>terminal</code>, following the same shape. The repo’s settings test requires every shipped key to be read by something, so keys land with the code that reads them, not before.</p>
+    </section>
+
+    <section id="delivery">
+      <span class="section-tag">Sequence</span>
+      <h2>Build sequence</h2>
+      <p class="intro">After the Phase 1 base gates pass, ordered so each step leaves the app runnable and each gate is passed at the point where it is cheapest. Steps 1–3 establish responsiveness. Markdown, 60+ verified languages, image rendering and reliable PDF page rendering are required release gates; F-36 editing and F-75 overlay follow the viewing experience.</p>
+
+      <div class="phase">
+        <span class="phase-id">01</span>
+        <div>
+          <h3>The pane, with no file reading at all</h3>
+          <p>Right-hand split, drag-resizable divider reusing <code>render_sidebar_divider</code>’s shape, toolbar toggle, persisted width in a new <code>settings.preview</code> block, collapse-before-sidebar at the minimum window width. Renders only the <code>Empty</code>, <code>Multiple</code> and <code>Directory</code> states.</p>
+          <p class="accept"><b>Done when</b> the pane opens, closes, resizes, remembers its width across a restart, and looks right in both themes with the terminal both open and closed.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">02</span>
+        <div>
+          <h3><code>ferret-preview</code>: classification and budgets</h3>
+          <p>New crate, GPUI-free. The name and extension tables, magic-byte sniffing, the binary heuristic, size gating, budgeted reads, line-ending and BOM detection, and the <code>Preview</code> enum. Tests against temp directories cover every branch — this is the crate where the repository guide says tests are worth the most.</p>
+          <p class="accept"><b>Done when</b> <code>cargo test -p ferret-preview</code> passes with no window opened, and classification is correct for a fixture directory containing a <code>Makefile</code>, a mislabelled <code>.txt</code> binary, a UTF-16 file, a 4 GB sparse log and a broken symlink.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">03</span>
+        <div>
+          <h3>Text and code, unhighlighted — and the performance gate</h3>
+          <p>The pipeline end to end: debounce, generation, background read, <code>Preview</code> into the pane, read-only <code>Editor</code>. No colour yet.</p>
+          <p class="accept"><b>Done when</b> arrow-keying the length of the 200,000-entry fixture with the pane open drops no frames and issues a handful of reads rather than one per row. If this step is not clean, nothing later fixes it.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">04</span>
+        <div>
+          <h3>Highlighting: the built-in 35</h3>
+          <p>Enable <code>tree-sitter-languages</code> on the workspace <code>gpui-component</code> dependency. Map the theme’s 41 syntax slots in <code>ferret.json</code> for light and dark. Wire the language name from classification into <code>EditorState</code>.</p>
+          <p class="accept"><b>Done when</b> a Rust, a Python, a TypeScript and a YAML file each render correctly in both themes, and the palette is Ferret’s rather than the library default.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">05</span>
+        <div>
+          <h3>Sixty-plus: the extended grammars and the identification table</h3>
+          <p>The ~30 registrations behind <code>languages-extended</code>, the ~240-entry name table, and the invariant test tying them together.</p>
+          <p class="accept"><b>Done when</b> a Dockerfile, a <code>.tf</code>, a <code>.nix</code> and a <code>.vue</code> highlight; an <code>.applescript</code> renders as labelled plain text; and building with <code>--no-default-features</code> still highlights all 35 built-ins.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">06</span>
+        <div>
+          <h3>Markdown</h3>
+          <p><code>markdown-rs</code> + <code>TextView</code>, retained state, structural resource policy, safe bitmap injection, source toggle and measured layout limits.</p>
+          <p class="accept"><b>Done when</b> this repository’s own <code>README.md</code> renders with working tables and highlighted fences, a relative image resolves, an <code>https://</code> image does not load, and a <code>../../</code> or symlink/junction image does not escape; malformed nesting stays responsive and both themes pass visual review.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">07</span>
+        <div>
+          <h3>Images, then thumbnails</h3>
+          <p>Header probe, capped decode, downscale, <code>RenderImage</code>. Then the disk cache and icon-view tiles, bounded to visible-plus-lookahead on <code>ferret_vfs::pool</code>.</p>
+          <p class="accept"><b>Done when</b> a 9504 × 6336 TIFF produces a bounded native/subsampled preview or an explicit TooLarge state, an animated GIF plays in the pane and not in the tiles, and scrolling an icon view of 500 photographs drops no frames on a second visit.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">08</span>
+        <div>
+          <h3>PDF pages and native format coverage</h3>
+          <p>Bundle and isolate Pdfium, render page one and page navigation on both platforms, then add native thumbnail coverage through <code>ferret-platform</code> with typed COM in its supervised helper.</p>
+          <p class="accept"><b>Done when</b> ordinary PDFs render and change pages on clean macOS and Windows installations without thumbnail handlers; document/media support is tested with handlers both present and absent; and a type neither service knows falls through to <code>Unsupported</code> with <em>Open with…</em> rather than a blank pane.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">09</span>
+        <div>
+          <h3>CSV and TSV grid</h3>
+          <p>Quote-aware delimiter scoring, reversible header detection, bounded sample in the virtualised table, and sample-only sorting.</p>
+          <p class="accept"><b>Done when</b> a semicolon-delimited export with quoted embedded newlines renders correctly, and a 500 MB CSV shows a labelled bounded sample without full-file reads, including a field larger than the field cap.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">10</span>
+        <div>
+          <h3>Edit mode</h3>
+          <p><code>Vfs::write_atomic</code> with the Windows replace path, the Edit button gated on <code>capabilities_for</code>, dirty state, conflict refusal, navigation guard.</p>
+          <p class="accept"><b>Done when</b> a CRLF config file with no trailing newline round-trips byte-identically apart from the intended change, on both platforms, and a file modified externally mid-edit refuses to save with a message that says what happened.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">11</span>
+        <div>
+          <h3>Space-to-preview (F-75)</h3>
+          <p>The overlay on <code>Root</code>’s dialog layer, reusing the computed <code>Preview</code>.</p>
+          <p class="accept"><b>Done when</b> <kbd>Space</kbd> opens instantly on an already-previewed file, works with the pane closed, and does not fire while a text field has focus.</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <span class="phase-id">12</span>
+        <div>
+          <h3>Optional: continuous PDF scrolling</h3>
+          <p>Extend the required paged PDF viewer with a virtualised page list and a bounded nearby-page cache; no per-document bitmap allocation.</p>
+          <p class="accept"><b>Done when</b> a 400-page PDF scrolls with constant resident-page limits; rapid jumps cancel stale renders and repeated zoom does not grow memory.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="verification">
+      <span class="section-tag">Validation</span>
+      <h2>Verification</h2>
+      <div class="scroller">
+        <table>
+          <caption>What must be run, and when</caption>
+          <thead><tr><th>Change</th><th>Minimum validation</th></tr></thead>
+          <tbody>
+            <tr><td><code>ferret-preview</code> logic</td><td><code>just fmt</code>, <code>just check</code>, <code>cargo test -p ferret-preview</code>. Classification and encoding branches get tests against temp directories.</td></tr>
+            <tr><td>Anything the pane’s <code>Render</code> calls</td><td><code>just budget</code>, with the new preview case.</td></tr>
+            <tr><td>The pipeline or the file pane</td><td><code>cargo xtask bench</code>, extended with the arrow-key preview sweep, staying within budget.</td></tr>
+            <tr><td>Any visible change</td><td><code>just dev</code>, checked in light and dark, at the default and the 760 × 480 minimum window.</td></tr>
+            <tr><td>Grammars or the theme’s syntax block</td><td>One file per newly registered language, eyeballed in both themes. A grammar whose queries produce no captures is worse than no grammar.</td></tr>
+            <tr><td><code>ThumbnailProvider</code></td><td>Manual, on both platforms, against the fixture set in step 8. There is no way to unit-test the OS’s own renderer and pretending otherwise wastes everyone’s time.</td></tr>
+            <tr><td><code>write_atomic</code></td><td>The full round-trip test set in §14, on both platforms, before it ships. R-06.</td></tr>
+            <tr><td>Before the PR</td><td><code>just lint</code> and <code>just build</code>, plus screenshots of at least Markdown, code, an image and a PDF in both themes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><strong>Adversarial and release checks:</strong> include a minified one-line file; Markdown reference/HTML images and a request-counting server; symlink and junction escapes; quoted CSV newlines and an oversized cell; animation exceeding aggregate memory; a PDF with hundreds of pages, a protected PDF, and a missing bundled library; hung/crashing helper simulations; same-size/same-mtime external edits; disk-full, sharing violations and save interruption. Repeat selection sweeps, pane/overlay toggles and resize cycles until memory settles. Archive the measurements, grammar coverage manifest and screenshots for both themes and both platforms. Core supported fixtures falling back to metadata fail the release gate.</p>
+      <h3>The fixture this feature needs</h3>
+      <p><code>cargo xtask fixture</code> gains a <code>preview/</code> directory: one file per provider and per hazard. A Markdown document with tables, fences, a relative image and a remote image. Source in a dozen languages including three from the extended set. A PNG, an animated GIF, an SVG, a 64 MP TIFF, a HEIC. A PDF, an MP4, a <code>.docx</code>. A comma CSV, a semicolon CSV with quoted newlines, a TSV. A UTF-16 file, a CRLF file with no trailing newline, a file with a NUL at byte 4000, a 4 GB sparse log, a broken symlink, and a file with no read permission. Every state in §4 should be reachable by arrow-keying through that one directory — which is also the fastest possible manual regression check.</p>
+    </section>
+
+    <section id="risks">
+      <span class="section-tag">Honesty</span>
+      <h2>Risks and remaining questions</h2>
+      <div class="scroller">
+        <table>
+          <caption>Ranked by expected cost</caption>
+          <thead><tr><th>ID</th><th>Risk</th><th>Impact</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>PV-R01</td><td>In-place save corrupts or loses a file. R-06 in miniature, and the only genuinely dangerous thing in this plan.</td><td class="no">critical</td><td>Atomic write, identity check, refusal over resolution, and the round-trip test set as a merge blocker. F-36 follows the core viewing gates.</td></tr>
+            <tr><td>PV-R02</td><td>Arrow-key sweeps drop frames because something O(the file) landed on the render path.</td><td class="no">high</td><td>Step 3 gates on this before any provider exists. <code>just budget</code> and the bench sweep are the mechanical backstops.</td></tr>
+            <tr><td>PV-R03</td><td>Build time and binary size grow noticeably from 30 generated-C grammars, deterring contributors (R-07).</td><td class="hold">medium</td><td>Default-on feature that can be turned off; the 35 built-ins are always available so a fast build is still a working build. Measure the delta in step 5 and record it.</td></tr>
+            <tr><td>PV-R04</td><td>An upstream <code>gpui-component</code> bump changes <code>TextView</code>, <code>Editor</code> or <code>LanguageRegistry</code>. Four of this feature’s five renderers are borrowed (R-08).</td><td class="hold">medium</td><td>The borrowed surface is small and named here. Keep every use inside <code>ferret-ui/src/preview/</code> so a fork or a rewrite is a contained change, which is the same mitigation R-08 already prescribes.</td></tr>
+            <tr><td>PV-R05</td><td>Windows shell thumbnail providers are third-party in-process COM. A bad one can hang or crash the worker.</td><td class="hold">medium</td><td>Supervised helper process, bounded queue, kill/restart on timeout, backoff and metadata fallback. Never on the UI thread, never with the pane blocked on it.</td></tr>
+            <tr><td>PV-R06</td><td>Highlighting looks subtly wrong for extended languages whose upstream queries use capture names our 41 slots do not cover.</td><td class="hold">low</td><td>Dotted-prefix fallback covers most of it; the rest is a hand-written <code>highlights.scm</code> in our tree, which is what gpui-component already does for twelve languages.</td></tr>
+            <tr><td>PV-R07</td><td>The thumbnail cache grows without bound or serves a stale tile after an edit.</td><td class="hold">low</td><td>Keyed on mtime <em>and</em> size; bounded by bytes and age; eviction runs on startup and on a low-frequency timer, never on the render path.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Questions this plan closes</h3>
+      <div class="decision"><b>Q-01</b><p><strong>Decided.</strong> Bundle Pdfium in official builds on both platforms; page one and page navigation are required, independent of installed native handlers. Accept packaging and isolation work to meet the requested PDF experience. Continuous scrolling is a follow-up.</p></div>
+      <div class="decision"><b>Q-02</b><p><strong>Closed.</strong> The built-in 35 always; ~30 more registered through the public registry behind a default-on feature; ~150 further extensions identified but not highlighted. Runtime-loadable grammars are not worth the complexity — the registry already makes compile-time registration a one-line addition per language.</p></div>
+
+      <h3>Preview questions resolved</h3>
+      <div class="decision"><b>PV-Q01</b><p><strong>Selection, consistently.</strong> Exactly one selected item previews; two or more show an aggregate summary in both pane and overlay. Cursor movement inside a multi-selection never secretly picks a file. Use cached selection aggregates; mark unknown sizes as unknown and never scan the directory during Render or marquee movement.</p></div>
+      <div class="decision"><b>PV-Q02</b><p><strong>One pinned edit buffer, no per-tab unsaved workspace.</strong> Guard selection, navigation, tab switch/close, pane collapse, overlay dismissal and app quit with Save / Discard / Cancel on both platforms. Save failure keeps the buffer and focus intact. Cancel restores the original selection; only the explicitly requested transition resumes after Save or Discard. A resize may hide the pane but must not discard its buffer.</p></div>
+      <div class="decision"><b>PV-Q03</b><p><strong>No libheif in this phase.</strong> Use best-effort native thumbnails for HEIC/RAW, with metadata fallback when codecs are absent. Linux remains deferred under D-19; revisit only against demonstrated coverage requirements and measured packaging cost.</p></div>
+      <p>These are planning decisions, not completed implementation. Remaining evidence gates are the Markdown resource hook and layout, grammar ABI/query compatibility, native coverage and process isolation, and save fidelity on each filesystem. A failed gate selects the documented fallback; it does not silently weaken the contract.</p>
+
+    </section>
+
+    <section id="sources">
+      <span class="section-tag">Provenance</span>
+      <h2>Research sources</h2>
+      <p class="intro">Dependency anchors refer to the local Cargo checkouts at the revisions <code>Cargo.lock</code> records. External library/API links below inform choices; proposed budgets and unverified integration details are explicitly acceptance gates. Recheck APIs against the lockfile before implementation.</p>
+      <ul class="sources">
+        <li><a href="https://github.com/wooorm/markdown-rs">markdown-rs</a> — Rust AST parser already locked as <code>markdown 1.0.0</code>; verified local call in <code>gpui-component/crates/ui/src/text/format/markdown.rs</code>. <a href="https://github.com/pulldown-cmark/pulldown-cmark">pulldown-cmark</a> is an event-parser alternative, not a drop-in GPUI view.</li>
+        <li><a href="https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew">ReplaceFileW</a> — Windows replacement and metadata/error semantics; no delete-first fallback.</li>
+        <li><strong>gpui-component</strong> at <code>f6a93f9</code> — <code>crates/ui/src/highlighter/{registry,languages,highlighter}.rs</code> for the public <code>LanguageRegistry::register</code>, the 41 highlight names and the dotted-prefix style fallback; <code>crates/ui/src/text/{text_view,state,utils}.rs</code> for the Markdown view, its background parse and its image-source handling; <code>crates/base/src/input/base/state.rs</code> for <code>EditorState::{language,line_number,soft_wrap}</code> and the “about 50K lines” ceiling; <code>crates/ui/Cargo.toml</code> for the <code>tree-sitter-languages</code> feature set.</li>
+        <li><strong>gpui</strong> at <code>e973593</code> — <code>crates/gpui/src/elements/img.rs</code> for the supported format list, the animated GIF/WebP frame decoding, and the <code>ImageAssetLoader</code> behaviour that PV-D09 and PV-D10 exist to work around.</li>
+        <li><strong>This repository</strong> — <code>crates/ferret-vfs/src/vfs.rs</code> (<code>read</code>’s budget, the absence of a write), <code>crates/ferret-platform/src/{icon,windows,macos}.rs</code> (the <code>IconBitmap</code> contract, the never-on-the-render-path rule, and the existing note about <code>IShellItemImageFactory</code> and COM), <code>crates/ferret-ui/src/browser/{render,sidebar}.rs</code> (the split and divider pattern), <code>AGENTS.md</code> (gates, layering, dependency and configuration conventions), <code>docs/plan.html</code> (F-30–F-36, F-75, Q-01, Q-02, R-06, R-07, R-08), <code>docs/ui-base.html</code> (the reserved toolbar slot and the collapse order).</li>
+        <li><a href="https://docs.rs/objc2-quick-look-thumbnailing/latest/objc2_quick_look_thumbnailing/struct.QLThumbnailGenerator.html">objc2-quick-look-thumbnailing — <code>QLThumbnailGenerator</code></a>, the macOS half of PV-D07.</li>
+        <li><a href="https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishellitemimagefactory-getimage">Microsoft Learn — <code>IShellItemImageFactory::GetImage</code></a>, including the guidance not to call it from the UI thread and the behaviour of <code>SIIGBF_THUMBNAILONLY</code>.</li>
+        <li><a href="https://github.com/ajrcarey/pdfium-render/blob/master/README.md">pdfium-render</a> and <a href="https://crates.io/crates/pdfium-render">its crates.io entry</a> — run-time binding of a separately packaged native library; PV-D08 requires bundling and package smoke tests.</li>
+        <li><a href="https://crates.io/crates/libheif-rs">libheif-rs</a> — considered and rejected for HEIC; recorded here so PV-Q03 has a starting point if Linux returns.</li>
+        <li><a href="https://crates.io/crates/tree-sitter-just">tree-sitter-just</a>, <a href="https://crates.io/crates/tree-sitter-fsharp">tree-sitter-fsharp</a>, <a href="https://crates.io/crates/tree-sitter-ada">tree-sitter-ada</a> — representative of the crates.io grammar crates behind the extended set, each shipping the highlight queries the registry needs.</li>
+      </ul>
+    </section>
+
+    <p class="foot">Ferret — preview pane implementation plan · F-30 · F-31 · F-32 · F-33 · F-34 · F-35 · F-36 · F-75 · phase 3 · 6 September 2026. Read alongside <a href="plan.html">plan.html</a> and <a href="ui-base.html">ui-base.html</a>, which remain authoritative where this document and they disagree.</p>
+  </main>
+</div>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var button = document.getElementById('theme');
+    button.addEventListener('click', function () {
+      var explicit = root.getAttribute('data-theme');
+      var dark = explicit
+        ? explicit === 'dark'
+        : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      root.setAttribute('data-theme', dark ? 'light' : 'dark');
+    });
+  })();
+</script>
+</body>
+</html>
