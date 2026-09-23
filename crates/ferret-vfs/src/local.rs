@@ -617,6 +617,22 @@ fn write_atomic_blocking(
     }
     // Length and mtime first: cheap, and the common conflict shape.
     let current = fs::metadata(local).map_err(|source| VfsError::from_io("read", owned, source))?;
+    // Saving over a directory (or anything non-file) is a programmer error
+    // through the UI gate — refuse it with words, not an `open`/`read` Io.
+    if !current.is_file() {
+        return Err(VfsError::NotADirectory {
+            path: owned.clone(),
+        });
+    }
+    // A read-only file must refuse, not silently replace: on Unix a rename
+    // over a 0444 file succeeds when the directory is writable, while on
+    // Windows `ReplaceFileW` fails — same action, opposite outcomes. Refusing
+    // up front makes both platforms say the same thing.
+    if current.permissions().readonly() {
+        return Err(VfsError::PermissionDenied {
+            path: owned.clone(),
+        });
+    }
     let current_len = current.len();
     let (current_secs, current_nanos) = unix_secs_nanos(current.modified().ok());
     if current_len != expect.len
@@ -657,6 +673,19 @@ fn write_atomic_blocking(
     let cleanup = TempCleanup {
         path: Some(temp.clone()),
     };
+    // Re-verify the symlink check immediately before the rename: a swap
+    // between the check above and the use here would otherwise redirect the
+    // read-check onto a link target while the rename replaces the link.
+    // The window is narrow (a racy restore tool, not a remote attacker), but
+    // the second stat is one syscall.
+    if fs::symlink_metadata(local)
+        .map_err(|source| VfsError::from_io("read", owned, source))?
+        .is_symlink()
+    {
+        return Err(VfsError::Unsupported {
+            capability: "editing linked files",
+        });
+    }
     let result = write_temp_and_replace(local, owned, &temp, contents, &current);
     // A crash mid-write must leave the original intact *and* no litter: the
     // temp file goes on every path where the rename did not consume it.
@@ -699,10 +728,18 @@ fn write_temp_and_replace(
             .map_err(|source| VfsError::from_io("write", owned, source))?;
         file.flush()
             .map_err(|source| VfsError::from_io("write", owned, source))?;
+        // Mode before sync: a crash must not leave new bytes with old mode
+        // unsynced in either order — syncing last covers both.
+        preserve_mode(&file, current);
         #[cfg(unix)]
         file.sync_all()
             .map_err(|source| VfsError::from_io("write", owned, source))?;
-        preserve_mode(&file, current);
+        // Windows durability, not just Rust-buffer flushing: without
+        // `FlushFileBuffers` a power loss after "saved" can lose the file on
+        // Windows while surviving on Unix. Best-effort like the dir sync —
+        // the rename already committed, so retrying is worse than reporting.
+        #[cfg(windows)]
+        flush_file_buffers(&file, owned)?;
     }
     replace_file(temp, local, owned)?;
     // Crash durability for the rename itself, where the platform offers it.
@@ -727,6 +764,13 @@ fn write_temp_and_replace(
 /// readonly bit are *not* carried by this path — `ReplaceFileW` preserves the
 /// destination's ACLs on Windows, while Unix callers with xattrs beyond mode
 /// bits should treat that as a known v1 limitation, not as silent fidelity.
+///
+/// On Windows the temp itself is created with inherited (default) DACLs and
+/// holds the full new bytes until the replace: a file locked down to one user
+/// sits briefly readable by whoever inherits the directory's DACLs. The
+/// committed file keeps the destination's ACLs; the window is the temp's
+/// lifetime only. Creating the temp with a current-user-only DACL first is
+/// the hardening follow-up.
 #[cfg(unix)]
 fn preserve_mode(temp: &fs::File, current: &fs::Metadata) {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -736,6 +780,26 @@ fn preserve_mode(temp: &fs::File, current: &fs::Metadata) {
 
 #[cfg(not(unix))]
 fn preserve_mode(_temp: &fs::File, _current: &fs::Metadata) {}
+
+/// Flush OS buffers for a Windows handle: `File::sync_all` does not exist
+/// there, and `flush()` only empties Rust's buffers into the OS.
+#[cfg(windows)]
+fn flush_file_buffers(file: &fs::File, owned: &VfsPath) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+
+    // SAFETY: the handle is a live open file for this call; the return is
+    // checked and a failure becomes a typed save error, never a silent loss.
+    let ok = unsafe { FlushFileBuffers(file.as_raw_handle() as _) };
+    if ok == 0 {
+        return Err(VfsError::from_io(
+            "write",
+            owned,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
 
 /// Move the flushed temp file over the destination.
 ///
@@ -755,6 +819,16 @@ fn replace_file(temp: &std::path::Path, dest: &std::path::Path, owned: &VfsPath)
 }
 
 /// Verified `ReplaceFileW` semantics: never delete the destination first.
+///
+/// Alternate data streams ride the destination, not the temp: the temp holds
+/// only the default stream, so `dest:Zone.Identifier` (the download-mark of
+/// the web) and custom ADSs are silently discarded by a save. Low blast
+/// radius for code files, real for downloaded ones — a known v1 limitation
+/// alongside the xattr note above, not silent fidelity.
+///
+/// Long paths go extended-length: `std::fs` operations succeed past
+/// `MAX_PATH` while a verbatim `ReplaceFileW` fails, so over-long absolute
+/// paths are prefixed with `\\?\` (and `\\?\UNC\` for UNC) before widening.
 #[cfg(windows)]
 fn replace_file_windows(
     temp: &std::path::Path,
@@ -765,7 +839,47 @@ fn replace_file_windows(
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
     fn wide(path: &std::path::Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain([0]).collect()
+        let extended = extended_length(path);
+        extended.as_os_str().encode_wide().chain([0]).collect()
+    }
+
+    /// Prefix over-long absolute paths for the extended-length API.
+    fn extended_length(path: &std::path::Path) -> std::path::PathBuf {
+        use std::path::{Component, Prefix};
+        let text = path.as_os_str().to_string_lossy();
+        if text.len() < 240 || text.starts_with(r"\\?\") {
+            return path.to_path_buf();
+        }
+        let mut out = String::with_capacity(text.len() + 8);
+        // UNC (`\\host\share`) and device (`\\.\`) paths need their own
+        // prefix; anything else absolute takes the plain one.
+        let mut components = path.components();
+        match components.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::UNC(host, share) => {
+                    out.push_str(r"\\?\UNC\");
+                    out.push_str(&host.to_string_lossy());
+                    out.push('\\');
+                    out.push_str(&share.to_string_lossy());
+                    for rest in components {
+                        out.push('\\');
+                        out.push_str(&rest.as_os_str().to_string_lossy());
+                    }
+                    return std::path::PathBuf::from(out);
+                }
+                _ => return path.to_path_buf(),
+            },
+            Some(Component::RootDir) => {
+                // `C:\…` absolute: strip the leading `\` handling below by
+                // rebuilding from components under the prefix.
+                out.push_str(r"\\?\");
+                out.push_str(&text.trim_start_matches('\\'));
+                return std::path::PathBuf::from(out);
+            }
+            _ => {}
+        }
+        // Relative or oddly-prefixed: leave alone rather than corrupt.
+        path.to_path_buf()
     }
 
     let temp_wide = wide(temp);
@@ -793,10 +907,7 @@ fn replace_file_windows(
 }
 
 fn unix_secs_nanos(modified: Option<std::time::SystemTime>) -> (u64, u32) {
-    modified
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|elapsed| (elapsed.as_secs(), elapsed.subsec_nanos()))
-        .unwrap_or((0, 0))
+    crate::vfs::mtime_parts(modified)
 }
 
 #[cfg(test)]
@@ -1443,6 +1554,85 @@ mod tree_tests {
         assert!(litter.is_empty(), "temp files must not survive: {litter:?}");
         assert_eq!(fs::read(&file).unwrap(), b"original");
 
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_successful_save_leaves_no_litter_either() {
+        let root = tempdir("atomic-litter-ok");
+        let file = root.join("note.txt");
+        fs::write(&file, b"original").unwrap();
+        let path = VfsPath::local(&file);
+        let expect = identity_of(&path, b"original");
+
+        smol::block_on(LocalFs::new().write_atomic(&path, b"updated", expect))
+            .expect("a clean save");
+        let litter: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ferret-save-")
+            })
+            .collect();
+        // On Windows the replacement consumes the temp by contract; on Unix
+        // the rename does. Either way nothing may survive beside the file.
+        assert!(litter.is_empty(), "temp files must not survive: {litter:?}");
+        assert_eq!(fs::read(&file).unwrap(), b"updated");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn saving_a_directory_is_a_named_refusal() {
+        let root = tempdir("atomic-is-dir");
+        let path = VfsPath::local(&root);
+        let expect = FileIdentity::new(0, None, b"");
+
+        let err = smol::block_on(LocalFs::new().write_atomic(&path, b"mine", expect))
+            .expect_err("a directory is not a file");
+        assert!(
+            matches!(err, VfsError::NotADirectory { .. }),
+            "words, not an `open` Io: {err:?}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn saving_a_read_only_file_refuses_on_every_platform() {
+        let root = tempdir("atomic-readonly");
+        let file = root.join("locked.txt");
+        fs::write(&file, b"original").unwrap();
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+        let path = VfsPath::local(&file);
+        let expect = identity_of(&path, b"original");
+
+        let err = smol::block_on(LocalFs::new().write_atomic(&path, b"mine", expect))
+            .expect_err("a read-only file must refuse");
+        assert!(
+            matches!(err, VfsError::PermissionDenied { .. }),
+            "same answer on Unix and Windows: {err:?}"
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"original");
+
+        // Test cleanup only: restore owner writability without the
+        // world-writable side effect `set_readonly(false)` has on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&file, fs::Permissions::from_mode(0o644));
+        }
+        #[cfg(not(unix))]
+        {
+            let mut permissions = fs::metadata(&file).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&file, permissions).unwrap();
+        }
         fs::remove_dir_all(&root).ok();
     }
 }

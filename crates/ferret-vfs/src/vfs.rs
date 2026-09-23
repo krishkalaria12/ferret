@@ -104,10 +104,7 @@ impl FileIdentity {
     /// a file with no trustworthy clock can still be edited, but its time
     /// half of the check is the epoch rather than a lie about precision.
     pub fn new(len: u64, modified: Option<SystemTime>, contents: &[u8]) -> Self {
-        let (mtime_secs, mtime_nanos) = modified
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|elapsed| (elapsed.as_secs(), elapsed.subsec_nanos()))
-            .unwrap_or((0, 0));
+        let (mtime_secs, mtime_nanos) = mtime_parts(modified);
         Self {
             len,
             mtime_secs,
@@ -115,6 +112,17 @@ impl FileIdentity {
             content_hash: content_hash(contents),
         }
     }
+}
+
+/// Split a filesystem timestamp into the `(secs, nanos)` halves [`FileIdentity`]
+/// stores. `None` (or pre-epoch) becomes the epoch `(0, 0)` — the same rule
+/// `LocalFs` applies when it re-derives the halves at save time, so the two
+/// can never drift apart.
+pub(crate) fn mtime_parts(modified: Option<SystemTime>) -> (u64, u32) {
+    modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| (elapsed.as_secs(), elapsed.subsec_nanos()))
+        .unwrap_or((0, 0))
 }
 
 /// The hash half of [`FileIdentity`]: FNV-1a, deterministic across processes.
@@ -251,6 +259,11 @@ pub trait Vfs: Send + Sync + 'static {
     /// changed under the editor, and only the person looking at both versions
     /// can say what should win. Length, mtime *and* content hash are all
     /// compared, so a same-size, same-mtime external edit still conflicts.
+    ///
+    /// Replacing installs a new inode: hard links to the old file keep the
+    /// old bytes, which is standard atomic-save semantics rather than an
+    /// in-place rewrite — but worth stating, because "replace" reads like
+    /// "all names see new bytes".
     ///
     /// Atomic visibility and crash durability are distinct: on Unix the
     /// temporary file and the parent directory are synced where supported,

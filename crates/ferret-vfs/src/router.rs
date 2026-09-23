@@ -18,8 +18,8 @@
 
 use crate::watch::Watch;
 use crate::{
-    Capabilities, Entry, ListingDetail, LocalFs, Metadata, MountId, ReadDirStream, RemoveMode,
-    Result, Vfs, VfsError, VfsPath,
+    Capabilities, Entry, FileIdentity, ListingDetail, LocalFs, Metadata, MountId, ReadDirStream,
+    RemoveMode, Result, Vfs, VfsError, VfsPath,
 };
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -85,18 +85,11 @@ impl Router {
     /// [`Vfs::capabilities`], which can only answer for local disk: whether
     /// there is a trash, a watcher or an atomic rename is a property of the
     /// folder on screen, not of the router.
+    ///
+    /// Thin wrapper over the trait override so existing concrete call sites
+    /// keep compiling unchanged.
     pub fn capabilities_for(&self, path: &VfsPath) -> Capabilities {
-        match path {
-            VfsPath::Local(_) => self.local.capabilities(),
-            VfsPath::Remote { mount, .. } => self
-                .mounts
-                .load()
-                .get(mount)
-                .map(|fs| fs.capabilities())
-                // An unmounted path can do nothing, which is the honest answer
-                // while a tab sits waiting to reconnect.
-                .unwrap_or(UNMOUNTED_CAPABILITIES),
-        }
+        <Self as Vfs>::capabilities_for(self, path)
     }
 
     fn remote(&self, path: &VfsPath) -> Result<Arc<dyn Vfs>> {
@@ -132,16 +125,38 @@ const UNMOUNTED_CAPABILITIES: Capabilities = Capabilities {
     atomic_rename: false,
     atomic_write: false,
     watch: false,
-    metadata_in_listing: true,
+    // A backend with no listing has no metadata to carry: `false` is the
+    // honest "we know nothing" answer a generic caller can rely on.
+    metadata_in_listing: false,
     hidden_in_listing: true,
 };
 
 #[async_trait]
 impl Vfs for Router {
     /// Local disk's capabilities. Anything deciding what a *folder* can do
-    /// wants [`Router::capabilities_for`] instead.
+    /// wants [`Vfs::capabilities_for`] instead.
     fn capabilities(&self) -> Capabilities {
         self.local.capabilities()
+    }
+
+    /// What the backend holding `path` can do.
+    ///
+    /// This is the trait override the docs promise: generic callers through
+    /// `&impl Vfs` or `&dyn Vfs` get per-backend answers, not local caps for
+    /// every path. The inherent [`Router::capabilities_for`] below forwards
+    /// here so concrete and generic receivers agree.
+    fn capabilities_for(&self, path: &VfsPath) -> Capabilities {
+        match path {
+            VfsPath::Local(_) => self.local.capabilities(),
+            VfsPath::Remote { mount, .. } => self
+                .mounts
+                .load()
+                .get(mount)
+                .map(|fs| fs.capabilities())
+                // An unmounted path can do nothing, which is the honest answer
+                // while a tab sits waiting to reconnect.
+                .unwrap_or(UNMOUNTED_CAPABILITIES),
+        }
     }
 
     fn read_dir(&self, dir: &VfsPath, detail: ListingDetail) -> ReadDirStream {
@@ -199,9 +214,12 @@ impl Vfs for Router {
     }
 
     async fn exists(&self, path: &VfsPath) -> bool {
-        match self.backend(path) {
-            Some(fs) => fs.exists(path).await,
-            None => false,
+        match path {
+            VfsPath::Local(_) => self.local.exists(path).await,
+            VfsPath::Remote { .. } => match self.backend(path) {
+                Some(fs) => fs.exists(path).await,
+                None => false,
+            },
         }
     }
 
@@ -216,6 +234,22 @@ impl Vfs for Router {
         match path {
             VfsPath::Local(_) => self.local.read(path, budget).await,
             VfsPath::Remote { .. } => self.remote(path)?.read(path, budget).await,
+        }
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &VfsPath,
+        contents: &[u8],
+        expect: FileIdentity,
+    ) -> Result<FileIdentity> {
+        match path {
+            VfsPath::Local(_) => self.local.write_atomic(path, contents, expect).await,
+            VfsPath::Remote { .. } => {
+                self.remote(path)?
+                    .write_atomic(path, contents, expect)
+                    .await
+            }
         }
     }
 
@@ -444,5 +478,71 @@ mod tests {
             panic!("a remote directory must not report a watcher");
         };
         assert!(matches!(err, VfsError::Unsupported { .. }), "{err}");
+    }
+
+    #[test]
+    fn capabilities_agree_through_generic_and_dynamic_receivers() {
+        let router = Router::new();
+        router.mount(MountId(7), Arc::new(FakeFs::default()));
+
+        fn via_impl(fs: &impl Vfs, path: &VfsPath) -> Capabilities {
+            fs.capabilities_for(path)
+        }
+        // The fake backend refuses watch and atomic rename; local disk offers
+        // both. A generic caller must see the per-backend answer.
+        assert!(!via_impl(&router, &remote("/srv")).watch);
+        assert!(!via_impl(&router, &remote("/srv")).atomic_rename);
+
+        let dynamic: &dyn Vfs = &router;
+        assert!(!dynamic.capabilities_for(&remote("/srv")).watch);
+        assert!(dynamic.capabilities_for(&VfsPath::local("/tmp")).watch);
+    }
+
+    #[test]
+    fn write_atomic_through_the_router_reaches_local_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferret-router-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = VfsPath::local(dir.join("note.txt"));
+        smol::block_on(async {
+            crate::LocalFs
+                .create_file(&path)
+                .await
+                .expect("create file");
+            // A fresh file is empty: length 0, no mtime trust, empty hash.
+            let empty = crate::FileIdentity::new(0, None, b"");
+            // Seed through the real identity path: read back the created file
+            // so the mtime half matches what the filesystem reports.
+            let bytes = crate::LocalFs.read(&path, 1024).await.expect("read");
+            let meta = crate::LocalFs.metadata(&path).await.expect("stat");
+            let seed = crate::FileIdentity::new(meta.len, meta.modified, &bytes);
+            assert_eq!(bytes.len(), 0);
+            let _ = empty;
+            crate::LocalFs
+                .write_atomic(&path, b"old", seed)
+                .await
+                .expect("seed file");
+        });
+        let router = Router::new();
+        let identity = smol::block_on(async {
+            let bytes = router.read(&path, 1024).await.expect("read");
+            let meta = router.metadata(&path).await.expect("stat");
+            let identity = crate::FileIdentity::new(meta.len, meta.modified, &bytes);
+            let next = router
+                .write_atomic(&path, b"new", identity)
+                .await
+                .expect("router forwards atomic save");
+            let bytes = router.read(&path, 1024).await.expect("re-read");
+            assert_eq!(bytes, b"new");
+            next
+        });
+        assert_eq!(identity.len, 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
