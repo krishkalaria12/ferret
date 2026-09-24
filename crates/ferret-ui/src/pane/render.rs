@@ -90,8 +90,8 @@ impl Render for FilePane {
             .min_h_0()
             .key_context(actions::context::FILE_PANE)
             .track_focus(&self.focus)
-            .on_drop(move |dragged: &DraggedPaths, window, _| {
-                queue_drop(&pane_drops, dragged, pane_dir.clone(), window);
+            .on_drop(move |dragged: &DraggedPaths, window, cx| {
+                queue_drop(&pane_drops, dragged, pane_dir.clone(), window, cx);
             })
             .on_prepaint(move |bounds, _, _| {
                 *origin.lock() = bounds.origin;
@@ -214,7 +214,7 @@ impl Render for FilePane {
             .when(self.view_mode == ViewMode::List, |el| {
                 el.child(table)
                     .children(self.render_loading_bar(cx))
-                    .child(self.marquee_overlay())
+                    .child(self.marquee_overlay(cx))
             })
             .when(self.view_mode == ViewMode::Icons, |el| {
                 el.child(self.render_icon_view(cx))
@@ -228,7 +228,7 @@ impl Render for FilePane {
                 |el, overlay| el.child(overlay),
             )
             .when(self.view_mode == ViewMode::Icons, |el| {
-                let overlay = self.marquee_overlay();
+                let overlay = self.marquee_overlay(cx);
                 el.child(overlay)
             })
     }

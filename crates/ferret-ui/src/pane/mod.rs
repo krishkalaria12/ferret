@@ -207,10 +207,7 @@ impl FilePane {
                 .row_selectable(true)
         });
 
-        // Keyboard-first: the pane takes focus when it appears, so arrows and
-        // type-ahead work before the first click.
-        let table_focus = table.read(cx).focus_handle(cx).clone();
-        window.focus(&table_focus, cx);
+        let focus = table.read(cx).focus_handle(cx).clone();
 
         let mut subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
@@ -239,8 +236,6 @@ impl FilePane {
             }),
         ];
 
-        let focus = cx.focus_handle();
-
         // Gate 2: the pane knows when it has focus, which is what switches
         // selection painting between --app-selected and --app-selected-idle.
         let focused_flag = pane_focused.clone();
@@ -253,6 +248,7 @@ impl FilePane {
             idle_flag.store(false, Ordering::Relaxed);
             cx.notify();
         }));
+        window.focus(&focus, cx);
 
         let mut this = Self {
             folder,
@@ -448,9 +444,15 @@ impl FilePane {
                 }
 
                 if modifiers.shift {
-                    self.folder.update(cx, |f, _| f.extend_select(row));
+                    self.folder.update(cx, |f, cx| {
+                        f.extend_select(row);
+                        cx.emit(FolderEvent::SelectionChanged);
+                    });
                 } else if modifiers.platform || modifiers.control {
-                    self.folder.update(cx, |f, _| f.toggle_select(row));
+                    self.folder.update(cx, |f, cx| {
+                        f.toggle_select(row);
+                        cx.emit(FolderEvent::SelectionChanged);
+                    });
                 } else {
                     self.folder.update(cx, |f, cx| {
                         f.select_only(row);

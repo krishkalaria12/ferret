@@ -463,6 +463,14 @@ impl Folder {
         self.entry(self.id_at(row)?)
     }
 
+    pub(crate) fn entry_id_at(&self, row: usize) -> Option<EntryId> {
+        self.id_at(row)
+    }
+
+    pub(crate) fn entry_path(&self, id: EntryId) -> Option<&VfsPath> {
+        self.entry(id).map(|entry| &entry.path)
+    }
+
     /// Indent level of a row: 0 for the browsed directory's own entries.
     pub fn depth_at(&self, row: usize) -> u16 {
         self.order.get(row).map(|r| r.depth).unwrap_or(0)

@@ -34,7 +34,7 @@ pub struct ParsedTable {
 }
 
 /// Delimiter candidates, in the order ties prefer.
-const CANDIDATES: [u8; 4] = [b',', b'\t', b';', b'|'];
+const CANDIDATES: &[u8] = b",\t;|";
 
 /// Score one delimiter: consistency of field counts across the first
 /// complete logical records, parsed with quote awareness.
@@ -119,7 +119,7 @@ fn record_field_counts(sample: &[u8], delimiter: u8, limit: usize) -> Vec<usize>
 pub fn sniff_delimiter(sample: &[u8]) -> u8 {
     let capped = &sample[..sample.len().min(TABLE_SNIFF_BYTES)];
     let mut best = (b',', 0usize);
-    for delimiter in CANDIDATES {
+    for &delimiter in CANDIDATES {
         if let Some(fields) = score_delimiter(capped, delimiter)
             && fields > best.1
         {

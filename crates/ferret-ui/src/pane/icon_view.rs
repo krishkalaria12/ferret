@@ -147,10 +147,10 @@ impl FilePane {
                 .into_any_element(),
             None => inner,
         };
-        let dragged: Arc<[VfsPath]> = if selected {
-            self.folder.read(cx).selected_paths_shared()
+        let dragged = if selected {
+            Some(DraggedPaths::selected(&self.folder, cx))
         } else {
-            Arc::from([entry.path.clone()])
+            DraggedPaths::row(&self.folder, ix, cx)
         };
         let tile_drop_dir = entry.is_dir_like().then(|| entry.path.clone());
         let drops = self.drops.clone();
@@ -164,13 +164,13 @@ impl FilePane {
         div()
             .id(("tile", ix))
             .w(px(Self::TILE_W))
+            .h(px(Self::TILE_H))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(5.))
-            .p(px(8.))
-            .pt(px(10.))
+            .gap(px(Self::GAP))
+            .p(px(7.))
             .rounded(px(6.))
             .bg(fill)
             .when(!selected, |tile| {
@@ -181,21 +181,22 @@ impl FilePane {
             }))
             // Same as the list: the label is derived when a drag starts, not
             // once per tile per frame (A-02a).
-            .on_drag(DraggedPaths { paths: dragged }, move |dragged, _, _, cx| {
-                let label = drag_label(&dragged.paths);
-                cx.new(|_| DragPreview { label })
-            })
-            .external_drag_payload({
-                let folder = self.folder.clone();
-                move |dragged: &DraggedPaths, _, cx| external_payload(dragged, folder.read(cx))
+            .when_some(dragged, |tile, dragged| {
+                tile.on_drag(dragged, move |dragged, _, _, cx| {
+                    let label = drag_label(&dragged.paths(cx));
+                    cx.new(|_| DragPreview { label })
+                })
+                .external_drag_payload(move |dragged: &DraggedPaths, _, cx| {
+                    external_payload(dragged, cx)
+                })
             })
             .when_some(tile_drop_dir, |tile, dest| {
                 let drops = drops.clone();
                 tile.drag_over::<DraggedPaths>(move |style, _, _, _| {
                     style.border_1().border_color(accent)
                 })
-                .on_drop(move |dragged: &DraggedPaths, window, _| {
-                    queue_drop(&drops, dragged, dest.clone(), window);
+                .on_drop(move |dragged: &DraggedPaths, window, cx| {
+                    queue_drop(&drops, dragged, dest.clone(), window, cx);
                 })
             })
             .child(tile_icon)
@@ -379,7 +380,10 @@ impl FilePane {
     fn tile_clicked(&mut self, ix: usize, event: &gpui::ClickEvent, cx: &mut Context<Self>) {
         let modifiers = event.modifiers();
         if modifiers.shift {
-            self.folder.update(cx, |f, _| f.extend_select(ix));
+            self.folder.update(cx, |f, cx| {
+                f.extend_select(ix);
+                cx.emit(FolderEvent::SelectionChanged);
+            });
         } else if modifiers.platform || modifiers.control {
             self.folder.update(cx, |f, cx| {
                 f.toggle_select(ix);
@@ -591,11 +595,12 @@ impl FilePane {
         (ix < n).then_some(ix)
     }
 
-    pub(super) fn marquee_overlay(&self) -> gpui::AnyElement {
+    pub(super) fn marquee_overlay(&self, cx: &App) -> gpui::AnyElement {
         let Some(marquee) = &self.marquee else {
             return div().into_any_element();
         };
         let origin = *self.pane_origin.lock();
+        let accent = cx.theme().primary;
         let left = marquee.start.x.min(marquee.current.x) - origin.x;
         let top = marquee.start.y.min(marquee.current.y) - origin.y;
         let width = (marquee.start.x - marquee.current.x).abs();
@@ -608,8 +613,8 @@ impl FilePane {
             .w(width)
             .h(height)
             .border_1()
-            .border_color(gpui::rgb(0x0a6cff))
-            .bg(gpui::rgb(0x0a6cff).opacity(0.12))
+            .border_color(accent)
+            .bg(accent.opacity(0.12))
             .into_any_element()
     }
 }
@@ -625,6 +630,13 @@ async fn generated_tile(
     cache: &ferret_preview::ThumbCache,
     key: &str,
 ) -> Option<ferret_preview::Bitmap> {
+    let size = match entry.metadata {
+        Some(metadata) => metadata.len,
+        None => fs.metadata(&entry.path).await.ok()?.len,
+    };
+    if size > ferret_preview::config::IMAGE_BUDGET as u64 {
+        return None;
+    }
     let bytes = fs
         .read(&entry.path, ferret_preview::config::IMAGE_BUDGET)
         .await
@@ -650,6 +662,9 @@ async fn native_tile(
         return None;
     }
     let local = entry.path.as_local()?;
+    if !ferret_platform::native_thumbnail_path_allowed(local) {
+        return None;
+    }
     if len > ferret_platform::config::NATIVE_THUMBNAIL_INPUT_LIMIT {
         return None;
     }

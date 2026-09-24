@@ -29,6 +29,60 @@ use std::sync::Arc;
 
 use super::{IconBitmap, Result};
 
+pub fn native_thumbnail_path_allowed(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    if text.starts_with("\\\\")
+        || text.starts_with("//")
+        || text.starts_with("\\\\?\\UNC")
+        || path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("icloud"))
+    {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_local_volume(path)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return windows_fixed_drive(path);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_local_volume(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stats = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let stats = unsafe { stats.assume_init() };
+    stats.f_flags & libc::MNT_LOCAL as u32 != 0
+}
+
+#[cfg(target_os = "windows")]
+fn windows_fixed_drive(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
+
+    let root: Vec<u16> = path.components().next().map_or_else(Vec::new, |component| {
+        component.as_os_str().encode_wide().chain([0]).collect()
+    });
+    !root.is_empty() && GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED
+}
+
 /// A best-effort OS thumbnail for one file.
 ///
 /// Returns `Ok(None)` when the service declines — no handler installed, file
@@ -80,5 +134,23 @@ pub fn thumbnail_available() -> bool {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         compile_error!("Ferret currently targets macOS and Windows only (D-19).")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_paths_reject_cloud_and_unc_inputs() {
+        assert!(!native_thumbnail_path_allowed(Path::new(
+            "/tmp/photo.icloud"
+        )));
+        assert!(!native_thumbnail_path_allowed(Path::new(
+            r"\\server\share\photo.heic"
+        )));
+        assert!(!native_thumbnail_path_allowed(Path::new(
+            r"\\?\UNC\server\share\photo.heic"
+        )));
     }
 }

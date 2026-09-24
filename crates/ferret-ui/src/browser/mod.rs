@@ -17,7 +17,7 @@ use ferret_platform::Place;
 use ferret_settings::{FolderView, ThemeChoice, ViewMode};
 use ferret_terminal::{
     CursorShape, TerminalBackend, TerminalColor, TerminalOptions, TerminalRun, TerminalSession,
-    TerminalStyle,
+    TerminalSnapshot, TerminalStyle,
 };
 use ferret_vfs::{Vfs as _, VfsPath};
 use gpui::{
@@ -198,6 +198,9 @@ pub struct Browser {
     terminal_session: Option<TerminalSession>,
     terminal_error: Option<String>,
     terminal_generation: u64,
+    terminal_snapshot: Option<Arc<TerminalSnapshot>>,
+    terminal_font_family: SharedString,
+    terminal_cell_width: f32,
     terminal_columns: u16,
     terminal_rows: u16,
     /// The newest directory waiting to be injected, held until the shell can
@@ -244,6 +247,7 @@ pub struct Browser {
     filter_input: Entity<InputState>,
     /// Held so the filter input keeps notifying the folder.
     _filter_subscription: Subscription,
+    filter_task: Option<gpui::Task<()>>,
 
     /// Mounted volumes as of the last background probe.
     ///
@@ -369,7 +373,13 @@ impl Browser {
             |this, input, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     let text = input.read(cx).value().trim().to_string();
-                    this.apply_filter((!text.is_empty()).then_some(text), cx);
+                    let filter = (!text.is_empty()).then_some(text);
+                    this.filter_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(80))
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.apply_filter(filter, cx));
+                    }));
                 }
                 InputEvent::PressEnter { .. } => {
                     // Return in the filter field opens the first match.
@@ -395,6 +405,8 @@ impl Browser {
         };
         let browser_handle = cx.weak_entity();
         let preview = cx.new(|cx| PreviewPanel::new(window, cx, browser_handle.clone()));
+        let (terminal_font_family, terminal_cell_width) =
+            terminal_panel::terminal_metrics(cx, window);
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -418,6 +430,9 @@ impl Browser {
             terminal_session: None,
             terminal_error: None,
             terminal_generation: 0,
+            terminal_snapshot: None,
+            terminal_font_family,
+            terminal_cell_width,
             terminal_columns: 120,
             terminal_rows: 24,
             terminal_pending_sync: None,
@@ -434,6 +449,7 @@ impl Browser {
             power_search: None,
             filter_input,
             _filter_subscription: filter_subscription,
+            filter_task: None,
             volumes: Vec::new(),
             places: Vec::new(),
             place_refresh: None,

@@ -122,13 +122,13 @@ impl Browser {
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(record.host.clone()));
         let focus = input.read(cx).focus_handle(cx).clone();
-        window.focus(&focus, cx);
 
         let this = cx.weak_entity();
         let expected = record.host.clone();
         let name = record.display_name();
 
-        window.open_dialog(cx, move |modal, _, cx| {
+        window.open_dialog(cx, move |modal, window, cx| {
+            window.focus(&focus, cx);
             let theme = cx.theme();
             let confirm_input = input.clone();
             let this = this.clone();
@@ -639,11 +639,11 @@ async fn ask_secret(
         });
         let remember = Rc::new(std::cell::Cell::new(false));
         let focus = input.read(cx).focus_handle(cx).clone();
-        window.focus(&focus, cx);
 
         let title = format!("{} needs {}", question.host, question.prompt);
         let offer_remember = question.offer_remember;
-        window.open_dialog(cx, move |modal, _, cx| {
+        window.open_dialog(cx, move |modal, window, cx| {
+            window.focus(&focus, cx);
             let theme = cx.theme();
             let confirm_input = input.clone();
             let confirm_remember = remember.clone();

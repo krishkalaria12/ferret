@@ -28,11 +28,11 @@
 //!
 //! # The floor
 //!
-//! It is not zero and should not be. The Date and Size cells turn a
-//! `SystemTime` and a `u64` into text, and that is a `String` each — real work
-//! for a real result, done once per visible cell. Two allocations per row is
-//! the floor; the budget is set just above it, so anything that reintroduces a
-//! per-row clone, scan, format or lock fails immediately.
+//! It is not zero and should not be. The row's drag payload and the Date and
+//! Size cells each allocate once, and that work happens once per visible row.
+//! Three allocations per row is the floor; the budget is set just above it, so
+//! anything that reintroduces a per-row clone, scan, format or lock fails
+//! immediately.
 //!
 //! Run with `just budget`.
 
@@ -61,11 +61,12 @@ const CHANGED_EVERY: usize = 3;
 
 /// Heap allocations one visible row may cost per frame.
 ///
-/// Two are the Date and Size strings (see the module header). The third is
-/// headroom for allocator bookkeeping and rounding, not licence for a third
-/// per-row allocation. Anything O(the directory) lands orders of magnitude
-/// above this, which is the point — this is a tripwire, not a stopwatch.
-const ALLOCATIONS_PER_ROW: u64 = 3;
+/// Three are the drag payload, Date string and Size string (see the module
+/// header). The fourth is headroom for the selection cache, allocator
+/// bookkeeping and rounding. Anything O(the directory) lands orders of
+/// magnitude above this, which is the point — this is a tripwire, not a
+/// stopwatch.
+const ALLOCATIONS_PER_ROW: u64 = 4;
 
 /// A populated status snapshot over the same names `folder_of` generates.
 ///
@@ -124,7 +125,7 @@ fn folder_of(n: usize) -> Folder {
 /// ask the model something. The results are folded into a return value so
 /// nothing here can be optimised away.
 fn draw_rows(
-    folder: &Folder,
+    folder_entity: &gpui::Entity<Folder>,
     icons: &FileIcons,
     git: &GitHandle,
     cx: &gpui::App,
@@ -133,12 +134,16 @@ fn draw_rows(
 ) -> usize {
     let mut sink = 0usize;
     for row in first..first + count {
+        let folder = folder_entity.read(cx);
         // render_tr: the fill, and the payload a drag would carry.
         let selected = folder.is_row_selected(row);
         sink += selected as usize;
-        if selected {
-            sink += folder.selected_paths_shared().len();
-        }
+        let dragged = std::sync::Arc::new(if selected {
+            crate::pane::DraggedPaths::selected(folder_entity, cx)
+        } else {
+            crate::pane::DraggedPaths::row(folder_entity, row, cx).expect("budget row exists")
+        });
+        sink += std::sync::Arc::strong_count(&dragged);
 
         // Every cell works from its own clone of the entry (D-35).
         let Some(entry) = folder.entry_at(row).cloned() else {
@@ -176,14 +181,16 @@ fn draw_rows(
 async fn frame_allocation_budget(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| cx.set_global(crate::state::load_state()));
 
-    let mut folder = folder_of(DIRECTORY_ROWS);
+    let folder = cx.new(|_| folder_of(DIRECTORY_ROWS));
     let icons = FileIcons::embedded();
     let git = git_of(DIRECTORY_ROWS);
-    assert_eq!(
-        folder.selection_count(),
-        DIRECTORY_ROWS,
-        "the budget is measured with everything selected, which is the worst case"
-    );
+    folder.update(cx, |folder, _| {
+        assert_eq!(
+            folder.selection_count(),
+            DIRECTORY_ROWS,
+            "the budget starts from the fully selected case"
+        );
+    });
 
     let profiler = dhat::Profiler::builder().testing().build();
 
@@ -195,15 +202,17 @@ async fn frame_allocation_budget(cx: &mut gpui::TestAppContext) {
     for frame in 0..FRAMES {
         // Scroll, so no frame draws the same rows as the last.
         let first = (frame * VISIBLE_ROWS) % (DIRECTORY_ROWS - VISIBLE_ROWS);
+        folder.update(cx, |folder, _| {
+            folder.select_rows(first..first + VISIBLE_ROWS - 1);
+        });
         cx.update(|cx| {
             std::hint::black_box(draw_rows(&folder, icons, &git, cx, first, VISIBLE_ROWS))
         });
 
-        // And drag a marquee band across those rows while doing it: a
-        // selection change per frame is what a drag actually does, and it is
-        // the path A-29 made O(the directory).
-        folder.select_rows(first..first + VISIBLE_ROWS);
-        std::hint::black_box((folder.selection_count(), folder.selection_size()));
+        let (count, bytes) = folder.update(cx, |folder, _| {
+            (folder.selection_count(), folder.selection_size())
+        });
+        std::hint::black_box((count, bytes));
     }
     let after = dhat::HeapStats::get();
     drop(profiler);

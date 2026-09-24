@@ -73,10 +73,16 @@ pub(crate) fn verify_at(
         }),
         Err(russh::keys::Error::KeyChanged { .. }) => Ok(HostKeyVerdict::Changed {
             fingerprint: fingerprint(key),
-            file: known_hosts_path().unwrap_or_else(|| PathBuf::from("~/.ssh/known_hosts")),
+            file: path
+                .map(std::path::Path::to_path_buf)
+                .or_else(known_hosts_path)
+                .unwrap_or_else(|| PathBuf::from("~/.ssh/known_hosts")),
         }),
         Err(err) => Err(RemoteError::KnownHosts {
-            file: known_hosts_path().unwrap_or_default(),
+            file: path
+                .map(std::path::Path::to_path_buf)
+                .or_else(known_hosts_path)
+                .unwrap_or_default(),
             message: err.to_string(),
         }),
     }

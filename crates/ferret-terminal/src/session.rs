@@ -184,6 +184,13 @@ impl TerminalSession {
             .clone()
     }
 
+    pub fn generation(&self) -> u64 {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer.write_all(bytes)?;
@@ -237,6 +244,34 @@ impl TerminalSession {
         pixel_width: u16,
         pixel_height: u16,
     ) -> Result<()> {
+        let (reply, response) = mpsc::channel();
+        self.enqueue_resize(columns, rows, pixel_width, pixel_height, Some(reply))?;
+        response.recv().map_err(|_| {
+            TerminalError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "terminal engine stopped",
+            ))
+        })?
+    }
+
+    pub fn resize_async(
+        &self,
+        columns: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<()> {
+        self.enqueue_resize(columns, rows, pixel_width, pixel_height, None)
+    }
+
+    fn enqueue_resize(
+        &self,
+        columns: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+        reply: Option<Sender<Result<()>>>,
+    ) -> Result<()> {
         self.master
             .resize(PtySize {
                 rows,
@@ -245,7 +280,6 @@ impl TerminalSession {
                 pixel_height,
             })
             .map_err(|error| TerminalError::Io(std::io::Error::other(error.to_string())))?;
-        let (reply, response) = mpsc::channel();
         self.engine
             .send(EngineCommand::Resize {
                 columns,
@@ -259,13 +293,7 @@ impl TerminalSession {
                     std::io::ErrorKind::BrokenPipe,
                     "terminal engine stopped",
                 ))
-            })?;
-        response.recv().map_err(|_| {
-            TerminalError::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "terminal engine stopped",
-            ))
-        })?
+            })
     }
 }
 
@@ -277,7 +305,7 @@ enum EngineCommand {
         rows: u16,
         cell_width: u32,
         cell_height: u32,
-        reply: Sender<Result<()>>,
+        reply: Option<Sender<Result<()>>>,
     },
 }
 
@@ -364,7 +392,9 @@ fn spawn_engine(options: &TerminalOptions) -> Result<Engine> {
                                 .write()
                                 .unwrap_or_else(|error| error.into_inner()) = next;
                         });
-                        let _ = reply.send(result);
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
+                        }
                     }
                 }
             }

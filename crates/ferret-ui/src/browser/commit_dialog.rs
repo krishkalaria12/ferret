@@ -297,11 +297,11 @@ impl Browser {
         // keystroke is a modal that gets closed again.
         use gpui::Focusable as _;
         let focus = dialog.read(cx).message.read(cx).focus_handle(cx).clone();
-        window.focus(&focus, cx);
 
         let browser = cx.weak_entity();
         let measured = dialog.read(cx).height.clone();
         window.open_dialog(cx, move |modal, window, cx| {
+            window.focus(&focus, cx);
             let dialog = dialog.clone();
             let browser = browser.clone();
             let committing = dialog.read(cx).committing;

@@ -21,7 +21,7 @@ use grep_matcher::{Match, Matcher as _};
 use grep_searcher::{Searcher, Sink, SinkMatch};
 use smol_str::SmolStr;
 
-use super::db::{Db, FileRow, kind};
+use super::db::{Db, FileRow};
 use super::{Index, policy_matches};
 use crate::config::{
     CONTENT_CANDIDATE_PAGE_SIZE, EVENT_BUFFER, INDEX_CANDIDATE_PAGE_SIZE, MAX_RANGES_PER_PREVIEW,
@@ -201,12 +201,7 @@ impl Query<'_> {
             .filter(|pattern| !pattern.is_empty())
     }
 
-    /// Whether a stored row can possibly satisfy this request.
-    fn row_matches(&self, row: &FileRow) -> bool {
-        let entry_kind = entry_kind_of(row);
-        if !kind_matches(self.request.filters.kind, entry_kind) {
-            return false;
-        }
+    fn row_shape_matches(&self, row: &FileRow) -> bool {
         if !extension_matches(Path::new(&row.path), &self.request.filters.extensions) {
             return false;
         }
@@ -219,6 +214,10 @@ impl Query<'_> {
             return false;
         }
         true
+    }
+
+    fn row_matches(&self, row: &FileRow, kind: EntryKind) -> bool {
+        kind_matches(self.request.filters.kind, kind) && self.row_shape_matches(row)
     }
 }
 
@@ -256,7 +255,7 @@ fn name_results(
                     return Ok(());
                 }
                 stats.entries_seen += 1;
-                if !query.row_matches(&row) {
+                if !query.row_shape_matches(&row) {
                     continue;
                 }
                 let Some(ranges) = query
@@ -266,12 +265,12 @@ fn name_results(
                 else {
                     continue;
                 };
-                // The row said this path existed when it was crawled. Only the
-                // filesystem can say whether it still does, and a result the user
-                // cannot open is worse than a slower search.
-                let Some(metadata) = current_metadata(&row) else {
+                let Some((metadata, kind)) = current_metadata(&row) else {
                     continue;
                 };
+                if !query.row_matches(&row, kind) {
+                    continue;
+                }
                 let path = VfsPath::local(&row.path);
                 let result = SearchResult {
                     id: SearchResultId {
@@ -280,7 +279,7 @@ fn name_results(
                     },
                     path,
                     name: SmolStr::new(&row.name),
-                    kind: entry_kind_of(&row),
+                    kind,
                     metadata: Some(metadata),
                     source: ResultSource::Index,
                     rank: None,
@@ -354,7 +353,7 @@ fn content_results(
             let Some(row) = db.file(&hit.path)? else {
                 continue;
             };
-            if !query.row_matches(&row) {
+            if !query.row_shape_matches(&row) {
                 continue;
             }
             if let Some(name_matcher) = query.name_matcher
@@ -362,14 +361,22 @@ fn content_results(
             {
                 continue;
             }
-            let Some(metadata) = current_metadata(&row) else {
+            let Some((metadata, kind)) = current_metadata(&row) else {
                 continue;
             };
-            // The snippet comes from the file as it is now, through the same
-            // searcher the live path uses. A document that has since changed
-            // simply yields no matches here and drops out — which is the index
-            // correcting itself at the only moment it matters.
-            if !send_matches(&mut searcher, matcher, &row, &hit, metadata, sink, stats) {
+            if !query.row_matches(&row, kind) {
+                continue;
+            }
+            if !send_matches(
+                &mut searcher,
+                matcher,
+                &row,
+                &hit,
+                kind,
+                metadata,
+                sink,
+                stats,
+            ) {
                 return Ok(());
             }
         }
@@ -384,11 +391,13 @@ fn content_results(
 
 /// Runs the content matcher over one candidate file and turns every hit into a
 /// row identical in shape to the live path's.
+#[allow(clippy::too_many_arguments)]
 fn send_matches(
     searcher: &mut Searcher,
     matcher: &ContentMatcher,
     row: &FileRow,
     hit: &super::content::RankedPath,
+    kind: EntryKind,
     metadata: Metadata,
     event_sink: &mut EventSink,
     stats: &mut SearchStats,
@@ -397,6 +406,7 @@ fn send_matches(
     let result_sink = ResultSink {
         matcher: &matcher.matcher,
         row,
+        kind,
         rank: hit.rank,
         metadata,
         event_sink,
@@ -410,6 +420,7 @@ fn send_matches(
 struct ResultSink<'a> {
     matcher: &'a grep_regex::RegexMatcher,
     row: &'a FileRow,
+    kind: EntryKind,
     rank: u32,
     metadata: Metadata,
     event_sink: &'a mut EventSink,
@@ -451,7 +462,7 @@ impl Sink for ResultSink<'_> {
             },
             path,
             name: SmolStr::new(&self.row.name),
-            kind: entry_kind_of(self.row),
+            kind: self.kind,
             metadata: Some(self.metadata),
             source: ResultSource::Index,
             rank: Some(self.rank),
@@ -468,26 +479,32 @@ impl Sink for ResultSink<'_> {
 }
 
 /// Re-reads a candidate's metadata, or `None` if it is gone.
-fn current_metadata(row: &FileRow) -> Option<Metadata> {
+fn current_metadata(row: &FileRow) -> Option<(Metadata, EntryKind)> {
     let metadata = std::fs::symlink_metadata(&row.path).ok()?;
-    Some(Metadata {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-        hidden: row.hidden,
-    })
-}
-
-fn entry_kind_of(row: &FileRow) -> EntryKind {
-    match row.kind {
-        kind::DIR => EntryKind::Dir,
-        kind::SYMLINK_FILE => EntryKind::Symlink {
-            target_kind: Some(ferret_vfs::SymlinkTarget::File),
+    let kind = if metadata.file_type().is_dir() {
+        EntryKind::Dir
+    } else if metadata.file_type().is_file() {
+        EntryKind::File
+    } else if metadata.file_type().is_symlink() {
+        let target = std::fs::metadata(&row.path).ok();
+        EntryKind::Symlink {
+            target_kind: target.map(|target| {
+                if target.is_dir() {
+                    ferret_vfs::SymlinkTarget::Dir
+                } else {
+                    ferret_vfs::SymlinkTarget::File
+                }
+            }),
+        }
+    } else {
+        EntryKind::Other
+    };
+    Some((
+        Metadata {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            hidden: row.hidden,
         },
-        kind::SYMLINK_DIR => EntryKind::Symlink {
-            target_kind: Some(ferret_vfs::SymlinkTarget::Dir),
-        },
-        kind::SYMLINK_BROKEN => EntryKind::Symlink { target_kind: None },
-        kind::OTHER => EntryKind::Other,
-        _ => EntryKind::File,
-    }
+        kind,
+    ))
 }

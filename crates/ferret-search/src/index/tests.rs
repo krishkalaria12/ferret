@@ -10,9 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::{
-    CaseMode, ContentQuery, HybridSearchService, MatchKey, NameQuery, PatternSyntax, ResultSource,
-    SearchEvent, SearchFilters, SearchGeneration, SearchLimits, SearchMatch, SearchRequest,
-    SearchResult, SearchScope, SearchScopeKind, SearchService, SearchSession,
+    CaseMode, ContentQuery, EntryKindFilter, HybridSearchService, MatchKey, NameQuery,
+    PatternSyntax, ResultSource, SearchEvent, SearchFilters, SearchGeneration, SearchLimits,
+    SearchMatch, SearchRequest, SearchResult, SearchScope, SearchScopeKind, SearchService,
+    SearchSession,
 };
 
 /// A crawl root and an index directory that is *not* inside it.
@@ -180,6 +181,33 @@ fn a_file_deleted_since_the_crawl_is_not_offered() {
     );
 
     assert_eq!(names(&found), vec!["real.txt"]);
+}
+
+#[test]
+fn indexed_results_use_the_current_entry_kind() {
+    let fixture = Fixture::new("kind-change");
+    let path = fixture.write("changed.txt", "x");
+    let index = Arc::new(fixture.crawled());
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+
+    let mut files = request(&fixture.root, "changed");
+    files.filters.kind = EntryKindFilter::Files;
+    let file_results = results(
+        IndexSearchService::new(Arc::clone(&index))
+            .start(files)
+            .unwrap(),
+    );
+    assert!(file_results.is_empty());
+
+    let mut folders = request(&fixture.root, "changed");
+    folders.filters.kind = EntryKindFilter::Folders;
+    let folder_results = results(
+        IndexSearchService::new(Arc::clone(&index))
+            .start(folders)
+            .unwrap(),
+    );
+    assert_eq!(names(&folder_results), vec!["changed.txt"]);
 }
 
 #[test]

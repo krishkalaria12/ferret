@@ -48,6 +48,7 @@ impl PreviewPanel {
         v_flex()
             .id("preview-panel")
             .key_context(context::PREVIEW)
+            .track_focus(&self.focus)
             .size_full()
             .bg(bg)
             .border_l_1()
@@ -282,27 +283,29 @@ impl PreviewPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(message.clone()),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("preview-open")
-                            .small()
-                            .label("Open with…")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_current(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("preview-reveal")
-                            .small()
-                            .ghost()
-                            .label("Reveal")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.reveal_current(window, cx);
-                            })),
-                    ),
-            )
+            .when(entry.path.is_local(), |el| {
+                el.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("preview-open")
+                                .small()
+                                .label("Open with…")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_current(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("preview-reveal")
+                                .small()
+                                .ghost()
+                                .label("Reveal")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.reveal_current(window, cx);
+                                })),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -339,11 +342,14 @@ impl PreviewPanel {
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let browser = self.browser.clone();
-        TextView::new(&self.docview)
-            .selectable(true)
-            .on_link_click(move |url, _, window, cx| {
-                handle_markdown_link(&browser, base.clone(), remote, url, window, cx);
-            })
+        gpui::image_cache(self.image_cache.clone()).child(
+            TextView::new(&self.docview)
+                .scrollable(true)
+                .selectable(true)
+                .on_link_click(move |url, _, window, cx| {
+                    handle_markdown_link(&browser, base.clone(), remote, url, window, cx);
+                }),
+        )
     }
 
     fn render_footer(&self, footer: SharedString, cx: &mut Context<Self>) -> impl IntoElement {

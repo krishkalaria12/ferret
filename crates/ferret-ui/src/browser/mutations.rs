@@ -362,13 +362,14 @@ impl Browser {
         }
         let fs = cx.global::<FerretState>().fs.clone();
         let window_handle = window.window_handle();
+        let initiating_folder = self.active().folder.clone();
+        let remote_endpoints = transfer_endpoints(&sources, &dest);
         // Names are settled here, so a copy beside its original gets "file 2"
         // rather than failing or overwriting.
         let planned = self.plan_names(sources, &dest, cx);
-        // Either end being remote means no watcher saw the change.
-        let needs_reload = !dest.is_local() || planned.iter().any(|(source, _)| !source.is_local());
+        let needs_reload = !remote_endpoints.is_empty();
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_, cx| {
             let mut failures = Vec::new();
 
             for (src, target) in planned {
@@ -395,7 +396,7 @@ impl Browser {
             }
 
             if needs_reload {
-                let _ = this.update(cx, |this, cx| this.refresh(cx));
+                Browser::reload_transfer_folder(&initiating_folder, &fs, &remote_endpoints, cx);
             }
 
             let verb = if force_copy { "copy" } else { "move" };
@@ -534,6 +535,18 @@ impl Browser {
             cx.notify();
         });
         cx.notify();
+    }
+
+    pub(super) fn reload_transfer_folder(
+        folder: &Entity<Folder>,
+        fs: &ferret_vfs::Router,
+        endpoints: &[VfsPath],
+        cx: &mut gpui::AsyncApp,
+    ) {
+        for endpoint in endpoints {
+            fs.invalidate(endpoint);
+        }
+        folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -680,6 +693,21 @@ impl Browser {
     }
 }
 
+pub(super) fn transfer_endpoints(sources: &[VfsPath], dest: &VfsPath) -> Vec<VfsPath> {
+    let mut endpoints = Vec::new();
+    for source in sources.iter().filter(|path| !path.is_local()) {
+        if let Some(parent) = source.parent()
+            && !endpoints.contains(&parent)
+        {
+            endpoints.push(parent);
+        }
+    }
+    if !dest.is_local() && !endpoints.contains(dest) {
+        endpoints.push(dest.clone());
+    }
+    endpoints
+}
+
 /// Whatever files the system pasteboard is holding.
 ///
 /// Two shapes are accepted because only one of them round-trips today:
@@ -758,6 +786,27 @@ fn same_backend(a: &VfsPath, b: &VfsPath) -> bool {
 mod transfer_routing_tests {
     use super::*;
     use ferret_vfs::MountId;
+
+    #[test]
+    fn only_remote_transfer_endpoints_are_reloaded() {
+        let mount = MountId(1);
+        let sources = [
+            VfsPath::local("/tmp/a"),
+            VfsPath::remote(mount, "/srv/b"),
+            VfsPath::remote(mount, "/srv/c"),
+        ];
+        let dest = VfsPath::remote(mount, "/srv/dest");
+        assert_eq!(
+            transfer_endpoints(&sources, &dest),
+            [
+                VfsPath::remote(mount, "/srv"),
+                VfsPath::remote(mount, "/srv/dest")
+            ]
+        );
+        assert!(
+            transfer_endpoints(&[VfsPath::local("/tmp/a")], &VfsPath::local("/tmp")).is_empty()
+        );
+    }
 
     #[test]
     fn a_drop_within_one_backend_is_not_a_transfer() {

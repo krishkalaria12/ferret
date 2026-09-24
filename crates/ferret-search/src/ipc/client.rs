@@ -29,7 +29,8 @@ use super::{
     transport, write_frame,
 };
 use crate::config::{
-    DAEMON_CONNECT_RETRY, DAEMON_LAUNCH_ATTEMPTS, DAEMON_LAUNCH_TIMEOUT, EVENT_BUFFER,
+    DAEMON_CONNECT_RETRY, DAEMON_HANDSHAKE_TIMEOUT, DAEMON_LAUNCH_ATTEMPTS, DAEMON_LAUNCH_TIMEOUT,
+    EVENT_BUFFER,
 };
 use crate::{
     IndexStatus, Result, SearchError, SearchEvent, SearchFinished, SearchRequest, SearchSession,
@@ -181,6 +182,12 @@ impl DaemonClient {
 fn attach() -> Result<LocalSocketStream> {
     let name = endpoint::socket_name()?;
     let stream = LocalSocketStream::connect(name).map_err(transport)?;
+    stream
+        .set_recv_timeout(Some(DAEMON_HANDSHAKE_TIMEOUT))
+        .map_err(transport)?;
+    stream
+        .set_send_timeout(Some(DAEMON_HANDSHAKE_TIMEOUT))
+        .map_err(transport)?;
     let nonce = endpoint::read_nonce()?;
     {
         let mut writer = BufWriter::new(&stream);
@@ -194,7 +201,11 @@ fn attach() -> Result<LocalSocketStream> {
     }
     let mut reader = std::io::BufReader::new(&stream);
     match read_frame(&mut reader)? {
-        Some(ServerMessage::Welcome { .. }) => Ok(stream),
+        Some(ServerMessage::Welcome { .. }) => {
+            stream.set_recv_timeout(None).map_err(transport)?;
+            stream.set_send_timeout(None).map_err(transport)?;
+            Ok(stream)
+        }
         Some(ServerMessage::Incompatible { protocol }) => Err(SearchError::ProtocolMismatch {
             expected: PROTOCOL_VERSION,
             found: protocol,

@@ -174,6 +174,7 @@ impl Render for Browser {
             .on_action(cx.listener(|this, _: &actions::ClearFilter, window, cx| {
                 // Both halves, explicitly: `set_value` emits no change event,
                 // so the field and the listing would otherwise disagree.
+                this.filter_task = None;
                 this.filter_input.update(cx, |state, cx| {
                     state.set_value("", window, cx);
                 });

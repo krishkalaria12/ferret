@@ -4,6 +4,8 @@
 //! A tab owns its folder, pane and history, so switching tabs swaps
 //! entities rather than re-listing a directory that is already loaded.
 
+use gpui::Focusable as _;
+
 use super::*;
 
 impl Browser {
@@ -145,6 +147,8 @@ impl Browser {
         self.git_follow(&directory, cx);
         let folder = self.active().folder.clone();
         self.sync_preview(&folder, false, window, cx);
+        let focus = self.active().pane.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -182,12 +186,15 @@ impl Browser {
         tab._subscriptions = subscriptions;
 
         self.path_editing = None;
+        self.filter_task = None;
         // A filter belongs to the folder you typed it in, not to the tab.
         self.filter_input.update(cx, |state, cx| {
             state.set_value("", window, cx);
         });
         self.sync_terminal_to(&terminal_dir, cx);
         self.git_follow(&terminal_dir, cx);
+        let folder = self.active().folder.clone();
+        self.sync_preview(&folder, false, window, cx);
         cx.notify();
     }
 
@@ -208,6 +215,10 @@ impl Browser {
         let Some(previous) = self.active().back.last().cloned() else {
             return;
         };
+        if self.preview.read(cx).is_dirty() {
+            self.open_edit_guard(preview_panel::GuardPending::Back, window, cx);
+            return;
+        }
         self.swap_active_tab(previous, HistoryOp::Back, window, cx);
     }
 
@@ -215,6 +226,10 @@ impl Browser {
         let Some(next) = self.active().forward.last().cloned() else {
             return;
         };
+        if self.preview.read(cx).is_dirty() {
+            self.open_edit_guard(preview_panel::GuardPending::Forward, window, cx);
+            return;
+        }
         self.swap_active_tab(next, HistoryOp::Forward, window, cx);
     }
 
@@ -235,6 +250,7 @@ impl Browser {
     /// where a stat takes seconds, and this is reachable from a button.
     pub(super) fn go_to_existing_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let start = self.active().folder.read(cx).dir.clone();
+        let expected_dir = start.clone();
         let home = cx.global::<FerretState>().home_dir();
         let window_handle = window.window_handle();
         let this = cx.weak_entity();
@@ -256,7 +272,11 @@ impl Browser {
 
             let _ = window_handle.update(cx, |_, window, cx| {
                 if let Some(this) = this.upgrade() {
-                    this.update(cx, |this, cx| this.navigate(target, window, cx));
+                    this.update(cx, |this, cx| {
+                        if this.active().folder.read(cx).dir == expected_dir {
+                            this.navigate(target, window, cx);
+                        }
+                    });
                 }
             });
         })
@@ -298,6 +318,10 @@ impl Browser {
             // segment has to follow the tab that is now on screen rather than
             // keep describing one nobody can see.
             self.git_follow(&directory, cx);
+            let folder = self.active().folder.clone();
+            self.sync_preview(&folder, false, window, cx);
+            let focus = self.active().pane.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
         }
         cx.notify();
     }

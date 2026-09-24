@@ -159,6 +159,13 @@ pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Cold start has to open SQLite and Tantivy before it binds. Past this the
 /// client stops waiting and searches live, which is a slower answer rather
 /// than no answer.
+pub const DAEMON_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a client waits for a freshly launched daemon to accept.
+///
+/// Cold start has to open SQLite and Tantivy before it binds. Past this the
+/// client stops waiting and searches live, which is a slower answer rather
+/// than no answer.
 pub const DAEMON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Interval between connection attempts while waiting for a launching daemon.

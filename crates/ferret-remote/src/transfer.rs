@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::future::try_join_all;
 use russh_sftp::client::error::Error as SftpError;
@@ -102,6 +103,29 @@ struct PlannedFile {
     /// Shown in progress; the file's own name, not the whole path.
     name: String,
     bytes: u64,
+}
+
+static TRANSFER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn transfer_suffix() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        TRANSFER_COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
+}
+
+fn remote_part_path(remote: &str) -> String {
+    format!("{remote}{PART_SUFFIX}-{}", transfer_suffix())
+}
+
+fn local_part_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    parent.join(format!(".{name}{PART_SUFFIX}-{}", transfer_suffix()))
 }
 
 impl SftpVfs {
@@ -274,6 +298,10 @@ async fn plan_upload(
             capability: "uploading to a local directory",
         });
     };
+    crate::sftp::validate_path(dest).map_err(|message| RemoteError::Server {
+        path: dest.clone(),
+        message: message.into(),
+    })?;
     let locals: Vec<PathBuf> = sources
         .iter()
         .filter_map(|source| match source {
@@ -281,6 +309,11 @@ async fn plan_upload(
             TransferSource::Remote(_) => None,
         })
         .collect();
+    if locals.len() != sources.len() {
+        return Err(RemoteError::Unsupported {
+            capability: "uploading remote sources as local files",
+        });
+    }
 
     let dest = dest.trim_end_matches('/').to_string();
     let stop = CancelFlag::default();
@@ -306,17 +339,18 @@ async fn plan_upload(
         return Err(RemoteError::Cancelled);
     }
 
-    // Every directory the plan needs, deepest last, created before any file
-    // lands in it. `mkdir` on one that exists is not an error worth stopping
-    // for — another transfer may have made it a second ago.
     for directory in &expanded.directories {
         if cancelled() {
             return Err(RemoteError::Cancelled);
         }
-        let _ = sftp
-            .raw_session()
-            .mkdir(directory.clone(), FileAttributes::empty())
-            .await;
+        let raw = sftp.raw_session();
+        match raw.mkdir(directory.clone(), FileAttributes::empty()).await {
+            Ok(_) => {}
+            Err(error) => match raw.lstat(directory.clone()).await {
+                Ok(attrs) if attrs.attrs.is_dir() => {}
+                _ => return Err(server_error(directory, error)),
+            },
+        }
     }
     Ok(expanded.files)
 }
@@ -335,8 +369,14 @@ async fn plan_download(
     let mut files = Vec::new();
     for source in sources {
         let TransferSource::Remote(path) = source else {
-            continue;
+            return Err(RemoteError::Unsupported {
+                capability: "downloading local sources as remote files",
+            });
         };
+        crate::sftp::validate_path(path).map_err(|message| RemoteError::Server {
+            path: path.clone(),
+            message: message.into(),
+        })?;
         collect_remote(sftp, path, dest, &mut files, cancelled).await?;
     }
     Ok(files)
@@ -371,7 +411,7 @@ fn expand_local(sources: &[PathBuf], dest: &str, stop: &CancelFlag) -> Result<Ex
         let Some(name) = source.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let target = format!("{dest}/{name}");
+        let target = crate::sftp::join_remote(dest, name);
         walk_local(source, &target, &mut files, &mut directories, stop)?;
     }
     Ok(ExpandedUpload { files, directories })
@@ -439,6 +479,10 @@ fn walk_local(
                 suffix.clear();
                 break;
             };
+            if !crate::sftp::valid_name(part) {
+                suffix.clear();
+                break;
+            }
             suffix.push('/');
             suffix.push_str(part);
         }
@@ -479,11 +523,13 @@ fn collect_remote<'a>(
     cancelled: &'a (impl Fn() -> bool + Send + Sync),
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
-        // Walking a server's tree is round trips, so a cancelled job must stop
-        // here rather than at the first byte it would have moved.
         if cancelled() {
             return Err(RemoteError::Cancelled);
         }
+        crate::sftp::validate_path(path).map_err(|message| RemoteError::Server {
+            path: path.to_string(),
+            message: message.into(),
+        })?;
         let raw = sftp.raw_session();
         let attrs = raw
             .lstat(path.to_string())
@@ -533,7 +579,19 @@ fn collect_remote<'a>(
             }
             let _ = raw.close(handle).await;
             for child in children {
-                let child_path = format!("{}/{}", path.trim_end_matches('/'), child);
+                if !crate::sftp::valid_name(&child) {
+                    return Err(RemoteError::MalformedName {
+                        host: sftp.host().to_string(),
+                        name: child,
+                    });
+                }
+                crate::sftp::safe_local_name(&child).map_err(|message| {
+                    RemoteError::MalformedName {
+                        host: sftp.host().to_string(),
+                        name: format!("{child} ({message})"),
+                    }
+                })?;
+                let child_path = crate::sftp::join_remote(path, &child);
                 collect_remote(sftp, &child_path, &local, files, cancelled).await?;
             }
             return Ok(());
@@ -558,7 +616,7 @@ async fn upload_one(
     bytes_total: u64,
 ) -> Result<()> {
     let raw = sftp.raw_session();
-    let part = format!("{}{PART_SUFFIX}", file.remote);
+    let part = remote_part_path(&file.remote);
 
     let mut source =
         tokio::fs::File::open(&file.local)
@@ -571,7 +629,7 @@ async fn upload_one(
     let handle = raw
         .open(
             part.clone(),
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
             FileAttributes::empty(),
         )
         .await
@@ -648,13 +706,14 @@ async fn upload_one(
             .await;
     }
 
-    // Replacing means removing first: SFTP v3's rename refuses an existing
-    // destination, and the atomic extension is not guaranteed to be there.
-    let _ = raw.remove(file.remote.clone()).await;
-    raw.rename(part.clone(), file.remote.clone())
+    let from = ferret_vfs::VfsPath::remote(sftp.mount_id(), part.clone());
+    let to = ferret_vfs::VfsPath::remote(sftp.mount_id(), file.remote.clone());
+    sftp.replace_remote(&from, &to)
         .await
-        .map(drop)
-        .map_err(|error| server_error(&file.remote, error))
+        .map_err(|error| RemoteError::Server {
+            path: file.remote.clone(),
+            message: error.to_string(),
+        })
 }
 
 /// Copy one file from the server through a part file.
@@ -666,14 +725,7 @@ async fn download_one(
     bytes_total: u64,
 ) -> Result<()> {
     let raw = sftp.raw_session();
-    let part = file.local.with_extension(format!(
-        "{}{}",
-        file.local
-            .extension()
-            .map(|e| e.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        PART_SUFFIX
-    ));
+    let part = local_part_path(&file.local);
 
     if let Some(parent) = part.parent() {
         std::fs::create_dir_all(parent).map_err(|error| RemoteError::Server {
@@ -681,7 +733,7 @@ async fn download_one(
             message: error.to_string(),
         })?;
     }
-    let mut sink = tokio::fs::File::create(&part)
+    let mut sink = create_private_file(&part)
         .await
         .map_err(|error| RemoteError::Server {
             path: part.display().to_string(),
@@ -790,10 +842,14 @@ async fn download_one(
     }
 
     let _ = raw.close(handle).await;
-    sink.flush().await.map_err(|error| RemoteError::Server {
-        path: part.display().to_string(),
-        message: error.to_string(),
-    })?;
+    if let Err(error) = sink.flush().await {
+        drop(sink);
+        let _ = std::fs::remove_file(&part);
+        return Err(RemoteError::Server {
+            path: part.display().to_string(),
+            message: error.to_string(),
+        });
+    }
     drop(sink);
 
     replace_file(&part, &file.local).map_err(|error| {
@@ -805,6 +861,16 @@ async fn download_one(
     })
 }
 
+async fn create_private_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    options.open(path).await
+}
+
 /// Move a finished part file over its destination.
 ///
 /// `std::fs::rename` replaces the destination on Unix and *fails* on Windows
@@ -813,19 +879,53 @@ async fn download_one(
 /// leaving the stale destination in place. Both platforms are supported, so
 /// both have to work.
 ///
-/// The Windows path is a remove followed by a rename, which is not atomic —
-/// that is the platform's limitation rather than a choice, and the window is
-/// between two local metadata operations rather than around the transfer.
+/// The Windows path uses a backup rename and rolls it back if the final rename
+/// fails; that is not atomic, but it does not discard the previous destination
+/// on an ordinary rename failure.
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
     #[cfg(windows)]
     {
-        match std::fs::remove_file(to) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let backup = to.with_file_name(format!(
+            ".{}ferret-replace-{}",
+            to.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("download"),
+            transfer_suffix(),
+        ));
+        let existing = match std::fs::symlink_metadata(to) {
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(std::io::Error::other("the destination is a directory"));
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error),
+        };
+        if existing {
+            std::fs::rename(to, &backup)?;
+        }
+        match std::fs::rename(from, to) {
+            Ok(()) => {
+                if existing {
+                    let _ = std::fs::remove_file(&backup);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if existing {
+                    if let Err(rollback) = std::fs::rename(&backup, to) {
+                        return Err(std::io::Error::other(format!(
+                            "replacement failed: {error}; rollback failed: {rollback}"
+                        )));
+                    }
+                }
+                Err(error)
+            }
         }
     }
-    std::fs::rename(from, to)
 }
 
 /// Read until the buffer is full or the file ends.

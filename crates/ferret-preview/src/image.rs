@@ -98,7 +98,8 @@ impl Bitmap {
         }
         let mut bgra = rgba;
         let mut transparent = false;
-        for pixel in bgra.chunks_exact_mut(4) {
+        let (pixels, _) = bgra.as_chunks_mut::<4>();
+        for pixel in pixels {
             let alpha = pixel[3];
             if alpha == 0 {
                 pixel[0] = 0;
@@ -255,7 +256,7 @@ pub fn probe_dimensions(bytes: &[u8], format: ::image::ImageFormat) -> Option<(u
     match format {
         ::image::ImageFormat::Png => {
             // Signature, IHDR length+type, then width/height big-endian.
-            if bytes.len() >= 24 && bytes[12..16] == [b'I', b'H', b'D', b'R'][..] {
+            if bytes.len() >= 24 && bytes[12..16] == *b"IHDR" {
                 Some((
                     u32::from_be_bytes(bytes[16..20].try_into().ok()?),
                     u32::from_be_bytes(bytes[20..24].try_into().ok()?),
@@ -623,7 +624,8 @@ fn downscale_to_bitmap(image: ::image::DynamicImage, natural: (u32, u32)) -> Bit
 
 fn rgba_to_bgra(mut bytes: Vec<u8>) -> (Vec<u8>, bool) {
     let mut transparent = false;
-    for pixel in bytes.chunks_exact_mut(4) {
+    let (pixels, _) = bytes.as_chunks_mut::<4>();
+    for pixel in pixels {
         pixel.swap(0, 2);
         transparent |= pixel[3] != 255;
     }
@@ -636,7 +638,8 @@ fn rgba_to_bgra(mut bytes: Vec<u8>) -> (Vec<u8>, bool) {
 /// where no swizzle pass ran to notice. One linear scan, off the render
 /// path, so the view knows when the checkerboard matters.
 pub fn detect_transparency(bgra: &[u8]) -> bool {
-    bgra.chunks_exact(4).any(|pixel| pixel[3] != 255)
+    let (pixels, _) = bgra.as_chunks::<4>();
+    pixels.iter().any(|pixel| pixel[3] != 255)
 }
 
 #[cfg(test)]

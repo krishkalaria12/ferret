@@ -124,6 +124,7 @@ impl Browser {
             );
             return;
         }
+        let initiating_folder = self.active().folder.clone();
 
         // Connecting first means there is a home directory to pre-fill and a
         // backend to hand the files to. A drop onto an idle row therefore
@@ -132,7 +133,7 @@ impl Browser {
         // would be answering a different question.
         if !cx.global::<FerretState>().mounts.is_connected(&record.id) {
             self.open_connection(record.clone(), window, cx);
-            self.send_when_connected(record, locals, window, cx);
+            self.send_when_connected(record, locals, initiating_folder, window, cx);
             return;
         }
 
@@ -143,7 +144,7 @@ impl Browser {
             .map(|home| home.to_string())
             .unwrap_or_else(|| "/".to_string());
 
-        self.ask_destination(record, locals, default_dir, window, cx);
+        self.ask_destination(record, locals, default_dir, initiating_folder, window, cx);
     }
 
     /// Wait for an in-flight dial, then ask where the files should go.
@@ -156,6 +157,7 @@ impl Browser {
         &mut self,
         record: Connection,
         sources: Vec<std::path::PathBuf>,
+        initiating_folder: Entity<Folder>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -185,7 +187,14 @@ impl Browser {
 
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    this.ask_destination(record.clone(), sources, default_dir, window, cx);
+                    this.ask_destination(
+                        record.clone(),
+                        sources,
+                        default_dir,
+                        initiating_folder.clone(),
+                        window,
+                        cx,
+                    );
                 });
             });
         })
@@ -199,6 +208,7 @@ impl Browser {
         record: Connection,
         sources: Vec<std::path::PathBuf>,
         default_dir: String,
+        initiating_folder: Entity<Folder>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -211,15 +221,16 @@ impl Browser {
             state
         });
         let focus = input.read(cx).focus_handle(cx).clone();
-        window.focus(&focus, cx);
 
         let replace = Rc::new(std::cell::Cell::new(false));
         let this = cx.weak_entity();
+        let initiating_folder = initiating_folder.clone();
         let count = sources.len();
         let sources = Rc::new(RefCell::new(Some(sources)));
         let title = format!("Send {count} item(s) to {}", record.display_name());
 
-        window.open_dialog(cx, move |modal, _, cx| {
+        window.open_dialog(cx, move |modal, window, cx| {
+            window.focus(&focus, cx);
             let theme = cx.theme();
             let input = input.clone();
             let confirm_input = input.clone();
@@ -273,40 +284,53 @@ impl Browser {
                         .ok_text("Send")
                         .cancel_text("Cancel"),
                 )
-                .on_ok(move |_, window, cx| {
-                    let directory = confirm_input.read(cx).value().trim().to_string();
-                    // An absolute path is the only thing the server will
-                    // accept, and guessing a root for a relative one would put
-                    // files somewhere the user did not name.
-                    if !directory.starts_with('/') {
-                        return false;
+                .on_ok({
+                    let initiating_folder = initiating_folder.clone();
+                    move |_, window, cx| {
+                        let directory = confirm_input.read(cx).value().trim().to_string();
+                        // An absolute path is the only thing the server will
+                        // accept, and guessing a root for a relative one would put
+                        // files somewhere the user did not name.
+                        if !directory.starts_with('/') {
+                            return false;
+                        }
+                        let Some(sources) = sources.borrow_mut().take() else {
+                            return true;
+                        };
+                        let conflict = if confirm_replace.get() {
+                            Conflict::Replace
+                        } else {
+                            Conflict::Skip
+                        };
+                        if let Some(browser) = this.upgrade() {
+                            let record = record.clone();
+                            browser.update(cx, |browser, cx| {
+                                browser.start_upload(
+                                    record,
+                                    sources,
+                                    directory,
+                                    conflict,
+                                    initiating_folder.clone(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                        true
                     }
-                    let Some(sources) = sources.borrow_mut().take() else {
-                        return true;
-                    };
-                    let conflict = if confirm_replace.get() {
-                        Conflict::Replace
-                    } else {
-                        Conflict::Skip
-                    };
-                    if let Some(browser) = this.upgrade() {
-                        let record = record.clone();
-                        browser.update(cx, |browser, cx| {
-                            browser.start_upload(record, sources, directory, conflict, window, cx);
-                        });
-                    }
-                    true
                 })
         });
     }
 
     /// Run the transfer and pump its progress into the status bar.
+    #[allow(clippy::too_many_arguments)]
     fn start_upload(
         &mut self,
         record: Connection,
         sources: Vec<std::path::PathBuf>,
         directory: String,
         conflict: Conflict,
+        initiating_folder: Entity<Folder>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -318,13 +342,21 @@ impl Browser {
             return;
         };
 
+        let endpoint = VfsPath::remote(record.mount, directory.as_str());
         let job = backend.transfer(
             Direction::Upload,
             sources.into_iter().map(TransferSource::Local).collect(),
             TransferDestination::RemoteDir(directory),
             conflict,
         );
-        self.pump_transfer(job, record.id, window, cx);
+        self.pump_transfer(
+            job,
+            record.id,
+            initiating_folder,
+            vec![endpoint],
+            window,
+            cx,
+        );
     }
 
     /// Forward transfer events onto the status bar until the job ends.
@@ -336,10 +368,13 @@ impl Browser {
         &mut self,
         job: ferret_remote::Transfer,
         id: ConnectionId,
+        initiating_folder: Entity<Folder>,
+        remote_endpoints: Vec<VfsPath>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let window_handle = window.window_handle();
+        let fs = cx.global::<FerretState>().fs.clone();
         self.transfer = Some(TransferProgress {
             label: "Preparing…".into(),
             bytes_done: 0,
@@ -413,6 +448,8 @@ impl Browser {
                 }
             }
 
+            Browser::reload_transfer_folder(&initiating_folder, &fs, &remote_endpoints, cx);
+
             let _ = this.update(cx, |this, cx| {
                 if let Some(progress) = &mut this.transfer {
                     progress.label = summary.unwrap_or_else(|| "Transfer stopped".into()).into();
@@ -457,6 +494,31 @@ impl Browser {
             (VfsPath::Local(_), Some(VfsPath::Remote { mount, .. })) => *mount,
             _ => return,
         };
+        if matches!(dest, VfsPath::Remote { .. }) && sources.iter().any(|source| !source.is_local())
+        {
+            window.push_notification(
+                Notification::error("A remote-to-remote drop needs two transfers, not one drag."),
+                cx,
+            );
+            return;
+        }
+        if matches!(dest, VfsPath::Local(_))
+            && sources
+                .iter()
+                .filter_map(|source| match source {
+                    VfsPath::Remote { mount, .. } => Some(*mount),
+                    VfsPath::Local(_) => None,
+                })
+                .any(|source_mount| source_mount != mount)
+        {
+            window.push_notification(
+                Notification::error("A download cannot combine files from different mounts."),
+                cx,
+            );
+            return;
+        }
+        let initiating_folder = self.active().folder.clone();
+        let remote_endpoints = super::mutations::transfer_endpoints(&sources, &dest);
         let state = cx.global::<FerretState>();
         let Some(record) =
             crate::mounts::connection_for_mount(state.connections.connections(), mount).cloned()
@@ -502,7 +564,14 @@ impl Browser {
                 Conflict::Skip,
             ),
         };
-        self.pump_transfer(job, record.id, window, cx);
+        self.pump_transfer(
+            job,
+            record.id,
+            initiating_folder,
+            remote_endpoints,
+            window,
+            cx,
+        );
     }
 
     /// Handle the menu's `SendToConnection`: look the record up and start.

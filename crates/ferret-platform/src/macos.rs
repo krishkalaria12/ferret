@@ -203,26 +203,22 @@ pub struct MacThumbnails;
 #[async_trait]
 impl crate::thumbnail::ThumbnailProvider for MacThumbnails {
     async fn thumbnail(&self, path: &Path, longest_edge_px: u32) -> Result<Option<IconBitmap>> {
-        // Synchronous gates, cheapest first. Cloud placeholders are refused
-        // by extension: asking Quick Look about an `.icloud` stub hydrates
-        // the download, which a thumbnail must never trigger.
-        if path.extension().is_some_and(|ext| ext == "icloud") {
-            return Ok(None);
-        }
-        let meta = match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => meta,
-            _ => return Ok(None),
-        };
-        if meta.len() > NATIVE_THUMBNAIL_INPUT_LIMIT {
-            return Ok(None);
-        }
-        // Absurd requests clamp rather than fail: the service scales anyway,
-        // and a caller passing 0 must not divide by it below.
         let edge = longest_edge_px.clamp(16, 2048);
         let owned = path.to_path_buf();
-        // The wait is out-of-process I/O with a hard timeout, not CPU: it
-        // parks a blocking-pool thread the way `run_open` already does.
-        Ok(smol::unblock(move || request_thumbnail(&owned, edge)).await)
+        Ok(smol::unblock(move || {
+            if !crate::thumbnail::native_thumbnail_path_allowed(&owned) {
+                return None;
+            }
+            let meta = match std::fs::metadata(&owned) {
+                Ok(meta) if meta.is_file() => meta,
+                _ => return None,
+            };
+            if meta.len() > NATIVE_THUMBNAIL_INPUT_LIMIT {
+                return None;
+            }
+            request_thumbnail(&owned, edge)
+        })
+        .await)
     }
 }
 
@@ -423,7 +419,9 @@ impl IconProvider for MacIcons {
 /// window server.
 fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
     let mut bgra = vec![0u8; rgba.len()];
-    for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+    let (source, _) = rgba.as_chunks::<4>();
+    let (destination, _) = bgra.as_chunks_mut::<4>();
+    for (src, dst) in source.iter().zip(destination.iter_mut()) {
         // Native-endian throughout: the bytes go straight back out as bytes,
         // so the only thing that matters is that the shuffle below is the
         // inverse of the load, which it is on either endianness.
@@ -518,7 +516,8 @@ mod swizzle_tests {
     /// The loop this replaced, kept as the definition of correct.
     fn reference(rgba: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(rgba.len());
-        for px in rgba.chunks_exact(4) {
+        let (pixels, _) = rgba.as_chunks::<4>();
+        for px in pixels {
             out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
         }
         out

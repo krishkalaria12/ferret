@@ -386,7 +386,25 @@ fn stash_conflict_recovery(path: Option<&VfsPath>, bytes: &[u8]) -> String {
     let dest = dir.join(format!("{name}.{digest:016x}.conflict.txt"));
     let mut body = format!("Source: {}\n", path);
     body.push_str(&String::from_utf8_lossy(bytes));
-    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&dest, body).is_ok() {
+    let written = std::fs::create_dir_all(&dir)
+        .and_then(|()| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&dest)?;
+            std::io::Write::write_all(&mut file, body.as_bytes())
+        })
+        .is_ok();
+    if written {
         format!(" A copy is kept at {}.", dest.to_string_lossy())
     } else {
         String::new()

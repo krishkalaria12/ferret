@@ -54,6 +54,7 @@ pub(crate) enum SnapshotBody {
     },
     Markdown {
         sanitized: String,
+        images: HashMap<String, std::sync::Arc<gpui::RenderImage>>,
         base: Option<PathBuf>,
         remote: bool,
         footer: Option<SharedString>,
@@ -82,6 +83,7 @@ pub(crate) struct PreviewOverlay {
     window: gpui::AnyWindowHandle,
     editor: Entity<EditorState>,
     docview: Entity<TextViewState>,
+    image_cache: Entity<MarkdownImageCache>,
     grid: Option<CsvGrid>,
     state: OverlayState,
     generation: u64,
@@ -153,12 +155,14 @@ impl PreviewOverlay {
                 .soft_wrap(true)
         });
         let docview = cx.new(|cx| TextViewState::markdown("", cx));
+        let image_cache = MarkdownImageCache::new(cx);
         let mut overlay = Self {
             browser,
             focus: cx.focus_handle(),
             window: window.window_handle(),
             editor,
             docview,
+            image_cache,
             grid: None,
             state: OverlayState::Loading {
                 name: SharedString::from(""),
@@ -208,6 +212,7 @@ impl PreviewOverlay {
             }
             SnapshotBody::Markdown {
                 sanitized,
+                images,
                 base,
                 remote,
                 footer,
@@ -215,6 +220,8 @@ impl PreviewOverlay {
                 self.docview.update(cx, |docview, cx| {
                     docview.set_text(&sanitized, cx);
                 });
+                self.image_cache
+                    .update(cx, |cache, _| cache.replace(images.clone()));
                 self.state = OverlayState::Markdown {
                     title,
                     detail,
@@ -327,6 +334,7 @@ impl PreviewOverlay {
                 entry,
                 detail,
                 sanitized,
+                images,
                 footer,
                 base,
                 remote,
@@ -335,6 +343,8 @@ impl PreviewOverlay {
                 self.docview.update(cx, |docview, cx| {
                     docview.set_text(&sanitized, cx);
                 });
+                self.image_cache
+                    .update(cx, |cache, _| cache.replace(images.clone()));
                 self.state = OverlayState::Markdown {
                     title: SharedString::from(PreviewPanel::display_name(entry.name())),
                     detail,
@@ -637,11 +647,23 @@ impl PreviewOverlay {
                     .overflow_hidden()
                     .px(px(20.))
                     .py(px(12.))
-                    .child(TextView::new(&self.docview).selectable(true).on_link_click(
-                        move |url, _, window, cx| {
-                            handle_markdown_link(&browser, base.clone(), remote, url, window, cx);
-                        },
-                    ))
+                    .child(
+                        gpui::image_cache(self.image_cache.clone()).child(
+                            TextView::new(&self.docview)
+                                .scrollable(true)
+                                .selectable(true)
+                                .on_link_click(move |url, _, window, cx| {
+                                    handle_markdown_link(
+                                        &browser,
+                                        base.clone(),
+                                        remote,
+                                        url,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                        ),
+                    )
                     .into_any_element()
             }
             OverlayState::Image {
@@ -790,6 +812,7 @@ impl Render for PreviewOverlay {
         v_flex()
             .id("preview-overlay")
             .key_context(context::OVERLAY)
+            .track_focus(&self.focus)
             .size_full()
             .overflow_hidden()
             .child(self.render_header(cx))

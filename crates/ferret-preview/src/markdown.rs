@@ -12,8 +12,8 @@
 //!   across separators), and symlink/junction escapes → alt text. Canonical
 //!   containment against the document directory is required, not just
 //!   lexical normalisation.
-//! * Safe relative local paths → recorded for the phase-07 image pipeline
-//!   and rendered as alt text until then. Remote documents deny them.
+//! * Safe relative local paths → recorded for the bounded image pipeline and
+//!   rendered through opaque cache keys. Remote documents deny them.
 //!
 //! Reference images resolve through definitions; HTML `img` blocks are
 //! detected as blocks (never by regex over prose) and replaced whole. Raw
@@ -21,7 +21,7 @@
 //!
 //! Two backstops make offset bugs unshippable: every rewritten span is
 //! verified to start with `![` (or contain an img tag for HTML blocks), and
-//! the sanitized source is re-parsed asserting no image use remains at all.
+//! the sanitized source is re-parsed asserting no external image use remains.
 //! Any structural anomaly falls back to the bounded source view — never to a
 //! half-sanitized document.
 
@@ -30,11 +30,27 @@ use std::path::{Path, PathBuf};
 
 use super::config::{MARKDOWN_MAX_BLOCKS, MARKDOWN_MAX_DEPTH, MARKDOWN_MAX_IMAGES};
 
+const IMAGE_KEY_PREFIX: &str = "ferret-doc-image:";
+
+fn image_key(index: usize) -> String {
+    format!("{IMAGE_KEY_PREFIX}{index}")
+}
+
+fn is_internal_image_key(url: &str) -> bool {
+    url.strip_prefix(IMAGE_KEY_PREFIX).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn local_image_markdown(image: &LocalImage) -> String {
+    format!("![{}]({})", escape_alt(&image.alt), image.key)
+}
+
 /// How one image URL was decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Safe relative local path, verified contained. Recorded for the image
-    /// pipeline; alt text until it renders.
+    /// pipeline; failed decodes fall back to alt text.
     Local(PathBuf),
     /// `http(s)` or protocol-relative: never fetched, always alt text.
     Remote,
@@ -60,10 +76,12 @@ pub enum UnsafeReason {
     Unresolvable,
 }
 
-/// A safe-relative image awaiting the phase-07 renderer.
+/// A safe-relative image awaiting the bounded renderer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalImage {
     pub path: PathBuf,
+    pub base: PathBuf,
+    pub key: String,
     pub alt: String,
 }
 
@@ -76,6 +94,7 @@ pub struct LocalImage {
 #[derive(Clone, Debug)]
 pub struct LoadedDocImage {
     pub path: PathBuf,
+    pub key: String,
     pub alt: String,
     pub image: super::image::DecodedImage,
 }
@@ -105,7 +124,13 @@ pub async fn load_doc_images(
     let mut loaded = Vec::new();
     let mut decoded_bytes = 0usize;
     for image in local.iter().take(super::config::MARKDOWN_MAX_IMAGES) {
-        let path = ferret_vfs::VfsPath::local(image.path.clone());
+        let Ok(canonical) = std::fs::canonicalize(&image.path) else {
+            continue;
+        };
+        if canonical != image.path || !canonical.starts_with(&image.base) {
+            continue;
+        }
+        let path = ferret_vfs::VfsPath::local(canonical);
         let Ok(bytes) = fs.read(&path, MARKDOWN_IMAGE_INPUT).await else {
             continue;
         };
@@ -138,6 +163,7 @@ pub async fn load_doc_images(
         decoded_bytes += cost;
         loaded.push(LoadedDocImage {
             path: image.path.clone(),
+            key: image.key.clone(),
             alt: image.alt.clone(),
             image: decoded,
         });
@@ -145,17 +171,35 @@ pub async fn load_doc_images(
     loaded
 }
 
-/// Sanitized source plus everything the footer and phase 07 need.
+/// Sanitized source plus everything the footer and bounded renderer need.
 #[derive(Debug)]
 pub struct Sanitized {
-    /// Render this. Contains no image use at all: every image node became
-    /// alt text or `[image]`, and HTML img blocks became `[image]`.
+    /// Render this. External image uses are gone; local images use internal
+    /// keys that only the Ferret image cache may resolve.
     pub source: String,
     /// Safe-relative images, in document order, for the image pipeline.
     pub local: Vec<LocalImage>,
     pub blocked_remote: usize,
     pub blocked_unsafe: usize,
     pub over_count: usize,
+}
+
+impl Sanitized {
+    pub fn source_with_loaded_keys(&self, loaded_keys: &[String]) -> String {
+        let mut source = self.source.clone();
+        for image in &self.local {
+            if loaded_keys.iter().any(|key| key == &image.key) {
+                continue;
+            }
+            let replacement = if image.alt.trim().is_empty() {
+                "[image]".to_string()
+            } else {
+                escape_alt(&image.alt)
+            };
+            source = source.replace(&local_image_markdown(image), &replacement);
+        }
+        source
+    }
 }
 
 /// Sanitization refused; the caller shows bounded source with a reason.
@@ -185,10 +229,7 @@ struct ImageUse {
 /// off-thread with everything else.
 pub fn sanitize(source: &str, doc_dir: Option<&Path>) -> Result<Sanitized, SanitizeError> {
     let root = parse(source)?;
-    let (blocks, depth) = measure(&root);
-    if blocks > MARKDOWN_MAX_BLOCKS || depth > MARKDOWN_MAX_DEPTH {
-        return Err(SanitizeError::Limits);
-    }
+    measure(&root)?;
 
     let canonical_base = doc_dir.and_then(|dir| std::fs::canonicalize(dir).ok());
     let uses = collect_images(&root)?;
@@ -212,18 +253,28 @@ pub fn sanitize(source: &str, doc_dir: Option<&Path>) -> Result<Sanitized, Sanit
         };
         match &verdict {
             Verdict::Local(path) => {
-                out.local.push(LocalImage {
+                let local = LocalImage {
                     path: path.clone(),
+                    base: canonical_base.clone().unwrap(),
+                    key: image_key(out.local.len()),
                     alt: use_.alt.clone(),
-                });
+                };
+                edits.push(local_image_placeholder(source, use_, &local)?);
+                out.local.push(local);
             }
-            Verdict::Remote => out.blocked_remote += 1,
-            Verdict::OverCount => out.over_count += 1,
-            Verdict::Unsafe(_) => out.blocked_unsafe += 1,
+            Verdict::Remote => {
+                out.blocked_remote += 1;
+                edits.push(placeholder(source, use_)?);
+            }
+            Verdict::OverCount => {
+                out.over_count += 1;
+                edits.push(placeholder(source, use_)?);
+            }
+            Verdict::Unsafe(_) => {
+                out.blocked_unsafe += 1;
+                edits.push(placeholder(source, use_)?);
+            }
         }
-        // Every image becomes alt text in phase 06 — including safe-local
-        // ones, until the image pipeline renders them in phase 07.
-        edits.push(placeholder(source, use_)?);
     }
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
     let mut sanitized = source.to_string();
@@ -239,7 +290,10 @@ pub fn sanitize(source: &str, doc_dir: Option<&Path>) -> Result<Sanitized, Sanit
     // The backstop: re-parse and prove no image use survived. An
     // offset-semantics bug lands here instead of in a user's network log.
     // (`collect_images` failing is itself a refusal, not a pass.)
-    if !collect_images(&parse(&sanitized)?)?.is_empty() {
+    if collect_images(&parse(&sanitized)?)?
+        .iter()
+        .any(|use_| !is_internal_image_key(&use_.url))
+    {
         return Err(SanitizeError::Span);
     }
 
@@ -281,22 +335,26 @@ fn is_inline(node: &markdown::mdast::Node) -> bool {
 }
 
 /// Count block-level nodes and measure block nesting depth.
-fn measure(root: &markdown::mdast::Node) -> (usize, usize) {
-    fn walk(node: &markdown::mdast::Node, block_depth: usize, counts: &mut (usize, usize)) {
+fn measure(root: &markdown::mdast::Node) -> Result<(usize, usize), SanitizeError> {
+    let mut counts = (0, 0);
+    let mut stack = vec![(root, 0usize)];
+    while let Some((node, block_depth)) = stack.pop() {
         let depth = if is_inline(node) {
             block_depth
         } else {
             counts.0 += 1;
+            if counts.0 > MARKDOWN_MAX_BLOCKS {
+                return Err(SanitizeError::Limits);
+            }
             block_depth + 1
         };
         counts.1 = counts.1.max(depth);
-        for child in kids(node) {
-            walk(child, depth, counts);
+        if depth > MARKDOWN_MAX_DEPTH {
+            return Err(SanitizeError::Limits);
         }
+        stack.extend(kids(node).iter().rev().map(|child| (child, depth)));
     }
-    let mut counts = (0, 0);
-    walk(root, 0, &mut counts);
-    counts
+    Ok(counts)
 }
 
 /// Collect image uses: inline images, reference images (resolved through
@@ -312,73 +370,71 @@ fn collect_images(root: &markdown::mdast::Node) -> Result<Vec<ImageUse>, Sanitiz
     Ok(uses)
 }
 
-fn collect_definitions(node: &markdown::mdast::Node, definitions: &mut HashMap<String, String>) {
+fn collect_definitions(root: &markdown::mdast::Node, definitions: &mut HashMap<String, String>) {
     use markdown::mdast::Node;
-    if let Node::Definition(definition) = node {
-        definitions.insert(
-            normalize_label(&definition.identifier),
-            definition.url.clone(),
-        );
-    }
-    for child in kids(node) {
-        collect_definitions(child, definitions);
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if let Node::Definition(definition) = node {
+            definitions.insert(
+                normalize_label(&definition.identifier),
+                definition.url.clone(),
+            );
+        }
+        stack.extend(kids(node).iter().rev());
     }
 }
 
 fn collect_uses(
-    node: &markdown::mdast::Node,
+    root: &markdown::mdast::Node,
     definitions: &HashMap<String, String>,
     uses: &mut Vec<ImageUse>,
 ) -> Result<(), SanitizeError> {
     use markdown::mdast::Node;
-    match node {
-        Node::Image(image) => {
-            let Some(span) = position_span(&image.position) else {
-                return Err(SanitizeError::Span);
-            };
-            uses.push(ImageUse {
-                alt: image.alt.clone(),
-                url: image.url.clone(),
-                span,
-                is_html_block: false,
-            });
-        }
-        Node::ImageReference(reference) => {
-            let key = match reference.reference_kind {
-                markdown::mdast::ReferenceKind::Full => normalize_label(&reference.identifier),
-                // Shortcut and collapsed references infer the identifier
-                // from their content; the label carries the parsed text.
-                _ => normalize_label(reference.label.as_deref().unwrap_or(&reference.alt)),
-            };
-            if let Some(url) = definitions.get(&key) {
-                let Some(span) = position_span(&reference.position) else {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Image(image) => {
+                let Some(span) = position_span(&image.position) else {
                     return Err(SanitizeError::Span);
                 };
                 uses.push(ImageUse {
-                    alt: reference.alt.clone(),
-                    url: url.clone(),
+                    alt: image.alt.clone(),
+                    url: image.url.clone(),
                     span,
                     is_html_block: false,
                 });
             }
-            // A reference without a definition renders as literal text and
-            // loads nothing — no policy needed.
+            Node::ImageReference(reference) => {
+                let key = match reference.reference_kind {
+                    markdown::mdast::ReferenceKind::Full => normalize_label(&reference.identifier),
+                    _ => normalize_label(reference.label.as_deref().unwrap_or(&reference.alt)),
+                };
+                if let Some(url) = definitions.get(&key) {
+                    let Some(span) = position_span(&reference.position) else {
+                        return Err(SanitizeError::Span);
+                    };
+                    uses.push(ImageUse {
+                        alt: reference.alt.clone(),
+                        url: url.clone(),
+                        span,
+                        is_html_block: false,
+                    });
+                }
+            }
+            Node::Html(html) if contains_img_tag(&html.value) => {
+                let Some(span) = position_span(&html.position) else {
+                    return Err(SanitizeError::Span);
+                };
+                uses.push(ImageUse {
+                    alt: String::new(),
+                    url: String::new(),
+                    span,
+                    is_html_block: true,
+                });
+            }
+            _ => {}
         }
-        Node::Html(html) if contains_img_tag(&html.value) => {
-            let Some(span) = position_span(&html.position) else {
-                return Err(SanitizeError::Span);
-            };
-            uses.push(ImageUse {
-                alt: String::new(),
-                url: String::new(),
-                span,
-                is_html_block: true,
-            });
-        }
-        _ => {}
-    }
-    for child in kids(node) {
-        collect_uses(child, definitions, uses)?;
+        stack.extend(kids(node).iter().rev());
     }
     Ok(())
 }
@@ -577,6 +633,19 @@ fn hex_value(byte: u8) -> Option<u8> {
 /// open with `![`, an HTML block must contain an img tag. Anything else is
 /// a structural anomaly and refuses the whole document. Alt text keeps
 /// `![` sequences escaped so the re-parse backstop never sees a new image.
+fn local_image_placeholder(
+    source: &str,
+    use_: &ImageUse,
+    image: &LocalImage,
+) -> Result<(usize, usize, String), SanitizeError> {
+    let (start, end) = use_.span;
+    let span = source.get(start..end).ok_or(SanitizeError::Span)?;
+    if !span.starts_with("![") {
+        return Err(SanitizeError::Span);
+    }
+    Ok((start, end, local_image_markdown(image)))
+}
+
 fn placeholder(source: &str, use_: &ImageUse) -> Result<(usize, usize, String), SanitizeError> {
     let (start, end) = use_.span;
     let span = source.get(start..end).ok_or(SanitizeError::Span)?;
@@ -666,7 +735,9 @@ mod tests {
         fn walk(node: &markdown::mdast::Node, urls: &mut Vec<String>) {
             use markdown::mdast::Node;
             match node {
-                Node::Image(image) => urls.push(format!("image:{}", image.url)),
+                Node::Image(image) if !is_internal_image_key(&image.url) => {
+                    urls.push(format!("image:{}", image.url));
+                }
                 Node::ImageReference(reference) => urls.push(format!("ref:{}", reference.alt)),
                 Node::Html(html) if contains_img_tag(&html.value) => {
                     urls.push("html-img".to_string());
@@ -755,9 +826,15 @@ mod tests {
         assert_eq!(out.local.len(), 2);
         assert_eq!(out.blocked_remote, 0);
         assert_eq!(out.blocked_unsafe, 0);
-        // Phase 06 renders alt text; the paths are recorded for phase 07.
-        assert!(out.source.contains("diagram"));
-        assert_no_loadable_urls(&out.source);
+        assert!(out.source.contains("ferret-doc-image:0"));
+        assert!(out.source.contains("ferret-doc-image:1"));
+        assert!(!out.source.contains("img/a.png"));
+        let without_images = out.source_with_loaded_keys(&[]);
+        assert!(!without_images.contains("ferret-doc-image:"));
+        assert!(without_images.contains("diagram"));
+        let with_first = out.source_with_loaded_keys(&[out.local[0].key.clone()]);
+        assert!(with_first.contains("ferret-doc-image:0"));
+        assert!(!with_first.contains("ferret-doc-image:1"));
         assert!(out.local[0].path.ends_with("doc/img/a.png"));
     }
 
@@ -932,17 +1009,24 @@ mod tests {
             fs::write(fixture.doc().join("bad.png"), b"not a png").unwrap();
 
             let fs = ferret_vfs::LocalFs::new();
+            let base = fs::canonicalize(fixture.doc()).unwrap();
             let local = vec![
                 LocalImage {
-                    path: fixture.doc().join("good.png"),
+                    path: fs::canonicalize(fixture.doc().join("good.png")).unwrap(),
+                    base: base.clone(),
+                    key: "ferret-doc-image:0".into(),
                     alt: "diagram".into(),
                 },
                 LocalImage {
-                    path: fixture.doc().join("bad.png"),
+                    path: base.join("bad.png"),
+                    base: base.clone(),
+                    key: "ferret-doc-image:1".into(),
                     alt: "broken".into(),
                 },
                 LocalImage {
-                    path: fixture.doc().join("missing.png"),
+                    path: base.join("missing.png"),
+                    base,
+                    key: "ferret-doc-image:2".into(),
                     alt: "gone".into(),
                 },
             ];

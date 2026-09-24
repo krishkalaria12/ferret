@@ -241,9 +241,9 @@ impl Browser {
         let dialog = cx.new(|cx| ConnectionDialog::new(record, window, cx));
         self.connection_dialog = Some(dialog.clone());
         let focus = dialog.read(cx).name.read(cx).focus_handle(cx).clone();
-        window.focus(&focus, cx);
         let browser = cx.weak_entity();
-        window.open_dialog(cx, move |modal, _, _| {
+        window.open_dialog(cx, move |modal, window, cx| {
+            window.focus(&focus, cx);
             let dialog = dialog.clone();
             let browser = browser.clone();
             modal

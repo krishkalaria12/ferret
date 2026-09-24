@@ -12,6 +12,7 @@ name = "ferret"
 path = "src/main.rs"
 
 [dependencies]
+ferret-preview.workspace = true
 ferret-settings.workspace = true
 ferret-remote.workspace = true
 ferret-ui.workspace = true

@@ -172,7 +172,8 @@ fn decode_utf16(bytes: &[u8], little: bool) -> Option<String> {
     // Strict: a lone surrogate is corruption, not text. Decoded streaming
     // from the byte pairs — no intermediate `Vec<u16>` doubling the input.
     let mut out = String::with_capacity(bytes.len() / 2);
-    let mut pairs = bytes.chunks_exact(2).map(|pair| {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let mut pairs = pairs.iter().map(|pair| {
         if little {
             u16::from_le_bytes([pair[0], pair[1]])
         } else {
@@ -205,7 +206,8 @@ fn decode_utf32(bytes: &[u8], bom: Bom) -> Option<String> {
         &bytes[..bytes.len() - rem]
     };
     let mut out = String::with_capacity(bytes.len() / 4);
-    for quad in bytes.chunks_exact(4) {
+    let (quads, _) = bytes.as_chunks::<4>();
+    for quad in quads {
         let code = match bom {
             Bom::Utf32Le => u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]),
             _ => u32::from_be_bytes([quad[0], quad[1], quad[2], quad[3]]),

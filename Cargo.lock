@@ -2379,6 +2379,7 @@ dependencies = [
 name = "ferret"
 version = "0.1.0"
 dependencies = [
+ "ferret-preview",
  "ferret-remote",
  "ferret-settings",
  "ferret-ui",
@@ -2408,6 +2409,7 @@ dependencies = [
  "async-trait",
  "block2 0.6.2",
  "dirs",
+ "libc",
  "objc2 0.5.2",
  "objc2 0.6.4",
  "objc2-app-kit 0.2.2",
@@ -2431,6 +2433,7 @@ dependencies = [
  "dirs",
  "ferret-vfs",
  "image",
+ "libc",
  "markdown",
  "pdfium-render",
  "resvg 0.46.0",
@@ -2589,15 +2592,14 @@ dependencies = [
  "async-trait",
  "futures",
  "jwalk",
+ "libc",
  "notify",
  "parking_lot",
  "rayon",
  "serde",
- "serde_json",
  "smol",
  "smol_str",
  "thiserror 2.0.20",
- "trash",
  "windows-sys 0.59.0",
 ]
 

@@ -94,7 +94,7 @@ pub enum Unsupported {
 #[derive(Clone, Debug)]
 pub enum Preview {
     /// F-31, source form. Rendered Markdown arrives with the document view;
-    /// until then the source previews as labelled text.
+    /// local images are resolved by the bounded renderer before display.
     Markdown {
         source: String,
         base: VfsPath,
@@ -215,6 +215,18 @@ pub fn build(
     remote: bool,
 ) -> Preview {
     let total = total.unwrap_or(bytes.len() as u64);
+    if matches!(kind, Kind::Image | Kind::Svg) {
+        let budget = budget_for(&kind, remote);
+        if total > budget as u64 {
+            return Preview::Unsupported {
+                kind,
+                reason: Unsupported::TooLarge {
+                    size: total,
+                    budget,
+                },
+            };
+        }
+    }
     match kind {
         Kind::Markdown => {
             let shown = bytes.len() as u64;
@@ -450,6 +462,52 @@ mod tests {
             panic!("a real PNG must decode");
         };
         assert_eq!(image.natural, (2, 2));
+    }
+
+    #[test]
+    fn over_budget_images_refuse_before_decoding() {
+        let bytes = vec![0; 1];
+        let total = config::IMAGE_BUDGET as u64 + 1;
+        let Preview::Unsupported { kind, reason } = build(
+            Kind::Image,
+            bytes,
+            Some(total),
+            VfsPath::local("/large.png"),
+            false,
+        ) else {
+            panic!("an over-budget image must not be decoded");
+        };
+        assert_eq!(kind, Kind::Image);
+        assert_eq!(
+            reason,
+            Unsupported::TooLarge {
+                size: total,
+                budget: config::IMAGE_BUDGET
+            }
+        );
+    }
+
+    #[test]
+    fn over_budget_svgs_refuse_before_rasterizing() {
+        let bytes = vec![b'x'; 1];
+        let total = config::SVG_BUDGET as u64 + 1;
+        let Preview::Unsupported { kind, reason } = build(
+            Kind::Svg,
+            bytes,
+            Some(total),
+            VfsPath::local("/large.svg"),
+            false,
+        ) else {
+            panic!("an over-budget SVG must not be rasterized");
+        };
+        assert_eq!(kind, Kind::Svg);
+        assert_eq!(
+            reason,
+            Unsupported::TooLarge {
+                size: total,
+                budget: config::SVG_BUDGET
+            }
+        );
     }
 
     #[test]

@@ -395,10 +395,10 @@ impl TableDelegate for ListDelegate {
         // Dragging an unselected row carries that row; dragging a selected
         // one carries the whole selection (§8).
         let entry = folder.entry_at(row_ix).cloned();
-        let dragged: Arc<[VfsPath]> = match &entry {
-            Some(_) if selected => folder.selected_paths_shared(),
-            Some(entry) => Arc::from([entry.path.clone()]),
-            None => Arc::from([]),
+        let dragged = if selected {
+            Some(DraggedPaths::selected(&self.folder, cx))
+        } else {
+            DraggedPaths::row(&self.folder, row_ix, cx)
         };
         let drop_dir = entry
             .as_ref()
@@ -424,20 +424,19 @@ impl TableDelegate for ListDelegate {
         // aid, and the reference UI uses uniform rows. The row height and the
         // hover fill do the work of separating rows instead.
 
-        if !dragged.is_empty() {
-            let folder = self.folder.clone();
+        if let Some(dragged) = dragged {
             row = row
                 // The label is built in here, not out there: this closure runs
                 // when a drag actually begins, and `render_tr` runs per row per
                 // frame (A-02a).
-                .on_drag(DraggedPaths { paths: dragged }, move |dragged, _, _, cx| {
-                    let label = drag_label(&dragged.paths);
+                .on_drag(dragged, move |dragged, _, _, cx| {
+                    let label = drag_label(&dragged.paths(cx));
                     cx.new(|_| DragPreview { label })
                 })
                 // Leaving the window turns the in-app drag into a real file
                 // drag, so Ferret can drop into any application.
                 .external_drag_payload(move |dragged: &DraggedPaths, _, cx| {
-                    external_payload(dragged, folder.read(cx))
+                    external_payload(dragged, cx)
                 });
         }
 
@@ -451,8 +450,7 @@ impl TableDelegate for ListDelegate {
                     style.border_1().border_color(accent)
                 })
                 .on_drop(move |dragged: &DraggedPaths, window, cx| {
-                    let _ = cx;
-                    queue_drop(&drops, dragged, dest.clone(), window);
+                    queue_drop(&drops, dragged, dest.clone(), window, cx);
                 });
         }
         row

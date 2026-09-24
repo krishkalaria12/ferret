@@ -92,7 +92,9 @@ impl VfsPath {
     /// would refuse a legitimate drop — or worse, allow one into itself.
     pub fn starts_with(&self, ancestor: &VfsPath) -> bool {
         match (self, ancestor) {
-            (VfsPath::Local(a), VfsPath::Local(b)) => a.starts_with(b),
+            (VfsPath::Local(a), VfsPath::Local(b)) => {
+                local_path_identity(a).starts_with(local_path_identity(b))
+            }
             (
                 VfsPath::Remote {
                     mount: m1,
@@ -106,10 +108,9 @@ impl VfsPath {
                 if m1 != m2 {
                     return false;
                 }
-                let (a, b) = (p1.trim_end_matches('/'), p2.trim_end_matches('/'));
-                b.is_empty()
-                    || a == b
-                    || (a.starts_with(b) && a.as_bytes().get(b.len()) == Some(&b'/'))
+                let a = remote_components(p1);
+                let b = remote_components(p2);
+                b.is_empty() || a.starts_with(&b)
             }
             _ => false,
         }
@@ -118,9 +119,7 @@ impl VfsPath {
     pub fn join(&self, name: &str) -> VfsPath {
         match self {
             VfsPath::Local(p) => VfsPath::Local(Arc::from(p.join(name))),
-            VfsPath::Remote { mount, path } => {
-                VfsPath::remote(*mount, format!("{}/{}", path.trim_end_matches('/'), name))
-            }
+            VfsPath::Remote { mount, path } => VfsPath::remote(*mount, join_remote(path, name)),
         }
     }
 
@@ -149,9 +148,44 @@ impl VfsPath {
     /// collapse to one key.
     pub fn preference_key(&self) -> String {
         match self {
-            VfsPath::Local(p) => p.to_string_lossy().to_lowercase(),
-            VfsPath::Remote { mount, path } => format!("{}:{}", mount.0, path.to_lowercase()),
+            VfsPath::Local(p) => local_path_identity(p).to_string_lossy().into_owned(),
+            VfsPath::Remote { mount, path } => format!("{}:{}", mount.0, path),
         }
+    }
+}
+
+fn local_path_identity(path: &Path) -> PathBuf {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        path.to_path_buf()
+    }
+}
+
+fn remote_components(path: &str) -> Vec<&str> {
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    components
+}
+
+fn join_remote(parent: &str, name: &str) -> String {
+    let parent = parent.trim_end_matches('/');
+    let name = name.trim_start_matches('/');
+    if parent.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
     }
 }
 
@@ -350,11 +384,20 @@ mod tests {
         );
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
-    fn preference_key_folds_case() {
+    fn preference_key_folds_case_on_case_insensitive_local_paths() {
         assert_eq!(
             VfsPath::local("/Users/K/Documents").preference_key(),
             VfsPath::local("/users/k/documents").preference_key()
+        );
+    }
+
+    #[test]
+    fn remote_preference_keys_keep_server_case_distinct() {
+        assert_ne!(
+            VfsPath::remote(MountId(1), "/srv/Data").preference_key(),
+            VfsPath::remote(MountId(1), "/srv/data").preference_key()
         );
     }
 
@@ -368,5 +411,6 @@ mod tests {
     fn join_does_not_double_separators() {
         assert_eq!(remote("/srv/").join("a").to_string(), "/srv/a");
         assert_eq!(remote("/srv").join("a").to_string(), "/srv/a");
+        assert_eq!(remote("/").join("a").to_string(), "/a");
     }
 }

@@ -71,6 +71,7 @@ pub fn is_native_tileable_extension(ext: &str) -> bool {
         "heic"
             | "heif"
             | "avif"
+            | "psd"
             | "pdf"
             | "cr2"
             | "nef"
@@ -311,7 +312,17 @@ impl ThumbCache {
             if !name.starts_with('.') || !name.ends_with(".tmp") {
                 continue;
             }
-            let _ = std::fs::remove_file(&path);
+            let Ok(metadata) = child.metadata() else {
+                continue;
+            };
+            let stale = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age >= THUMB_CACHE_AGE);
+            if stale {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 
@@ -402,7 +413,8 @@ fn decode_entry(bytes: &[u8]) -> Option<Bitmap> {
     let (width, height) = (rgba.width(), rgba.height());
     let mut bgra = rgba.into_raw();
     let mut transparent = false;
-    for pixel in bgra.chunks_exact_mut(4) {
+    let (pixels, _) = bgra.as_chunks_mut::<4>();
+    for pixel in pixels {
         pixel.swap(0, 2);
         transparent |= pixel[3] != 255;
     }
@@ -510,8 +522,8 @@ mod tests {
         // behind it must be asked about — otherwise a whole camera roll
         // keeps glyphs while the service sits idle.
         for ext in [
-            "heic", "heif", "avif", "pdf", "cr2", "nef", "arw", "dng", "rw2", "orf", "raf", "mp4",
-            "mov", "m4v",
+            "heic", "heif", "avif", "psd", "pdf", "cr2", "nef", "arw", "dng", "rw2", "orf", "raf",
+            "mp4", "mov", "m4v",
         ] {
             assert!(
                 is_native_tileable_extension(ext),
@@ -572,6 +584,16 @@ mod tests {
             !cache.path_for(&key).exists(),
             "a corrupt entry must not fail every visit forever"
         );
+    }
+
+    #[test]
+    fn eviction_does_not_delete_a_fresh_temp_file() {
+        let (cache, _guard) = test_cache("tmp-race");
+        std::fs::create_dir_all(&cache.dir).unwrap();
+        let temp = cache.dir.join(".active.tmp");
+        std::fs::write(&temp, b"active").unwrap();
+        cache.evict();
+        assert!(temp.exists());
     }
 
     #[test]

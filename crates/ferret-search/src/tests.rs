@@ -288,6 +288,27 @@ fn streams_one_content_result_per_matching_line() {
 }
 
 #[test]
+fn content_previews_do_not_panic_on_multibyte_context() {
+    let root = tempdir("content-unicode-preview");
+    let line = format!("{}needle", "😀".repeat(100));
+    fs::write(root.join("unicode.txt"), line).unwrap();
+
+    let events = collect(
+        &InProcessSearchService
+            .start(content_request(&root, "needle"))
+            .unwrap(),
+    );
+    let found = results(&events);
+    assert_eq!(found.len(), 1);
+    let SearchMatch::Content { preview, .. } = &found[0].matched else {
+        panic!("expected a content match");
+    };
+    assert!(preview.contains("needle"));
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn combines_filename_and_regex_content_constraints() {
     let root = tempdir("content-filters");
     fs::write(root.join("target.rs"), "alpha 42\nALPHA 7\n").unwrap();

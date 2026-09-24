@@ -5,6 +5,13 @@
 //! so they are recorded here and drained by the pane on its next frame.
 
 use super::*;
+use gpui::{App, Entity};
+
+#[derive(Clone, Debug)]
+enum DragSource {
+    Selection(Arc<[VfsPath]>),
+    Entry { path: VfsPath },
+}
 
 /// What a row drag carries.
 ///
@@ -13,7 +20,35 @@ use super::*;
 /// manager avoids.
 #[derive(Clone, Debug)]
 pub struct DraggedPaths {
-    pub paths: Arc<[VfsPath]>,
+    folder: Entity<Folder>,
+    source: DragSource,
+}
+
+impl DraggedPaths {
+    pub(crate) fn selected(folder: &Entity<Folder>, cx: &App) -> Self {
+        let paths = folder.read(cx).selected_paths_shared();
+        Self {
+            folder: folder.clone(),
+            source: DragSource::Selection(paths),
+        }
+    }
+
+    pub(crate) fn row(folder: &Entity<Folder>, row: usize, cx: &App) -> Option<Self> {
+        let folder_read = folder.read(cx);
+        let id = folder_read.entry_id_at(row)?;
+        let path = folder_read.entry_path(id)?.clone();
+        Some(Self {
+            folder: folder.clone(),
+            source: DragSource::Entry { path },
+        })
+    }
+
+    pub(crate) fn paths(&self, _cx: &App) -> Vec<VfsPath> {
+        match &self.source {
+            DragSource::Selection(paths) => paths.as_ref().to_vec(),
+            DragSource::Entry { path, .. } => vec![path.clone()],
+        }
+    }
 }
 
 /// The little card that follows the cursor during a drag.
@@ -63,8 +98,9 @@ pub(super) fn queue_drop(
     dragged: &DraggedPaths,
     dest: VfsPath,
     window: &Window,
+    cx: &App,
 ) {
-    let sources = droppable(&dragged.paths, &dest);
+    let sources = droppable(&dragged.paths(cx), &dest);
     if sources.is_empty() {
         return;
     }
@@ -97,14 +133,15 @@ pub fn droppable(paths: &[VfsPath], dest: &VfsPath) -> Vec<VfsPath> {
 /// would be a syscall in the middle of a gesture.
 pub(super) fn external_payload(
     dragged: &DraggedPaths,
-    folder: &Folder,
+    cx: &App,
 ) -> Option<gpui::ExternalDragPayload> {
+    let folder = dragged.folder.read(cx);
     let entries: Vec<(std::path::PathBuf, bool)> = dragged
-        .paths
+        .paths(cx)
         .iter()
-        .filter_map(|p| {
-            let local = p.as_local()?.to_path_buf();
-            Some((local, folder.is_dir_like(p).unwrap_or(false)))
+        .filter_map(|path| {
+            let local = path.as_local()?.to_path_buf();
+            Some((local, folder.is_dir_like(path).unwrap_or(false)))
         })
         .collect();
     if entries.is_empty() {

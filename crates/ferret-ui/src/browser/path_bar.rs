@@ -484,10 +484,8 @@ fn resolve_path_input(text: &str) -> Option<VfsPath> {
         return None;
     }
     let expanded = if text == "~" || text.starts_with("~/") {
-        match dirs::home_dir() {
-            Some(home) => home.join(text.trim_start_matches('~').trim_start_matches('/')),
-            None => return None,
-        }
+        let home = dirs::home_dir()?;
+        home.join(text.trim_start_matches('~').trim_start_matches('/'))
     } else {
         PathBuf::from(text)
     };

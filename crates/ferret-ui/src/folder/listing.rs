@@ -158,9 +158,6 @@ impl Folder {
                 self.restore_carried(id, &path);
             }
         }
-        if restoring {
-            self.recount_selection();
-        }
         cx.emit(FolderEvent::RowsChanged);
         cx.notify();
     }
@@ -201,6 +198,7 @@ impl Folder {
             return;
         }
         self.carried = CarriedState::default();
+        self.recount_selection();
     }
 
     fn finish_loading(&mut self, error: Option<VfsError>, cx: &mut Context<Self>) {

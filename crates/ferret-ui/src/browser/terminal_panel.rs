@@ -93,6 +93,7 @@ impl Browser {
         }
         let Some(local) = dir.as_local() else {
             self.terminal_session = None;
+            self.terminal_snapshot = None;
             self.terminal_poll = None;
             self.terminal_error =
                 Some("Terminal sessions currently require a local folder.".into());
@@ -120,8 +121,11 @@ impl Browser {
                 {
                     self.terminal_error = Some(error.to_string());
                 }
+                let snapshot = Arc::new(session.snapshot());
+                let generation = snapshot.generation;
                 self.terminal_session = Some(session);
-                self.terminal_generation = 0;
+                self.terminal_generation = generation;
+                self.terminal_snapshot = Some(snapshot);
                 self.terminal_mount = None;
                 // The shell was spawned in this directory, so nothing is owed.
                 self.terminal_synced_to = Some(VfsPath::local(local.to_path_buf()));
@@ -129,6 +133,7 @@ impl Browser {
             }
             Err(error) => {
                 self.terminal_session = None;
+                self.terminal_snapshot = None;
                 self.terminal_poll = None;
                 self.terminal_error = Some(error.to_string());
             }
@@ -155,6 +160,7 @@ impl Browser {
         else {
             self.terminal_error = Some("That server is no longer saved.".into());
             self.terminal_session = None;
+            self.terminal_snapshot = None;
             self.terminal_poll = None;
             cx.notify();
             return;
@@ -170,6 +176,7 @@ impl Browser {
                     .into(),
             );
             self.terminal_session = None;
+            self.terminal_snapshot = None;
             self.terminal_poll = None;
             cx.notify();
             return;
@@ -213,8 +220,11 @@ impl Browser {
                 {
                     self.terminal_error = Some(error.to_string());
                 }
+                let snapshot = Arc::new(session.snapshot());
+                let generation = snapshot.generation;
                 self.terminal_session = Some(session);
-                self.terminal_generation = 0;
+                self.terminal_generation = generation;
+                self.terminal_snapshot = Some(snapshot);
                 self.terminal_mount = Some(mount);
                 self.terminal_synced_to = Some(dir);
                 // Sync starts off for a remote session (R-D09). Injecting a
@@ -226,6 +236,7 @@ impl Browser {
             }
             Err(error) => {
                 self.terminal_session = None;
+                self.terminal_snapshot = None;
                 self.terminal_poll = None;
                 self.terminal_error = Some(error.to_string());
             }
@@ -280,7 +291,11 @@ impl Browser {
         };
         // A full-screen program owns the grid and its stdin: this is the check
         // that keeps a `cd` out of `vim`, `less` and `cat > file`.
-        if session.snapshot().alternate_screen {
+        if self
+            .terminal_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.alternate_screen)
+        {
             return;
         }
         // Ferret has no OSC 133 marks yet, so it cannot see the input line
@@ -341,22 +356,28 @@ impl Browser {
                         if this.terminal_session.is_none() {
                             return false;
                         }
+                        let generation = this
+                            .terminal_session
+                            .as_ref()
+                            .map(TerminalSession::generation)
+                            .unwrap_or(0);
+                        if generation != this.terminal_generation {
+                            let snapshot = this
+                                .terminal_session
+                                .as_ref()
+                                .map(TerminalSession::snapshot);
+                            this.terminal_generation = generation;
+                            this.terminal_snapshot = snapshot.map(Arc::new);
+                            if this.terminal_visible {
+                                cx.notify();
+                            }
+                        }
                         this.flush_terminal_sync(cx);
                         interval = if this.terminal_visible {
                             TERMINAL_VISIBLE_TICK
                         } else {
                             TERMINAL_HIDDEN_TICK
                         };
-                        if this.terminal_visible {
-                            let generation = this
-                                .terminal_session
-                                .as_ref()
-                                .map_or(0, |session| session.snapshot().generation);
-                            if generation != this.terminal_generation {
-                                this.terminal_generation = generation;
-                                cx.notify();
-                            }
-                        }
                         true
                     })
                     .unwrap_or(false);
@@ -429,27 +450,10 @@ impl Browser {
         let cwd = SharedString::from(dir.to_string());
         let focused = self.terminal_focus.is_focused(window);
         let terminal_settings = &cx.global::<FerretState>().settings.terminal;
-        let font_family = terminal_settings
-            .font_family
-            .clone()
-            .unwrap_or_else(|| default_terminal_font(cx));
+        let font_family = self.terminal_font_family.clone();
         let font_size = terminal_settings.font_size;
         let line_height = font_size * terminal_settings.line_height;
-        let font = gpui::font(font_family.clone());
-        let measure_run = gpui::TextRun {
-            len: 1,
-            font,
-            color: gpui::black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let cell_width = f32::from(
-            window
-                .text_system()
-                .layout_line("M", px(font_size), &[measure_run], None)
-                .width,
-        );
+        let cell_width = self.terminal_cell_width;
         let terminal_owner = cx.weak_entity();
 
         v_flex()
@@ -635,15 +639,12 @@ impl Browser {
         &self,
         cwd: SharedString,
         palette: crate::theme::TerminalPalette,
-        font_family: String,
+        font_family: SharedString,
         line_height: f32,
         cell_width: f32,
         focused: bool,
     ) -> impl IntoElement {
-        let snapshot = self
-            .terminal_session
-            .as_ref()
-            .map(TerminalSession::snapshot);
+        let snapshot = self.terminal_snapshot.as_ref();
         let mut body = v_flex().relative().size_full().font_family(font_family);
         if let Some(error) = &self.terminal_error {
             return body.child(
@@ -653,13 +654,13 @@ impl Browser {
             );
         }
         if let Some(snapshot) = snapshot {
-            for row in snapshot.rows {
+            for row in &snapshot.rows {
                 let mut line = h_flex()
                     .h(px(line_height))
                     .w_full()
                     .flex_shrink_0()
                     .items_center();
-                for run in row.runs {
+                for run in &row.runs {
                     line = line.child(render_terminal_run(run, palette, cell_width, line_height));
                 }
                 body = body.child(line);
@@ -688,8 +689,11 @@ impl Browser {
         let Some(session) = &self.terminal_session else {
             return;
         };
-        let Some(bytes) = terminal_key_bytes(event, session.snapshot().application_cursor_keys)
-        else {
+        let application_cursor_keys = self
+            .terminal_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.application_cursor_keys);
+        let Some(bytes) = terminal_key_bytes(event, application_cursor_keys) else {
             return;
         };
         if let Err(error) = session.write(&bytes) {
@@ -712,7 +716,7 @@ impl Browser {
         let Some(session) = &self.terminal_session else {
             return;
         };
-        if let Err(error) = session.resize(columns, rows, 0, 0) {
+        if let Err(error) = session.resize_async(columns, rows, 0, 0) {
             self.terminal_error = Some(error.to_string());
         }
         cx.notify();
@@ -720,7 +724,7 @@ impl Browser {
 }
 
 fn render_terminal_run(
-    run: TerminalRun,
+    run: &TerminalRun,
     palette: crate::theme::TerminalPalette,
     cell_width: f32,
     line_height: f32,
@@ -756,7 +760,7 @@ fn render_terminal_run(
         .when(italic, |el| el.italic())
         .when(underline, |el| el.underline())
         .when(strikeout, |el| el.line_through())
-        .child(SharedString::from(run.text))
+        .child(SharedString::from(run.text.clone()))
 }
 
 fn render_terminal_cursor(
@@ -918,6 +922,27 @@ fn submits_or_clears_the_input_line(bytes: &[u8]) -> bool {
             | [0x1b, 0x03]
             | [0x1b, 0x15]
     )
+}
+
+pub(super) fn terminal_metrics(cx: &App, window: &mut Window) -> (SharedString, f32) {
+    let settings = &cx.global::<FerretState>().settings.terminal;
+    let family = settings
+        .font_family
+        .clone()
+        .unwrap_or_else(|| default_terminal_font(cx));
+    let run = gpui::TextRun {
+        len: 1,
+        font: gpui::font(SharedString::from(family.clone())),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let width = window
+        .text_system()
+        .layout_line("M", px(settings.font_size), &[run], None)
+        .width;
+    (SharedString::from(family), f32::from(width).max(1.))
 }
 
 fn default_terminal_font(cx: &App) -> String {

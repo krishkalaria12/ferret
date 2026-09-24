@@ -468,6 +468,13 @@ fn a_copy_within_one_mount_needs_no_bytes_over_the_link() {
         Ok(()) => {
             eprintln!("copy-data: supported by this server");
             assert!(list_names(&sftp, &dir).contains(&"copy.txt".to_string()));
+            let copied = dir.join("copy.txt");
+            let error =
+                smol::block_on(sftp.copy(&source, &copied)).expect_err("copy must not overwrite");
+            assert!(
+                matches!(error, ferret_vfs::VfsError::AlreadyExists { .. }),
+                "{error}"
+            );
         }
         Err(error) => {
             eprintln!("copy-data: not advertised — {error}");

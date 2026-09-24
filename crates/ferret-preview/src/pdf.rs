@@ -17,13 +17,15 @@
 //! Never executed here: JavaScript, launch actions, attachments, embedded
 //! media. Pdfium parses and paints; the pane shows bitmaps.
 //!
-//! Runs on the caller's thread, which must not be the window thread. A
-//! process boundary around the helper (crash containment, memory ceiling) is
-//! the documented follow-up; until it lands, renders run on the background
-//! pool with [`crate::config::PDF_RENDER_DEADLINE`] as the caller's budget
-//! for waiting, not as a preemption of native code.
+//! Runs on the caller's thread, which must not be the window thread. The
+//! isolated supervisor owns the process boundary and enforces
+//! [`crate::config::PDF_RENDER_DEADLINE`] by terminating a stuck child.
 
-use super::config::{PDF_BUDGET, PDF_TARGET_LONG_EDGE};
+use std::io::{Read, Write};
+
+#[cfg(feature = "pdf")]
+use super::config::PDF_TARGET_LONG_EDGE;
+use super::config::{PDF_BUDGET, PDF_RENDER_DEADLINE};
 use super::image::Bitmap;
 
 /// Why a page bitmap is unavailable.
@@ -161,6 +163,208 @@ pub struct RenderedPage {
     pub bitmap: Bitmap,
     pub natural: (u32, u32),
     pub pages_total: u32,
+}
+
+const PDF_HELPER_MAGIC: &[u8; 4] = b"FRP1";
+const PDF_HELPER_RESPONSE_MAGIC: &[u8; 4] = b"FRR1";
+const PDF_HELPER_VERSION: u8 = 1;
+const PDF_HELPER_STATUS_OK: u8 = 0;
+const PDF_HELPER_STATUS_NO_RENDERER: u8 = 1;
+const PDF_HELPER_STATUS_ENCRYPTED: u8 = 2;
+const PDF_HELPER_STATUS_TOO_LARGE: u8 = 3;
+const PDF_HELPER_STATUS_FAILED: u8 = 4;
+
+#[cfg(unix)]
+fn apply_helper_limits() {
+    let limit = libc::rlimit {
+        rlim_cur: 256 * 1024 * 1024,
+        rlim_max: 256 * 1024 * 1024,
+    };
+    unsafe {
+        libc::setrlimit(libc::RLIMIT_AS, &limit);
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_helper_limits() {}
+
+pub fn run_pdf_helper() -> i32 {
+    apply_helper_limits();
+    let mut input = std::io::stdin().lock();
+    let mut request = [0u8; 13];
+    if input.read_exact(&mut request).is_err()
+        || &request[..4] != PDF_HELPER_MAGIC
+        || request[4] != PDF_HELPER_VERSION
+    {
+        return 2;
+    }
+    let length = u32::from_le_bytes(request[5..9].try_into().unwrap()) as usize;
+    if length > PDF_BUDGET {
+        return 3;
+    }
+    let page = u32::from_le_bytes(request[9..13].try_into().unwrap());
+    let mut pdf = vec![0u8; length];
+    if input.read_exact(&mut pdf).is_err() {
+        return 4;
+    }
+    let result = render_page(&pdf, page);
+    let mut output = std::io::stdout().lock();
+    match result {
+        Ok(page) => {
+            let mut header = [0u8; 22];
+            header[..4].copy_from_slice(PDF_HELPER_RESPONSE_MAGIC);
+            header[4] = PDF_HELPER_VERSION;
+            header[5] = PDF_HELPER_STATUS_OK;
+            header[6..10].copy_from_slice(&page.pages_total.to_le_bytes());
+            header[10..14].copy_from_slice(&page.bitmap.width.to_le_bytes());
+            header[14..18].copy_from_slice(&page.bitmap.height.to_le_bytes());
+            header[18..22].copy_from_slice(&(page.bitmap.bgra.len() as u32).to_le_bytes());
+            if output.write_all(&header).is_err() || output.write_all(&page.bitmap.bgra).is_err() {
+                return 5;
+            }
+            0
+        }
+        Err(error) => {
+            let status = match error {
+                PdfUnavailable::NoRenderer => PDF_HELPER_STATUS_NO_RENDERER,
+                PdfUnavailable::Encrypted => PDF_HELPER_STATUS_ENCRYPTED,
+                PdfUnavailable::TooLarge { .. } => PDF_HELPER_STATUS_TOO_LARGE,
+                PdfUnavailable::Failed => PDF_HELPER_STATUS_FAILED,
+            };
+            let header = [
+                &PDF_HELPER_RESPONSE_MAGIC[..],
+                &[PDF_HELPER_VERSION, status][..],
+                &[0u8; 16][..],
+            ]
+            .concat();
+            if output.write_all(&header).is_err() {
+                return 5;
+            }
+            0
+        }
+    }
+}
+
+pub async fn render_page_isolated(
+    pdf: &[u8],
+    page_index: u32,
+) -> Result<RenderedPage, PdfUnavailable> {
+    let pdf = pdf.to_vec();
+    smol::unblock(move || render_page_isolated_blocking(&pdf, page_index)).await
+}
+
+fn render_page_isolated_blocking(
+    pdf: &[u8],
+    page_index: u32,
+) -> Result<RenderedPage, PdfUnavailable> {
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
+    let executable = std::env::current_exe().map_err(|_| PdfUnavailable::NoRenderer)?;
+    let mut child = Command::new(executable)
+        .arg("--pdf-helper")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| PdfUnavailable::NoRenderer)?;
+    let mut input = match child.stdin.take() {
+        Some(input) => input,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PdfUnavailable::NoRenderer);
+        }
+    };
+    let request = helper_request(pdf, page_index);
+    if input.write_all(&request).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(PdfUnavailable::Failed);
+    }
+    drop(input);
+    let mut output = match child.stdout.take() {
+        Some(output) => output,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PdfUnavailable::NoRenderer);
+        }
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let _ = sender.send(read_helper_response(&mut output));
+    });
+    let result = match receiver.recv_timeout(PDF_RENDER_DEADLINE) {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(PdfUnavailable::Failed);
+        }
+    };
+    let _ = child.wait();
+    let _ = reader.join();
+    result
+}
+
+fn helper_request(pdf: &[u8], page_index: u32) -> Vec<u8> {
+    let mut request = Vec::with_capacity(13 + pdf.len());
+    request.extend_from_slice(PDF_HELPER_MAGIC);
+    request.push(PDF_HELPER_VERSION);
+    request.extend_from_slice(&(pdf.len() as u32).to_le_bytes());
+    request.extend_from_slice(&page_index.to_le_bytes());
+    request.extend_from_slice(pdf);
+    request
+}
+
+fn read_helper_response(input: &mut impl Read) -> Result<RenderedPage, PdfUnavailable> {
+    let mut header = [0u8; 22];
+    input
+        .read_exact(&mut header)
+        .map_err(|_| PdfUnavailable::NoRenderer)?;
+    if &header[..4] != PDF_HELPER_RESPONSE_MAGIC || header[4] != PDF_HELPER_VERSION {
+        return Err(PdfUnavailable::NoRenderer);
+    }
+    let status = header[5];
+    let page_total = u32::from_le_bytes(header[6..10].try_into().unwrap());
+    let width = u32::from_le_bytes(header[10..14].try_into().unwrap());
+    let height = u32::from_le_bytes(header[14..18].try_into().unwrap());
+    let length = u32::from_le_bytes(header[18..22].try_into().unwrap()) as usize;
+    if status != PDF_HELPER_STATUS_OK {
+        return Err(match status {
+            PDF_HELPER_STATUS_NO_RENDERER => PdfUnavailable::NoRenderer,
+            PDF_HELPER_STATUS_ENCRYPTED => PdfUnavailable::Encrypted,
+            PDF_HELPER_STATUS_TOO_LARGE => PdfUnavailable::Failed,
+            _ => PdfUnavailable::Failed,
+        });
+    }
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(PdfUnavailable::Failed)?;
+    if width == 0
+        || height == 0
+        || pixels as u64 > super::config::IMAGE_SOURCE_PIXEL_CAP
+        || length != pixels.checked_mul(4).ok_or(PdfUnavailable::Failed)?
+    {
+        return Err(PdfUnavailable::Failed);
+    }
+    let mut bgra = vec![0u8; length];
+    input
+        .read_exact(&mut bgra)
+        .map_err(|_| PdfUnavailable::Failed)?;
+    let has_transparency = bgra.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 255);
+    Ok(RenderedPage {
+        bitmap: Bitmap {
+            width,
+            height,
+            bgra,
+            has_transparency,
+        },
+        natural: (width, height),
+        pages_total: page_total,
+    })
 }
 
 /// Without the `pdf` feature there is no backend to call — but the cheap
@@ -439,9 +643,44 @@ mod tests {
     }
 
     #[test]
+    fn helper_response_validates_bitmap_dimensions_and_bytes() {
+        let mut response = [0u8; 22];
+        response[..4].copy_from_slice(PDF_HELPER_RESPONSE_MAGIC);
+        response[4] = PDF_HELPER_VERSION;
+        response[5] = PDF_HELPER_STATUS_OK;
+        response[6..10].copy_from_slice(&2u32.to_le_bytes());
+        response[10..14].copy_from_slice(&1u32.to_le_bytes());
+        response[14..18].copy_from_slice(&1u32.to_le_bytes());
+        response[18..22].copy_from_slice(&4u32.to_le_bytes());
+        let mut input = response.to_vec();
+        input.extend_from_slice(&[1, 2, 3, 255]);
+        let page = read_helper_response(&mut input.as_slice()).unwrap();
+        assert_eq!(page.pages_total, 2);
+        assert_eq!(page.bitmap.width, 1);
+        assert_eq!(page.bitmap.height, 1);
+        assert!(!page.bitmap.has_transparency);
+
+        response[18..22].copy_from_slice(&3u32.to_le_bytes());
+        assert_eq!(
+            read_helper_response(&mut response.as_slice()).unwrap_err(),
+            PdfUnavailable::Failed
+        );
+    }
+
+    #[test]
+    fn helper_response_maps_native_statuses() {
+        let mut response = [0u8; 22];
+        response[..4].copy_from_slice(PDF_HELPER_RESPONSE_MAGIC);
+        response[4] = PDF_HELPER_VERSION;
+        response[5] = PDF_HELPER_STATUS_ENCRYPTED;
+        assert_eq!(
+            read_helper_response(&mut response.as_slice()).unwrap_err(),
+            PdfUnavailable::Encrypted
+        );
+    }
+
+    #[test]
     fn missing_libraries_fall_back_to_metadata_not_a_crash() {
-        // No Pdfium ships with the test environment: a small valid PDF must
-        // report the missing backend, never panic, never hang.
         match render_page(SINGLE_PAGE, 0) {
             Ok(_) => {}
             Err(PdfUnavailable::NoRenderer) => {}

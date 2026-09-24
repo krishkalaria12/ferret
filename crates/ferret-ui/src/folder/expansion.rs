@@ -144,7 +144,6 @@ impl Folder {
                     // A folder nested inside this one may have just been
                     // marked open, and owes its own listing a read.
                     folder.reload_expanded_children(cx);
-                    folder.recount_selection();
                 }
                 folder.settle_carried();
                 folder.start_metadata_backfill(cx);
@@ -386,17 +385,14 @@ impl Folder {
                 entry.metadata = Some(md);
             }
         }
-        if selection_changed {
-            // A selected row may have acquired its first size. Keep the
-            // status-bar cache coherent with the row repaint below.
-            self.recount_selection();
-        }
-
         let now = Instant::now();
         let due = self
             .last_meta_notify
             .map(|t| now.duration_since(t) >= META_NOTIFY_EVERY)
             .unwrap_or(true);
+        if selection_changed && (due || final_chunk) {
+            self.recount_selection();
+        }
         if due || final_chunk {
             self.last_meta_notify = Some(now);
             cx.emit(FolderEvent::RowsChanged);

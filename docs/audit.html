@@ -1109,37 +1109,15 @@ let volumes = self.volumes();       // → cached (A-25)</code></pre>
   </div>
 
   <div class="find sev3">
-    <h4><span class="fid">A-35</span> <code>LISTING_BATCH_SIZE</code> now gates the first row on 4,096 <code>stat</code> calls <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-vfs/src/config.rs:37 · vfs/local.rs — <code>resolve</code></p>
-    <p>4,096 was chosen when a batch was names only, to amortise a channel send and a model
-    update over enough rows to matter. <code>D-33</code> changed what a batch <em>is</em>:
-    every entry in it now carries a resolved <code>stat</code>, so the constant is doing a
-    second job it was never sized for — bounding how long the first row waits.</p>
-    <p><b>Measured</b>, <code>cargo xtask bench</code> on <code>flat/</code>: time to first row
-    went from <b>2.0 ms</b> before D-33 to <b>5.8 ms</b> after. Both are far inside the 50 ms
-    budget, which is why this is minor rather than a regression — but it is three times worse
-    for no reason, and the same constant also sets the ceiling on how much work a cancelled
-    walk leaves in flight.</p>
-    <p class="fix"><b>Fix</b> — Ramp it. A first batch of 128 puts the first row back under a
-    millisecond; doubling to the existing 4,096 over the next few batches keeps the throughput
-    the constant was chosen for. Roughly six lines, and it makes both jobs the constant is now
-    doing explicit instead of coincidental.</p>
+    <h4><span class="fid">A-35</span> Resolved: first listing batches ramp by size <span class="pill p-done">fixed</span></h4>
+    <p class="where">crates/ferret-vfs/src/config.rs · crates/ferret-vfs/src/local.rs</p>
+    <p>The listing path now uses a smaller first batch and ramps to the throughput batch size.</p>
   </div>
 
   <div class="find sev3">
-    <h4><span class="fid">A-36</span> <code>Assets::list</code> ignores the path it is given <span class="pill p-later">minor</span></h4>
-    <p class="where">crates/ferret-ui/src/assets.rs:27–31</p>
-    <pre><code>fn list(&amp;self, path: &amp;str) -&gt; gpui::Result&lt;Vec&lt;gpui::SharedString&gt;&gt; {
-    let mut out = FerretAssets::iter().map(Into::into).collect::&lt;Vec&lt;_&gt;&gt;();
-    //                          ^ every embedded asset, whatever `path` said
-    out.extend(gpui_component_assets::Assets.list(path)?);
-    Ok(out)
-}</code></pre>
-    <p>The contract is "list the assets under <code>path</code>". This lists all of Ferret's
-    assets under every path, and only delegates the filter to the library half. Nothing
-    currently depends on the answer being right, which is why it has gone unnoticed — but
-    "nothing currently calls this correctly" is a poor thing to be relying on, and the fix is
-    a <code>filter</code>.</p>
+    <h4><span class="fid">A-36</span> Resolved: asset listing filters Ferret assets by path <span class="pill p-done">fixed</span></h4>
+    <p class="where">crates/ferret-ui/src/assets.rs:34–40</p>
+    <p>The merged asset source now filters Ferret assets before combining them with the component assets.</p>
   </div>
 
   <div class="find sev3">

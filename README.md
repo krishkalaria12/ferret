@@ -10,24 +10,25 @@ for Markdown, source code, images and PDFs.
 Targets **macOS and Windows** (Linux deferred, not abandoned), built in Rust on
 [GPUI](https://www.gpui.rs/) with [gpui-component](https://github.com/longbridge/gpui-component).
 
-> **Status: scaffolding.** The workspace builds and opens a window; none of the
-> product features are implemented yet.
->
-> - **[`docs/ui-base.html`](docs/ui-base.html)** — the base explorer shell: mockup,
->   geometry, component map, tokens, interaction contract. **Build this first.**
-> - **[`docs/plan.html`](docs/plan.html)** — the whole product: 51 features, target
->   architecture, platform hazards, decisions, phases.
->
-> Open either in a browser.
+> **Status: active development.** The workspace now contains the explorer shell,
+> terminal, VFS, settings, Git, search, remote mounts, and preview pipeline.
+> Platform and feature coverage is still being completed against the phase plans.
 
 ## Workspace
 
 ```
 crates/
   ferret/           # native binary: bootstrap, window, menus, actions
-  ferret-ui/        # views, theme tokens, bundled file icons
-  ferret-vfs/       # the Vfs trait, local backend, path handling
+  ferret-ui/        # views, theme tokens, bundled file icons, preview surfaces
+  ferret-vfs/       # the Vfs trait, local backend, path handling, watcher
+  ferret-platform/  # trash, reveal, open-with, volumes, icons, thumbnails
+  ferret-preview/   # bounded preview classification, decoding, and parsing
+  ferret-remote/    # SSH sessions, SFTP mounts, and transfers
+  ferret-search/    # live and indexed search
+  ferret-searchd/   # per-user search index daemon
   ferret-settings/  # settings schema, per-folder view preferences
+  ferret-terminal/  # PTY sessions and terminal engines
+  ferret-git/       # Git discovery, status, and operations
 xtask/              # fixture generator and listing benchmark
 docs/
   ui-base.html # base explorer shell — the UI reference to build against

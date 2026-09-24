@@ -356,7 +356,7 @@ impl Browser {
                     let Some(browser) = this.upgrade() else {
                         return;
                     };
-                    let sources = dragged.paths.to_vec();
+                    let sources = dragged.paths(cx);
                     let record = dropped_on.clone();
                     browser.update(cx, |browser, cx| {
                         browser.send_to_connection(record, sources, window, cx);
@@ -523,7 +523,7 @@ impl Browser {
                     let Some(this) = this.upgrade() else {
                         return;
                     };
-                    let (sources, dest) = (dragged.paths.to_vec(), dest.clone());
+                    let (sources, dest) = (dragged.paths(cx), dest.clone());
                     let force_copy = window.modifiers().alt;
                     this.update(cx, |this, cx| {
                         // Same guard the pane applies.

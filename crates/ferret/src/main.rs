@@ -8,6 +8,9 @@ use gpui_component::Root;
 actions!(ferret, [Quit]);
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--pdf-helper") {
+        std::process::exit(ferret_preview::pdf::run_pdf_helper());
+    }
     // Names the main thread in the profiler timeline. Compiles to nothing
     // without `--features profile`; see that feature's comment in Cargo.toml.
     #[cfg(feature = "profile")]

@@ -21,6 +21,7 @@ mod edit;
 mod grammars;
 mod grid;
 mod header;
+mod image_cache;
 mod overlay;
 mod pdf;
 mod render;
@@ -30,10 +31,12 @@ mod budget;
 
 pub(crate) use overlay::{OverlaySnapshot, PreviewOverlay, SnapshotBody, overlay_geometry};
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::browser::Browser;
 use edit::{EditOriginal, EditSession};
+use ferret_preview::markdown::Sanitized;
 use ferret_preview::{
     Bitmap, DecodedImage, Frame, Pages, ParsedTable, PdfUnavailable, Preview, RenderedPage,
     Truncation,
@@ -47,6 +50,7 @@ use gpui_component::WindowExt as _;
 use gpui_component::input::{Editor, EditorState};
 use gpui_component::text::{TextView, TextViewState};
 use grid::CsvGrid;
+use image_cache::MarkdownImageCache;
 use smol_str::SmolStr;
 
 use crate::format::{format_date, format_size};
@@ -144,6 +148,7 @@ enum PaneState {
         /// The sanitized source the document view shows, retained so the
         /// F-75 overlay reuses it without re-sanitizing the file.
         sanitized: String,
+        images: HashMap<String, std::sync::Arc<gpui::RenderImage>>,
         original: Option<EditOriginal>,
     },
     Unsupported {
@@ -238,6 +243,7 @@ pub struct PreviewPanel {
     editor: Entity<EditorState>,
     /// One retained document view, reused across selections (F-31).
     docview: Entity<TextViewState>,
+    image_cache: Entity<MarkdownImageCache>,
     /// Navigation lives in the browser: only it owns history and tabs.
     /// Stored weakly so link clicks can reach it with a window in hand.
     browser: gpui::WeakEntity<Browser>,
@@ -288,9 +294,11 @@ impl PreviewPanel {
                 .soft_wrap(true)
         });
         let docview = cx.new(|cx| TextViewState::markdown("", cx));
+        let image_cache = MarkdownImageCache::new(cx);
         let mut pane = Self {
             editor: editor.clone(),
             docview,
+            image_cache,
             browser,
             focus: cx.focus_handle(),
             window: window.window_handle(),
@@ -522,6 +530,7 @@ impl PreviewPanel {
                 base,
                 remote,
                 sanitized,
+                images,
                 ..
             } => {
                 let dirty = self.editing.as_ref().is_some_and(|session| session.dirty);
@@ -535,6 +544,7 @@ impl PreviewPanel {
                 };
                 SnapshotBody::Markdown {
                     sanitized: sanitized.clone(),
+                    images: images.clone(),
                     base: base.clone(),
                     remote: *remote,
                     footer,
@@ -743,6 +753,7 @@ impl PreviewPanel {
                 detail,
                 original,
                 sanitized,
+                images,
                 footer,
                 base,
                 remote,
@@ -756,6 +767,8 @@ impl PreviewPanel {
                 self.docview.update(cx, |docview, cx| {
                     docview.set_text(&sanitized, cx);
                 });
+                self.image_cache
+                    .update(cx, |cache, _| cache.replace(images.clone()));
                 self.state = PaneState::ReadyMd {
                     entry,
                     detail,
@@ -764,6 +777,7 @@ impl PreviewPanel {
                     base,
                     remote,
                     sanitized,
+                    images,
                     original: edit_original,
                 };
                 cx.notify();
@@ -1000,6 +1014,7 @@ pub(crate) enum LoadOutcome {
         original: String,
         /// Sanitized source for the document view: no loadable image.
         sanitized: String,
+        images: HashMap<String, std::sync::Arc<gpui::RenderImage>>,
         footer: Option<SharedString>,
         base: Option<PathBuf>,
         remote: bool,
@@ -1118,28 +1133,24 @@ async fn text_outcome(
     let shown = bytes.len() as u64;
     let total = total.unwrap_or(shown);
     let base = entry.path.parent().unwrap_or_else(|| VfsPath::local("/"));
-    // The edit snapshot is taken here, from the bytes the user is about to
-    // see — never re-read later. Only text kinds keep their bytes, and only
-    // a complete read on a plain file behind an atomic-save backend can ever
-    // become an Edit button; everything else drops the clone below.
-    let identity = FileIdentity::new(
-        total,
-        entry.metadata.and_then(|metadata| metadata.modified),
-        &bytes,
-    );
-    // The bytes in hand cover the whole file: an empty file is complete,
-    // a short read of a longer file is not.
     let complete = shown >= total;
-    let candidate = matches!(
+    let candidate = if matches!(
         kind,
         ferret_preview::Kind::Markdown | ferret_preview::Kind::Code { .. }
-    )
-    .then(|| {
-        let can_write = !remote
-            && matches!(entry.kind, EntryKind::File)
-            && fs.capabilities_for(&entry.path).atomic_write;
-        (bytes.clone(), identity, complete && can_write)
-    });
+    ) && complete
+        && !remote
+        && matches!(entry.kind, EntryKind::File)
+        && fs.capabilities_for(&entry.path).atomic_write
+    {
+        let identity = FileIdentity::new(
+            total,
+            entry.metadata.and_then(|metadata| metadata.modified),
+            &bytes,
+        );
+        Some((bytes.clone(), identity))
+    } else {
+        None
+    };
     // PDFs render through the bundled backend where one answers (PV-D08):
     // installed shell handlers never decide whether ordinary PDFs work, so
     // Pdfium is asked before the OS thumbnail service. Complete input only —
@@ -1162,6 +1173,33 @@ async fn text_outcome(
         };
     }
     let preview = ferret_preview::build(kind, bytes, Some(total), base, remote);
+    let preview = match preview {
+        ferret_preview::Preview::Markdown {
+            source,
+            truncated,
+            base,
+        } => {
+            let size_label = format_size(entry.metadata.map(|md| md.len).unwrap_or(total));
+            let modified = entry
+                .metadata
+                .and_then(|metadata| metadata.modified)
+                .map(format_date)
+                .unwrap_or_else(|| "unknown date".to_string());
+            return markdown_outcome_with_images(
+                entry,
+                &size_label,
+                &modified,
+                source,
+                truncated,
+                base,
+                remote,
+                edit_original(candidate),
+                fs,
+            )
+            .await;
+        }
+        preview => preview,
+    };
     // Kinds with no in-process decoder get one best-effort native question —
     // a local PDF or HEIC answered by the OS — before falling through to
     // metadata. Anything the service declines keeps its `Unsupported`.
@@ -1181,11 +1219,8 @@ async fn text_outcome(
 /// was complete on a writable backend. The snapshot exists only when a fresh
 /// decode of those bytes is saveable — uniform endings, lossless, untruncated
 /// — so the Edit button is a flag read, never a second judgement.
-fn edit_original(candidate: Option<(Vec<u8>, FileIdentity, bool)>) -> Option<EditOriginal> {
-    let (bytes, identity, writable) = candidate?;
-    if !writable {
-        return None;
-    }
+fn edit_original(candidate: Option<(Vec<u8>, FileIdentity)>) -> Option<EditOriginal> {
+    let (bytes, identity) = candidate?;
     let saveable = ferret_preview::text::decode(&bytes).is_some_and(|decoded| decoded.saveable());
     saveable.then_some(EditOriginal {
         bytes,
@@ -1277,13 +1312,7 @@ async fn pdfium_page(
     pdf: std::sync::Arc<Vec<u8>>,
     page: u32,
 ) -> Result<RenderedPage, PdfUnavailable> {
-    let render = smol::unblock(move || ferret_preview::render_page(&pdf, page));
-    let deadline = smol::Timer::after(ferret_preview::config::PDF_RENDER_DEADLINE);
-    futures::pin_mut!(render, deadline);
-    match futures::future::select(render, deadline).await {
-        futures::future::Either::Left((outcome, _)) => outcome,
-        futures::future::Either::Right(_) => Err(PdfUnavailable::Failed),
-    }
+    ferret_preview::pdf::render_page_isolated(pdf.as_slice(), page).await
 }
 
 /// One best-effort OS thumbnail for the docked pane, cached on disk.
@@ -1304,6 +1333,9 @@ async fn native_preview(
         return None;
     }
     let local = entry.path.as_local()?;
+    if !ferret_platform::native_thumbnail_path_allowed(local) {
+        return None;
+    }
     if total > ferret_platform::config::NATIVE_THUMBNAIL_INPUT_LIMIT {
         return None;
     }
@@ -1364,7 +1396,7 @@ fn preview_outcome(
     preview: Preview,
     total: u64,
     remote: bool,
-    edit: Option<(Vec<u8>, FileIdentity, bool)>,
+    edit: Option<(Vec<u8>, FileIdentity)>,
 ) -> LoadOutcome {
     let size_label = format_size(entry.metadata.map(|md| md.len).unwrap_or(total));
     let modified = entry
@@ -1588,6 +1620,32 @@ fn markdown_outcome(
     remote: bool,
     edit_original: Option<EditOriginal>,
 ) -> LoadOutcome {
+    markdown_outcome_parts(
+        entry,
+        size_label,
+        modified,
+        source,
+        truncated,
+        base,
+        remote,
+        edit_original,
+        true,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn markdown_outcome_parts(
+    entry: &Entry,
+    size_label: &str,
+    modified: &str,
+    source: String,
+    truncated: Truncation,
+    base: VfsPath,
+    remote: bool,
+    edit_original: Option<EditOriginal>,
+    announce_local_as_text: bool,
+) -> (LoadOutcome, Option<Sanitized>) {
     let detail = SharedString::from(format!("Markdown · {size_label} · {modified}"));
     let base_dir: Option<PathBuf> = if remote {
         None
@@ -1612,7 +1670,7 @@ fn markdown_outcome(
                     plural(sanitized.blocked_unsafe)
                 ));
             }
-            if !sanitized.local.is_empty() {
+            if announce_local_as_text && !sanitized.local.is_empty() {
                 notes.push(format!(
                     "{} local image{} shown as text for now",
                     sanitized.local.len(),
@@ -1629,16 +1687,18 @@ fn markdown_outcome(
                     None => SharedString::from(note),
                 });
             }
-            LoadOutcome::Markdown {
+            let outcome = LoadOutcome::Markdown {
                 entry: entry.clone(),
                 detail,
                 original: source,
-                sanitized: sanitized.source,
+                sanitized: sanitized.source.clone(),
+                images: HashMap::new(),
                 footer,
                 base: base_dir,
                 remote,
                 edit_original,
-            }
+            };
+            (outcome, Some(sanitized))
         }
         Err(reason) => {
             let why = match reason {
@@ -1651,20 +1711,71 @@ fn markdown_outcome(
                 Some(existing) => SharedString::from(format!("{existing} {note}")),
                 None => SharedString::from(note),
             });
-            LoadOutcome::Text {
-                entry: entry.clone(),
-                detail,
-                text: source,
-                language: SmolStr::new("markdown"),
-                wrap: true,
-                footer,
-                // The sanitizer refused, so the source view is a fallback
-                // surface, not an editing one: saving from a refused
-                // document would write back bytes the policy never approved.
-                original: None,
-            }
+            (
+                LoadOutcome::Text {
+                    entry: entry.clone(),
+                    detail,
+                    text: source,
+                    language: SmolStr::new("markdown"),
+                    wrap: true,
+                    footer,
+                    original: None,
+                },
+                None,
+            )
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn markdown_outcome_with_images(
+    entry: &Entry,
+    size_label: &str,
+    modified: &str,
+    source: String,
+    truncated: Truncation,
+    base: VfsPath,
+    remote: bool,
+    edit_original: Option<EditOriginal>,
+    fs: &impl ferret_vfs::Vfs,
+) -> LoadOutcome {
+    let (mut outcome, sanitized) = markdown_outcome_parts(
+        entry,
+        size_label,
+        modified,
+        source,
+        truncated,
+        base,
+        remote,
+        edit_original,
+        false,
+    );
+    let Some(sanitized) = sanitized else {
+        return outcome;
+    };
+    let loaded = ferret_preview::markdown::load_doc_images(fs, &sanitized.local).await;
+    let mut keys = Vec::with_capacity(loaded.len());
+    let mut images = HashMap::with_capacity(loaded.len());
+    for image in loaded {
+        let Some(frame) = image.image.frames.first() else {
+            continue;
+        };
+        let Some(render_image) = render_bitmap(&frame.bitmap) else {
+            continue;
+        };
+        keys.push(image.key.clone());
+        images.insert(image.key, render_image);
+    }
+    if let LoadOutcome::Markdown {
+        sanitized: rendered,
+        images: slot,
+        ..
+    } = &mut outcome
+    {
+        *rendered = sanitized.source_with_loaded_keys(&keys);
+        *slot = images;
+    }
+    outcome
 }
 
 fn plural(count: usize) -> &'static str {

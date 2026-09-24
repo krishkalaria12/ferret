@@ -106,6 +106,82 @@ impl SftpVfs {
         self.cache.invalidate(path);
     }
 
+    pub(crate) async fn replace_remote(
+        &self,
+        from: &VfsPath,
+        to: &VfsPath,
+    ) -> ferret_vfs::Result<()> {
+        let source = self.remote_path(from)?;
+        let destination = self.remote_path(to)?;
+        self.cache.invalidate(&source);
+        self.cache.invalidate(&destination);
+        let subject = to.clone();
+        let raw = self.raw.clone();
+        let atomic = self.atomic_rename;
+        crate::spawn(async move {
+            if atomic {
+                let mut payload = Vec::new();
+                encode_string(&mut payload, &source);
+                encode_string(&mut payload, &destination);
+                return raw
+                    .extended("posix-rename@openssh.com", payload)
+                    .await
+                    .map(drop)
+                    .map_err(|error| map_error(error, "replace", &subject));
+            }
+
+            let existing = match raw.lstat(destination.clone()).await {
+                Ok(attrs) => {
+                    if attrs.attrs.is_dir() {
+                        return Err(invalid_path(&subject, "the destination is a directory"));
+                    }
+                    true
+                }
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                    false
+                }
+                Err(error) => return Err(map_error(error, "replace", &subject)),
+            };
+            let backup = format!(
+                "{destination}.ferret-replace-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or(0),
+            );
+            if existing {
+                raw.rename(destination.clone(), backup.clone())
+                    .await
+                    .map(drop)
+                    .map_err(|error| map_error(error, "replace", &subject))?;
+            }
+            match raw.rename(source, destination.clone()).await {
+                Ok(_) => {
+                    if existing {
+                        let _ = raw.remove(backup).await;
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    if existing && let Err(rollback) = raw.rename(backup, destination.clone()).await
+                    {
+                        return Err(VfsError::Io {
+                            action: "replace",
+                            path: subject.clone(),
+                            source: std::io::Error::other(format!(
+                                "replacement failed: {error}; rollback failed: {rollback}"
+                            )),
+                        });
+                    }
+                    Err(map_error(error, "replace", &subject))
+                }
+            }
+        })
+        .await
+        .map_err(|error| error.into_vfs("replace", to))?
+    }
+
     /// Resolve the login account's home directory for the mount's first path.
     pub async fn home(&self) -> ferret_vfs::Result<VfsPath> {
         let raw = self.raw.clone();
@@ -310,13 +386,17 @@ impl Vfs for SftpVfs {
             if !link.attrs.is_symlink() {
                 return Ok::<_, SftpError>((link, None, None));
             }
-            let target = raw
-                .readlink(remote.clone())
-                .await
-                .ok()
-                .and_then(|names| names.files.into_iter().next().map(|file| file.filename));
+            let target = raw.readlink(remote.clone()).await?;
+            let target = target
+                .files
+                .into_iter()
+                .next()
+                .map(|file| file.filename)
+                .ok_or_else(|| {
+                    SftpError::UnexpectedBehavior("readlink returned no target".into())
+                })?;
             let resolved = raw.stat(remote).await.ok();
-            Ok((link, resolved, target))
+            Ok((link, resolved, Some(target)))
         })
         .await
         .map_err(|error| error.into_vfs("probe", path))?
@@ -597,7 +677,7 @@ fn remove_recursive<'a>(
         let _ = raw.close(handle).await;
 
         for child in children {
-            let child_path = format!("{}/{}", path.trim_end_matches('/'), child);
+            let child_path = join_remote(&path, &child);
             remove_recursive(raw, child_path, subject).await?;
         }
         raw.rmdir(path)
@@ -631,20 +711,25 @@ fn copy_recursive<'a>(
             let target = raw
                 .readlink(from.clone())
                 .await
-                .ok()
-                .and_then(|names| names.files.into_iter().next().map(|file| file.filename));
-            if let Some(target) = target {
-                return raw
-                    .symlink(to, target)
-                    .await
-                    .map(drop)
-                    .map_err(|error| map_error(error, "copy", subject));
-            }
-            return Ok(());
+                .map_err(|error| map_error(error, "copy", subject))?;
+            let target = target
+                .files
+                .into_iter()
+                .next()
+                .map(|file| file.filename)
+                .ok_or_else(|| invalid_path(subject, "the server returned no symlink target"))?;
+            return raw
+                .symlink(to, target)
+                .await
+                .map(drop)
+                .map_err(|error| map_error(error, "copy", subject));
         }
 
         if attrs.attrs.is_dir() {
-            let _ = raw.mkdir(to.clone(), FileAttributes::empty()).await;
+            raw.mkdir(to.clone(), FileAttributes::empty())
+                .await
+                .map(drop)
+                .map_err(|error| map_error(error, "copy", subject))?;
             let handle = raw
                 .opendir(from.clone())
                 .await
@@ -671,8 +756,8 @@ fn copy_recursive<'a>(
             }
             let _ = raw.close(handle).await;
             for child in children {
-                let source = format!("{}/{}", from.trim_end_matches('/'), child);
-                let target = format!("{}/{}", to.trim_end_matches('/'), child);
+                let source = join_remote(&from, &child);
+                let target = join_remote(&to, &child);
                 copy_recursive(raw, source, target, subject).await?;
             }
             return Ok(());
@@ -701,7 +786,7 @@ async fn copy_file_data(
     let destination = match raw
         .open(
             to.to_string(),
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
             FileAttributes::empty(),
         )
         .await
@@ -737,7 +822,7 @@ fn encode_string(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.as_bytes());
 }
 
-fn validate_path(path: &str) -> std::result::Result<(), &'static str> {
+pub(crate) fn validate_path(path: &str) -> std::result::Result<(), &'static str> {
     if path.as_bytes().contains(&0) {
         return Err("remote paths cannot contain NUL");
     }
@@ -750,7 +835,7 @@ fn validate_path(path: &str) -> std::result::Result<(), &'static str> {
     Ok(())
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -816,9 +901,19 @@ fn map_error(error: SftpError, action: &'static str, path: &VfsPath) -> VfsError
     .into_vfs(action, path)
 }
 
+pub(crate) fn join_remote(parent: &str, name: &str) -> String {
+    let parent = parent.trim_end_matches('/');
+    let name = name.trim_start_matches('/');
+    if parent.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
 fn remote_child(parent: &VfsPath, name: &str) -> String {
     match parent {
-        VfsPath::Remote { path, .. } => format!("{}/{}", path.trim_end_matches('/'), name),
+        VfsPath::Remote { path, .. } => join_remote(path, name),
         VfsPath::Local(_) => unreachable!("validated remote parent"),
     }
 }
@@ -831,9 +926,7 @@ fn entry_from_attrs(
     symlink_target: Option<SymlinkTarget>,
 ) -> Entry {
     let path = match parent {
-        VfsPath::Remote { path, .. } => {
-            VfsPath::remote(mount, format!("{}/{}", path.trim_end_matches('/'), name))
-        }
+        VfsPath::Remote { path, .. } => VfsPath::remote(mount, join_remote(path, name)),
         VfsPath::Local(_) => unreachable!("validated before listing"),
     };
     let kind = if attrs.is_symlink() {
@@ -888,6 +981,7 @@ mod tests {
         assert!(validate_path("/safe/../escape").is_err());
         assert!(validate_path("/bad\0name").is_err());
         assert!(validate_path("/safe/path").is_ok());
+        assert_eq!(join_remote("/", "file.txt"), "/file.txt");
     }
 
     #[test]

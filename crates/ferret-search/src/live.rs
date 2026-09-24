@@ -584,11 +584,21 @@ impl Sink for ContentFileSink<'_> {
     }
 }
 
+fn is_utf8_boundary(line: &[u8], index: usize) -> bool {
+    index == 0 || index == line.len() || !matches!(line.get(index - 1), Some(0x80..=0xbf))
+}
+
 pub(crate) fn preview(line: &[u8], matches: &[Match]) -> (SmolStr, Vec<TextRange>) {
     let first = matches[0];
     let context_before = MAX_PREVIEW_BYTES / 3;
-    let start = first.start().saturating_sub(context_before);
-    let end = line.len().min(start.saturating_add(MAX_PREVIEW_BYTES));
+    let mut start = first.start().saturating_sub(context_before);
+    while start > 0 && !is_utf8_boundary(line, start) {
+        start -= 1;
+    }
+    let mut end = line.len().min(start.saturating_add(MAX_PREVIEW_BYTES));
+    while end < line.len() && !is_utf8_boundary(line, end) {
+        end += 1;
+    }
     let bytes = &line[start..end];
     let preview = String::from_utf8_lossy(bytes);
     let ranges = matches
@@ -596,9 +606,20 @@ pub(crate) fn preview(line: &[u8], matches: &[Match]) -> (SmolStr, Vec<TextRange
         .filter_map(|found| {
             let raw_start = found.start().max(start);
             let raw_end = found.end().min(end);
-            (raw_start <= raw_end && raw_start < end).then(|| TextRange {
-                start: String::from_utf8_lossy(&line[start..raw_start]).len(),
-                end: String::from_utf8_lossy(&line[start..raw_end]).len(),
+            if raw_start >= end {
+                return None;
+            }
+            let mut match_start = raw_start.min(line.len());
+            while match_start > start && !is_utf8_boundary(line, match_start) {
+                match_start -= 1;
+            }
+            let mut match_end = raw_end.max(match_start).min(end);
+            while match_end < end && !is_utf8_boundary(line, match_end) {
+                match_end += 1;
+            }
+            Some(TextRange {
+                start: String::from_utf8_lossy(&line[start..match_start]).len(),
+                end: String::from_utf8_lossy(&line[start..match_end]).len(),
             })
         })
         .collect();
@@ -613,10 +634,11 @@ pub(crate) fn strip_line_ending(bytes: &[u8]) -> &[u8] {
 }
 
 pub(crate) fn display_column(line: &[u8], found: Match) -> u64 {
-    String::from_utf8_lossy(&line[..found.start()])
-        .chars()
-        .count() as u64
-        + 1
+    let mut start = found.start().min(line.len());
+    while start > 0 && !is_utf8_boundary(line, start) {
+        start -= 1;
+    }
+    String::from_utf8_lossy(&line[..start]).chars().count() as u64 + 1
 }
 
 pub(crate) fn entry_kind(file_type: std::fs::FileType) -> EntryKind {

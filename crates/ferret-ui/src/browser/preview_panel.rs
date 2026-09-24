@@ -24,6 +24,8 @@ pub(super) enum GuardPending {
     Reselect,
     /// Navigate to a directory after the answer.
     Navigate(VfsPath),
+    Back,
+    Forward,
     /// Switch to a tab after the answer.
     ActivateTab(usize),
     /// Close a tab after the answer.
@@ -387,11 +389,11 @@ impl Browser {
             });
         }
         let focus = overlay.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
         self.preview_overlay = Some(overlay.clone());
         self.overlay_open = true;
         let closed = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, window, _cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
+            window.focus(&focus, cx);
             let viewport = window.viewport_size();
             let geometry = crate::preview::overlay_geometry(
                 f32::from(viewport.width),
@@ -679,6 +681,8 @@ impl Browser {
                 self.sync_preview(&folder, false, window, cx);
             }
             Some(GuardPending::Navigate(path)) => self.navigate(path, window, cx),
+            Some(GuardPending::Back) => self.go_back(window, cx),
+            Some(GuardPending::Forward) => self.go_forward(window, cx),
             Some(GuardPending::ActivateTab(ix)) => self.activate_tab(ix, window, cx),
             Some(GuardPending::CloseTab(ix)) => self.close_tab(ix, window, cx),
             Some(GuardPending::CollapsePreview) => self.toggle_preview(window, cx),

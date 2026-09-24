@@ -263,11 +263,9 @@ mod tests {
         assert!(bitmap.is_well_formed());
         assert_eq!((bitmap.width, bitmap.height), (120, 80));
         // The red rect covers the middle: some pixel is opaque and reddish.
+        let (pixels, _) = bitmap.bgra.as_chunks::<4>();
         assert!(
-            bitmap
-                .bgra
-                .chunks_exact(4)
-                .any(|pixel| pixel[3] == 255 && pixel[2] > 200),
+            pixels.iter().any(|pixel| pixel[3] == 255 && pixel[2] > 200),
             "the rect must have painted"
         );
     }

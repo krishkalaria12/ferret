@@ -32,7 +32,7 @@ fmt:
     cargo fmt --all
 
 test:
-    cargo test --workspace
+    cargo test --workspace -- --test-threads=1
 
 # The allocations-per-frame budget (docs/audit.html §11).
 #

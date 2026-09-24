@@ -15,6 +15,7 @@ use crate::record::{Connection, ConnectionId};
 use crate::{RemoteError, Result};
 use ferret_vfs::MountId;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The file's shape. A wrapper object rather than a bare array, so a version
@@ -230,11 +231,21 @@ pub fn write_store(path: &Path, contents: &str) -> Result<()> {
             message: err.to_string(),
         })?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, contents).map_err(|err| RemoteError::Store {
-        path: tmp.clone(),
+    let (tmp, mut file) = create_store_temp(path).map_err(|err| RemoteError::Store {
+        path: path.to_path_buf(),
         message: err.to_string(),
     })?;
+    let result = file
+        .write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(RemoteError::Store {
+            path: tmp,
+            message: error.to_string(),
+        });
+    }
     std::fs::rename(&tmp, path).map_err(|err| {
         let _ = std::fs::remove_file(&tmp);
         RemoteError::Store {
@@ -242,6 +253,39 @@ pub fn write_store(path: &Path, contents: &str) -> Result<()> {
             message: err.to_string(),
         }
     })
+}
+
+fn create_store_temp(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("connections");
+    for _ in 0..32 {
+        let tmp = parent.join(format!(
+            ".{name}.{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0),
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a private temporary store file",
+    ))
 }
 
 #[cfg(test)]
@@ -327,5 +371,20 @@ mod tests {
         if store.take_pending_save().is_some() {
             assert!(!store.is_dirty());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_temp_file_is_private_before_rename() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = std::env::temp_dir().join(format!(
+            "ferret-store-{}-connections.json",
+            std::process::id()
+        ));
+        let (temp, _file) = create_store_temp(&path).unwrap();
+        let mode = std::fs::metadata(&temp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        std::fs::remove_file(temp).ok();
     }
 }

@@ -8,12 +8,12 @@ use ferret_search::{
     SearchScopeKind, SearchService as _,
 };
 use gpui::{
-    AppContext as _, ClickEvent, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    ClickEvent, Context, Entity, Focusable as _, IntoElement, Render, SharedString, Subscription,
+    Task, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    Icon,
+    button::Button,
     h_flex,
     input::{Input, InputEvent, InputState},
     v_flex,
@@ -709,8 +709,8 @@ impl Browser {
             }
         };
         let focus = search.read(cx).name_input.read(cx).focus_handle(cx).clone();
-        window.focus(&focus, cx);
-        window.open_dialog(cx, move |dialog, window, _cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
+            window.focus(&focus, cx);
             let viewport = window.viewport_size();
             let geometry = dialog_geometry(f32::from(viewport.width), f32::from(viewport.height));
             let search_on_close = search.clone();
