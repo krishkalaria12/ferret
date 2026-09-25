@@ -78,6 +78,14 @@ impl PreviewPanel {
                 (Self::display_name(name), SharedString::from("Preview"))
             }
         };
+        let detail = match self
+            .state
+            .entry()
+            .and_then(|entry| entry.link_target_label())
+        {
+            Some(target) => SharedString::from(format!("{detail} · → {target}")),
+            None => detail,
+        };
         let reveal_label: &'static str = if cfg!(target_os = "macos") {
             "Reveal in Finder"
         } else {

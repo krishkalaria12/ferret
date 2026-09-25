@@ -213,6 +213,57 @@ fn dotfiles_are_hidden() {
 }
 
 #[test]
+fn creates_file_and_directory_links_without_overwriting() {
+    let root = tempdir("create-links");
+    let file = root.join("real.txt");
+    let directory = root.join("real-dir");
+    fs::write(&file, b"target").unwrap();
+    fs::create_dir(&directory).unwrap();
+
+    let fs_ = LocalFs::new();
+    let file_link = VfsPath::local(root.join("file-link"));
+    let directory_link = VfsPath::local(root.join("directory-link"));
+    smol::block_on(async {
+        fs_.create_symlink(&file_link, file.to_str().unwrap(), crate::SymlinkKind::File)
+            .await
+            .unwrap();
+        fs_.create_symlink(
+            &directory_link,
+            directory.to_str().unwrap(),
+            crate::SymlinkKind::Directory,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs_.read_link(&file_link).await.unwrap(), file);
+        assert_eq!(fs_.read_link(&directory_link).await.unwrap(), directory);
+        assert!(matches!(
+            fs_.create_symlink(&file_link, file.to_str().unwrap(), crate::SymlinkKind::File,)
+                .await,
+            Err(VfsError::AlreadyExists { .. })
+        ));
+    });
+
+    assert_eq!(fs::read(&file).unwrap(), b"target");
+    assert!(directory.is_dir());
+    fs::remove_dir_all(&root).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_link_can_be_listed_through_its_own_path() {
+    let root = tempdir("navigate-link");
+    let target = root.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("inside.txt"), b"x").unwrap();
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let entries = collect(&LocalFs::new(), &VfsPath::local(link.clone()));
+    assert_eq!(entries["inside.txt"].name(), "inside.txt");
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn copy_copies_files_and_trees_without_following_links() {
     let root = tempdir("copy");
     let src = root.join("src");

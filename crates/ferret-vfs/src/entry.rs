@@ -57,6 +57,10 @@ impl EntryKind {
     pub fn is_broken_symlink(self) -> bool {
         matches!(self, EntryKind::Symlink { target_kind: None })
     }
+
+    pub fn is_symlink(self) -> bool {
+        matches!(self, EntryKind::Symlink { .. })
+    }
 }
 
 /// The metadata tier that costs a second syscall on some platforms.
@@ -110,13 +114,16 @@ pub struct Entry {
     /// follow-up [`crate::Vfs::metadata`] call. Never block a frame on `None`;
     /// render the row and let the value arrive.
     pub metadata: Option<Metadata>,
-    /// Where a **broken** symlink points, for the file list to show alongside
-    /// the name.
+    /// The target a symbolic link records, held as the exact text the link
+    /// itself carries.
     ///
-    /// Only filled for links that resolve to nothing: a working link's target
-    /// is not worth a `readlink` per row, and a dead one is useless without
-    /// it — "broken link" that will not say to *what* is not a diagnosis.
-    pub link_target: Option<Arc<Path>>,
+    /// `Arc<str>` rather than `Arc<Path>` for one reason: a `Path` is a fat
+    /// pointer, so keeping the label alongside it would push `Entry` past the
+    /// size budget (A-34). As text, one field answers both questions — the
+    /// path for anything that has to resolve it, the label for anything that
+    /// only draws it — and a remote server's separators survive a round trip
+    /// that a `PathBuf` would have normalised on Windows.
+    pub link_target: Option<Arc<str>>,
 }
 
 impl Entry {
@@ -164,9 +171,30 @@ impl Entry {
         self
     }
 
-    pub fn with_link_target(mut self, link_target: Option<Arc<Path>>) -> Self {
+    /// Attaches the target a symbolic link records.
+    ///
+    /// Takes the target as the backend read it, so nothing about it is
+    /// re-derived: an SFTP server's own text and a local `read_link`'s bytes
+    /// are both what the row shows.
+    pub fn with_link_target(mut self, link_target: Option<Arc<str>>) -> Self {
         self.link_target = link_target;
         self
+    }
+
+    /// [`Entry::with_link_target`] for a backend holding the target as a
+    /// `String`, which is what a lossy conversion of a local path produces.
+    pub fn with_link_target_text(self, target: String) -> Self {
+        self.with_link_target(Some(Arc::from(target)))
+    }
+
+    /// The target as a path, for anything that has to resolve against it.
+    pub fn link_target_path(&self) -> Option<&Path> {
+        self.link_target.as_deref().map(Path::new)
+    }
+
+    /// The target as written, for anything that only draws it.
+    pub fn link_target_label(&self) -> Option<&str> {
+        self.link_target.as_deref()
     }
 
     pub fn name(&self) -> &str {
@@ -269,6 +297,27 @@ mod tests {
         let broken = EntryKind::Symlink { target_kind: None };
         assert!(broken.is_broken_symlink());
         assert!(!broken.is_dir_like());
+    }
+
+    #[test]
+    fn a_link_target_answers_both_a_path_and_a_label_from_one_field() {
+        // The label is not derived per row, so nothing allocates while
+        // drawing: one field holds the target exactly as the backend read it
+        // and both accessors are views over it. The local backend reaches it
+        // through a lossy conversion of a `Path`, SFTP through the server's
+        // own text, so both constructors have to answer the same.
+        let from_path = entry("l", EntryKind::Symlink { target_kind: None }, 0)
+            .with_link_target(Some(std::sync::Arc::from("/targets/real.txt")));
+        assert_eq!(
+            from_path.link_target_path(),
+            Some(Path::new("/targets/real.txt"))
+        );
+        assert_eq!(from_path.link_target_label(), Some("/targets/real.txt"));
+
+        let from_text = entry("l", EntryKind::Symlink { target_kind: None }, 0)
+            .with_link_target_text("real.txt".to_string());
+        assert_eq!(from_text.link_target_path(), Some(Path::new("real.txt")));
+        assert_eq!(from_text.link_target_label(), Some("real.txt"));
     }
 
     #[test]

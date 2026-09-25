@@ -649,14 +649,13 @@ impl PreviewPanel {
         // named, not a silent empty pane — and no read is attempted.
         if entry.kind.is_broken_symlink() {
             let target = entry
-                .link_target
-                .as_deref()
-                .map(|target| target.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "(unknown target)".to_string());
+                .link_target_label()
+                .unwrap_or("(unknown target)")
+                .to_owned();
             self.state = PaneState::Error {
                 name: SharedString::from(entry.name()),
                 message: SharedString::from(format!(
-                    "Ferret can't preview {} — it points at {target}, which no longer exists.",
+                    "Ferret can't preview {} — its target {target} can't be resolved.",
                     entry.name()
                 )),
             };

@@ -51,6 +51,7 @@ use commit_dialog::CommitDialog;
 use connection_dialog::ConnectionDialog;
 pub(crate) use git::GitHandle;
 use git::GitPanel;
+use symlink_dialog::SymlinkDialog;
 use terminal_metrics::terminal_metrics;
 // Only the allocations-per-frame budget constructs one directly.
 #[cfg(all(test, feature = "dhat-heap"))]
@@ -70,6 +71,7 @@ mod render;
 mod send_to;
 mod settings_dialog;
 mod sidebar;
+mod symlink_dialog;
 mod tab_strip;
 mod tabs;
 mod terminal_metrics;
@@ -250,6 +252,7 @@ pub struct Browser {
     /// never rebuilt by `Dialog`'s per-frame builder.
     power_search: Option<Entity<power_search::PowerSearch>>,
     batch_rename: Option<Entity<batch_rename::BatchRenameDialog>>,
+    symlink_dialog: Option<Entity<SymlinkDialog>>,
     /// The inline name filter, always mounted at the right of the path bar.
     filter_input: Entity<InputState>,
     /// Held so the filter input keeps notifying the folder.
@@ -456,6 +459,7 @@ impl Browser {
             path_editing: None,
             power_search: None,
             batch_rename: None,
+            symlink_dialog: None,
             filter_input,
             _filter_subscription: filter_subscription,
             filter_task: None,

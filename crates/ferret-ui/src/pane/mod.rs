@@ -71,6 +71,10 @@ pub enum PaneEvent {
     /// Double-click or Open action on a file: hand to the OS.
     OpenFile(VfsPath),
     BatchRename(Arc<[VfsPath]>),
+    CreateSymlink {
+        target: Option<VfsPath>,
+        target_kind: Option<ferret_vfs::SymlinkTarget>,
+    },
     /// Sort or view preferences changed; the browser persists them.
     ViewChanged,
     /// Rows were dropped on a folder (§8). The browser owns the filesystem
@@ -170,6 +174,17 @@ pub(super) const ROW_HEIGHT: f32 = 30.;
 pub(super) const ROW_FONT_SIZE: f32 = 13.;
 /// Column header type size (§4): chrome, one step down from the rows.
 pub(super) const HEADER_FONT_SIZE: f32 = 11.5;
+
+pub(super) fn symlink_target_kind(
+    kind: ferret_vfs::EntryKind,
+) -> Option<ferret_vfs::SymlinkTarget> {
+    match kind {
+        ferret_vfs::EntryKind::Dir => Some(ferret_vfs::SymlinkTarget::Dir),
+        ferret_vfs::EntryKind::File => Some(ferret_vfs::SymlinkTarget::File),
+        ferret_vfs::EntryKind::Symlink { target_kind } => target_kind,
+        ferret_vfs::EntryKind::Other => None,
+    }
+}
 
 impl FilePane {
     pub fn new(

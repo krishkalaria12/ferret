@@ -202,11 +202,13 @@ impl FilePane {
                                                   event: &gpui::MouseDownEvent,
                                                   window,
                                                   cx| {
-                                                let path = this
-                                                    .folder
-                                                    .read(cx)
-                                                    .entry_at(row)
-                                                    .map(|e| e.path.clone());
+                                                let path =
+                                                    this.folder.read(cx).entry_at(row).map(|e| {
+                                                        (
+                                                            e.path.clone(),
+                                                            super::symlink_target_kind(e.kind),
+                                                        )
+                                                    });
                                                 this.folder.update(cx, |f, cx| {
                                                     f.prepare_context_menu(row);
                                                     cx.emit(FolderEvent::SelectionChanged);
@@ -290,6 +292,7 @@ impl FilePane {
         } else {
             theme.muted_foreground
         };
+        let target_label = entry.link_target_label().map(gpui::SharedString::new);
 
         h_flex()
             .id(id)
@@ -303,14 +306,34 @@ impl FilePane {
             .when(!selected, |row| row.hover(|row| row.bg(theme.secondary)))
             .child(entry_icon(entry, 15., icon_color, cx))
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(rem_from_ui_px(ROW_FONT_SIZE))
-                    .text_color(text)
-                    .when(broken, |label| label.line_through())
-                    .child(gpui::SharedString::new(entry.name())),
+                    .gap_1()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rem_from_ui_px(ROW_FONT_SIZE))
+                            .text_color(text)
+                            .when(broken, |label| label.line_through())
+                            .child(gpui::SharedString::new(entry.name())),
+                    )
+                    .when_some(target_label, |row, target| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(rem_from_ui_px(11.5))
+                                .text_color(if broken {
+                                    theme.warning
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child("→")
+                                .child(target),
+                        )
+                    }),
             )
             .children(
                 self.git_status(entry)
@@ -369,7 +392,7 @@ impl FilePane {
         } else {
             theme.muted_foreground
         };
-        let detail = metadata_line(&entry);
+        let detail = metadata_line_with_target(&entry);
 
         frame
             .child(
@@ -439,6 +462,15 @@ fn metadata_line(entry: &ferret_vfs::Entry) -> String {
         (Some(size), None) => size,
         (None, Some(date)) => date,
         (None, None) => String::new(),
+    }
+}
+
+fn metadata_line_with_target(entry: &ferret_vfs::Entry) -> String {
+    let detail = metadata_line(entry);
+    match entry.link_target_label() {
+        Some(target) if detail.is_empty() => format!("→ {target}"),
+        Some(target) => format!("{detail} · → {target}"),
+        None => detail,
     }
 }
 

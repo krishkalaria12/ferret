@@ -69,7 +69,7 @@ impl Platform for MacOs {
 
     async fn move_to_trash(&self, path: &Path) -> Result<()> {
         let owned = path.to_path_buf();
-        if !owned.exists() {
+        if std::fs::symlink_metadata(&owned).is_err() {
             return Err(PlatformError::NotFound { path: owned });
         }
         // `trash::delete` routes through NSWorkspace, so it works across

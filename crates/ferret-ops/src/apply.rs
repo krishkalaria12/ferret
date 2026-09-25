@@ -154,6 +154,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             Capabilities {
                 symlinks: false,
+                create_symlinks: false,
                 permissions: true,
                 atomic_rename: true,
                 rename_noreplace: true,

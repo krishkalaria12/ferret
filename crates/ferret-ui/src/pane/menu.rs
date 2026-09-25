@@ -39,34 +39,59 @@ impl FilePane {
     /// The pane menu, optionally aimed at one entry (icon-view tiles).
     pub(super) fn open_menu_at(
         &mut self,
-        target: Option<VfsPath>,
+        target: Option<(VfsPath, Option<ferret_vfs::SymlinkTarget>)>,
         event: &gpui::MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let focus = gpui::Focusable::focus_handle(self.table.read(cx), cx);
         let servers = send_to_targets(cx);
-        let (key, order, show_hidden, selected, trashable) = self.folder.read_with(cx, |f, _| {
+        let (key, order, show_hidden, selected, dir) = self.folder.read_with(cx, |f, _| {
             (
                 f.sort_key(),
                 f.sort_order(),
                 f.show_hidden(),
                 f.selection_count(),
-                f.dir.is_local(),
+                f.dir.clone(),
             )
         });
+        let trashable = dir.is_local();
+        let symlinkable = cx
+            .global::<crate::state::FerretState>()
+            .fs
+            .capabilities_for(&dir)
+            .create_symlinks;
 
         let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
             use gpui_component::menu::PopupMenuItem;
             let menu = menu.action_context(focus);
-            let menu = if target.is_some() {
-                entry_menu_items(menu, selected, trashable, servers.clone()).separator()
+            let menu = if let Some((target, target_kind)) = target.clone() {
+                entry_menu_items(
+                    menu,
+                    selected,
+                    trashable,
+                    symlinkable,
+                    Some((target, target_kind)),
+                    servers.clone(),
+                )
+                .separator()
             } else {
                 menu
             };
-            menu.item(PopupMenuItem::new("New Folder").action(Box::new(actions::NewFolder)))
-                .item(PopupMenuItem::new("New File").action(Box::new(actions::NewFile)))
-                .separator()
+            let menu = menu
+                .item(PopupMenuItem::new("New Folder").action(Box::new(actions::NewFolder)))
+                .item(PopupMenuItem::new("New File").action(Box::new(actions::NewFile)));
+            let menu = if symlinkable {
+                menu.item(PopupMenuItem::new("New Symlink…").action(Box::new(
+                    actions::NewSymlink {
+                        target: None,
+                        target_kind: None,
+                    },
+                )))
+            } else {
+                menu
+            };
+            menu.separator()
                 .item(
                     PopupMenuItem::new("Open in Terminal")
                         .action(Box::new(actions::OpenInTerminal)),
@@ -183,6 +208,8 @@ pub(super) fn entry_menu_items(
     menu: PopupMenu,
     selected: usize,
     trashable: bool,
+    symlinkable: bool,
+    target: Option<(VfsPath, Option<ferret_vfs::SymlinkTarget>)>,
     servers: Vec<(String, String)>,
 ) -> PopupMenu {
     let multiple = selected > 1;
@@ -210,6 +237,20 @@ pub(super) fn entry_menu_items(
         })
         .action(Box::new(actions::Rename)),
     );
+
+    let menu = if symlinkable
+        && selected == 1
+        && let Some((target, target_kind)) = target
+    {
+        menu.item(
+            PopupMenuItem::new("New Symlink to Selected…").action(Box::new(actions::NewSymlink {
+                target: Some(target),
+                target_kind,
+            })),
+        )
+    } else {
+        menu
+    };
 
     // "Send to" (F-22), offered only for local files: a server-to-server copy
     // would have to relay through this machine, which is a different
