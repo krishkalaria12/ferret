@@ -123,6 +123,31 @@ impl VfsError {
     pub fn is_gone(&self) -> bool {
         matches!(self, VfsError::NotFound { .. })
     }
+
+    /// The path this error is about, when it names one.
+    ///
+    /// For the two variants that do not — [`VfsError::Unsupported`], which is
+    /// about a backend rather than a file, and [`VfsError::CrossBackend`],
+    /// which is about a pair — this returns the side that matters: the source
+    /// for a crossing, and nothing for an unsupported capability. A caller
+    /// that has to name the subject in a sentence should not have to match on
+    /// every variant to find it.
+    pub fn path(&self) -> Option<&VfsPath> {
+        match self {
+            VfsError::NotFound { path }
+            | VfsError::PermissionDenied { path }
+            | VfsError::AlreadyExists { path }
+            | VfsError::NotADirectory { path }
+            | VfsError::CrossVolume { path }
+            | VfsError::Conflict { path }
+            | VfsError::Cancelled { path }
+            | VfsError::NotMounted { path }
+            | VfsError::Io { path, .. } => Some(path),
+            VfsError::RenameFailed { from, .. } => Some(from),
+            VfsError::CrossBackend { from, .. } => Some(from),
+            VfsError::Unsupported { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]

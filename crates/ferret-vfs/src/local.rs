@@ -8,7 +8,7 @@ use futures::stream::StreamExt;
 use rayon::prelude::*;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -257,7 +257,7 @@ impl Vfs for LocalFs {
         let src = Self::require_local(from)?;
         let dst = Self::require_local(to)?;
         let meters = crate::Meters::new();
-        smol::unblock(move || copy_tree(&src, &dst, &meters).map_err(|stop| at(&src, stop))).await
+        smol::unblock(move || copy_tree(&src, &dst, &meters).map_err(into_vfs)).await
     }
 
     async fn copy_observed(
@@ -268,10 +268,7 @@ impl Vfs for LocalFs {
     ) -> Result<()> {
         let src = Self::require_local(from)?;
         let dst = Self::require_local(to)?;
-        smol::unblock(move || {
-            copy_tree(&src, &dst, reporter.as_ref()).map_err(|stop| at(&src, stop))
-        })
-        .await
+        smol::unblock(move || copy_tree(&src, &dst, reporter.as_ref()).map_err(into_vfs)).await
     }
 
     fn watch(&self, dir: &VfsPath) -> Result<crate::Watch> {
@@ -334,8 +331,7 @@ impl Vfs for LocalFs {
             }),
             RemoveMode::Permanent => {
                 let meters = crate::Meters::new();
-                smol::unblock(move || remove_tree(&local, &meters).map_err(|stop| at(&local, stop)))
-                    .await
+                smol::unblock(move || remove_tree(&local, &meters).map_err(into_vfs)).await
             }
         }
     }
@@ -355,10 +351,8 @@ impl Vfs for LocalFs {
                 capability: "moving to the Trash",
             }),
             RemoveMode::Permanent => {
-                smol::unblock(move || {
-                    remove_tree(&local, reporter.as_ref()).map_err(|stop| at(&local, stop))
-                })
-                .await
+                smol::unblock(move || remove_tree(&local, reporter.as_ref()).map_err(into_vfs))
+                    .await
             }
         }
     }
@@ -472,6 +466,7 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
 /// The parallel paths below cross a `rayon` boundary where the `VfsPath` is
 /// not in hand, so the action travels with the error and the caller attaches
 /// the path it already knows.
+#[derive(Debug)]
 struct FileOpError {
     action: &'static str,
     source: std::io::Error,
@@ -500,23 +495,51 @@ impl From<FileOpError> for Stop {
 /// denied" is a problem the user has to solve; "cancelled" is a thing they
 /// asked for, and a queue that rendered the second as an error toast would be
 /// complaining about an instruction.
+#[derive(Debug)]
 enum Stop {
     Failed(FileOpError),
     Cancelled,
 }
 
-/// A file operation's failure, in the terms the crate reports in.
-fn at(path: &std::path::Path, stop: Stop) -> VfsError {
-    match stop {
+/// A file operation that stopped, and the path it stopped on.
+///
+/// The path travels with the failure because a tree operation has hundreds of
+/// them and the root is almost never the one that failed. Reporting "no longer
+/// exists" against the folder somebody dropped *is* telling the truth about the
+/// folder; it is just not the sentence that helps.
+struct Stopped {
+    path: PathBuf,
+    stop: Stop,
+}
+
+/// A failure as the crate reports it.
+fn into_vfs(stopped: Stopped) -> VfsError {
+    match stopped.stop {
         Stop::Cancelled => VfsError::Cancelled {
-            path: VfsPath::local(path),
+            path: VfsPath::local(&stopped.path),
         },
-        Stop::Failed(error) => VfsError::from_io(error.action, &VfsPath::local(path), error.source),
+        Stop::Failed(error) => {
+            VfsError::from_io(error.action, &VfsPath::local(&stopped.path), error.source)
+        }
     }
 }
 
-fn failed<T>(action: &'static str, source: std::io::Error) -> std::result::Result<T, Stop> {
-    Err(Stop::Failed(FileOpError::new(action, source)))
+fn failed<T>(
+    action: &'static str,
+    path: &std::path::Path,
+    source: std::io::Error,
+) -> std::result::Result<T, Stopped> {
+    Err(Stopped {
+        path: path.to_path_buf(),
+        stop: Stop::Failed(FileOpError::new(action, source)),
+    })
+}
+
+fn cancelled(path: &std::path::Path) -> Stopped {
+    Stopped {
+        path: path.to_path_buf(),
+        stop: Stop::Cancelled,
+    }
 }
 
 /// Delete a file, a link, or a whole tree, stopping when the reporter says so.
@@ -541,23 +564,30 @@ fn failed<T>(action: &'static str, source: std::io::Error) -> std::result::Resul
 fn remove_tree(
     path: &std::path::Path,
     reporter: &dyn crate::ProgressReporter,
-) -> std::result::Result<(), Stop> {
-    let md = fs::symlink_metadata(path).map_err(|e| FileOpError::new("read", e))?;
+) -> std::result::Result<(), Stopped> {
+    let md = match fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(e) => return failed("read", path, e),
+    };
     if !md.is_dir() {
         // Never follow a symlink out of the tree being deleted: remove the
         // link itself.
         if reporter.checkpoint() == crate::Checkpoint::Cancel {
-            return Err(Stop::Cancelled);
+            return Err(cancelled(path));
         }
-        fs::remove_file(path).map_err(|e| FileOpError::new("delete", e))?;
+        if let Err(e) = fs::remove_file(path) {
+            return failed("delete", path, e);
+        }
         reporter.entries(1);
         return Ok(());
     }
 
-    let children: Vec<PathBuf> = fs::read_dir(path)
-        .map_err(|e| FileOpError::new("read", e))?
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .collect();
+    let children: Vec<PathBuf> = match fs::read_dir(path) {
+        Ok(children) => children
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .collect(),
+        Err(e) => return failed("read", path, e),
+    };
 
     // The top-level children are counted as they are removed, so this is where
     // a cancel is observed. Not per child: see
@@ -566,18 +596,23 @@ fn remove_tree(
     // Collected rather than short-circuited: a delete that hits one
     // permission-denied child should still remove everything it can, and then
     // say what failed. `remove_dir` below fails anyway if anything is left.
-    let outcome: Vec<std::result::Result<u64, Stop>> = crate::pool::install(|| {
+    let outcome: Vec<std::result::Result<u64, Stopped>> = crate::pool::install(|| {
         children
             .into_par_iter()
             .map(|child| {
                 let since_check = removed.fetch_add(1, Ordering::Relaxed);
-                if since_check % (crate::config::REMOVE_CHECKPOINT_EVERY as u64) == 0
+                if since_check.is_multiple_of(crate::config::REMOVE_CHECKPOINT_EVERY as u64)
                     && reporter.checkpoint() == crate::Checkpoint::Cancel
                 {
-                    return Err(Stop::Cancelled);
+                    return Err(cancelled(&child));
                 }
-                let md = fs::symlink_metadata(&child)
-                    .map_err(|e| Stop::Failed(FileOpError::new("read", e)))?;
+                let md = match fs::symlink_metadata(&child) {
+                    Ok(md) => md,
+                    // A child that vanished between the read and the unlink is
+                    // already deleted, which is the outcome we wanted.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                    Err(e) => return failed("read", &child, e),
+                };
                 let outcome = if md.is_dir() {
                     fs::remove_dir_all(&child)
                 } else {
@@ -585,30 +620,46 @@ fn remove_tree(
                     // that points outside the tree being deleted.
                     fs::remove_file(&child)
                 };
-                outcome
-                    .map_err(|e| Stop::Failed(FileOpError::new("delete", e)))
-                    .map(|()| 1)
+                match outcome {
+                    Ok(()) => Ok(1),
+                    Err(e) => Err(Stopped {
+                        path: child,
+                        stop: Stop::Failed(FileOpError::new("delete", e)),
+                    }),
+                }
             })
             .collect()
     });
 
-    let mut failures = Vec::new();
+    let mut first_failure = None;
     for result in outcome {
         match result {
             Ok(entries) => reporter.entries(entries),
-            Err(Stop::Cancelled) => return Err(Stop::Cancelled),
-            Err(Stop::Failed(error)) => failures.push(error),
+            Err(stopped) => {
+                // A cancel outranks a broken sibling: the user asked for the
+                // job to stop, and reporting a permission error instead would
+                // answer a question they did not ask.
+                if matches!(stopped.stop, Stop::Cancelled) {
+                    return Err(stopped);
+                }
+                first_failure.get_or_insert(stopped);
+            }
         }
     }
-    if let Some(failure) = failures.into_iter().next() {
-        return Err(Stop::Failed(failure));
+    if let Some(failure) = first_failure {
+        return Err(failure);
     }
 
     // Cancelled above, or a genuine failure: either way the directory still
     // holds what is left, and removing it would either fail or — worse, if the
     // walk was cancelled rather than broken — destroy the names of files this
     // operation never got to.
-    fs::remove_dir(path).map_err(|e| Stop::Failed(FileOpError::new("delete", e)))?;
+    fs::remove_dir(path)
+        .map_err(|e| Stop::Failed(FileOpError::new("delete", e)))
+        .map_err(|stop| Stopped {
+            path: path.to_path_buf(),
+            stop,
+        })?;
     reporter.entries(1);
     Ok(())
 }
@@ -626,12 +677,18 @@ fn copy_one(
     dst: &std::path::Path,
     is_symlink: bool,
     reporter: &dyn crate::ProgressReporter,
-) -> std::result::Result<(), Stop> {
+) -> std::result::Result<(), Stopped> {
     if is_symlink {
         return copy_symlink(src, dst, reporter);
     }
-    let metadata = fs::symlink_metadata(src).map_err(|e| FileOpError::new("read", e))?;
-    let mut source = fs::File::open(src).map_err(|e| FileOpError::new("read", e))?;
+    let metadata = match fs::symlink_metadata(src) {
+        Ok(md) => md,
+        Err(e) => return failed("read", src, e),
+    };
+    let mut source = match fs::File::open(src) {
+        Ok(source) => source,
+        Err(e) => return failed("read", src, e),
+    };
     let mut options = fs::OpenOptions::new();
     // `create_new`: conflict policy is the caller's decision, and this
     // signature makes "silently replaced something" impossible to write by
@@ -644,10 +701,18 @@ fn copy_one(
     }
     let destination = options
         .open(dst)
-        .map_err(|e| Stop::Failed(FileOpError::new("create", e)))?;
+        .map_err(|e| Stop::Failed(FileOpError::new("create", e)))
+        .map_err(|stop| Stopped {
+            path: dst.to_path_buf(),
+            stop,
+        })?;
 
     let mut destination = destination;
-    let outcome = stream_file(&mut source, &mut destination, &metadata, reporter);
+    let outcome =
+        stream_file(&mut source, &mut destination, &metadata, reporter).map_err(|stop| Stopped {
+            path: src.to_path_buf(),
+            stop,
+        });
 
     // Closed before the cleanup: Windows will not unlink a file that is still
     // open, so a cancelled copy on Windows would otherwise leave exactly the
@@ -674,6 +739,13 @@ fn stream_file(
     metadata: &fs::Metadata,
     reporter: &dyn crate::ProgressReporter,
 ) -> std::result::Result<(), Stop> {
+    // `stream_file` reports at `Stop` rather than `Stopped`: its caller has both
+    // paths in hand and attaches one, and threading a path through a function
+    // that only ever fails on the file it was handed would be noise.
+    fn broken(action: &'static str, source: std::io::Error) -> Stop {
+        Stop::Failed(FileOpError::new(action, source))
+    }
+
     let mut buffer = vec![0u8; crate::config::COPY_CHUNK_BYTES];
     loop {
         // Asked before the read, so a cancel never waits on a write that has
@@ -684,16 +756,16 @@ fn stream_file(
         let read = match source.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => read,
-            Err(source) => return failed("read", source),
+            Err(source) => return Err(broken("read", source)),
         };
         if let Err(source) = destination.write_all(&buffer[..read]) {
-            return failed("copy", source);
+            return Err(broken("copy", source));
         }
         reporter.bytes(read as u64);
     }
 
     if let Err(source) = destination.set_permissions(metadata.permissions()) {
-        return failed("preserve permissions", source);
+        return Err(broken("preserve permissions", source));
     }
     // A backend may legitimately have no clock to report, and inventing the
     // epoch would be worse than saying nothing — so a half that cannot be read
@@ -718,15 +790,18 @@ fn copy_symlink(
     src: &std::path::Path,
     dst: &std::path::Path,
     reporter: &dyn crate::ProgressReporter,
-) -> std::result::Result<(), Stop> {
+) -> std::result::Result<(), Stopped> {
     if reporter.checkpoint() == crate::Checkpoint::Cancel {
-        return Err(Stop::Cancelled);
+        return Err(cancelled(src));
     }
-    let target = fs::read_link(src).map_err(|e| Stop::Failed(FileOpError::new("read", e)))?;
+    let target = match fs::read_link(src) {
+        Ok(target) => target,
+        Err(e) => return failed("read", src, e),
+    };
     if let Err(source) = std::os::unix::fs::symlink(&target, dst) {
         // The link is all-or-nothing, so there is never a partial one to
         // clean up here.
-        return failed("create", source);
+        return failed("create", dst, source);
     }
     reporter.entries(1);
     Ok(())
@@ -734,17 +809,16 @@ fn copy_symlink(
 
 #[cfg(windows)]
 fn copy_symlink(
-    _src: &std::path::Path,
-    dst: &std::path::Path,
+    src: &std::path::Path,
+    _dst: &std::path::Path,
     reporter: &dyn crate::ProgressReporter,
-) -> std::result::Result<(), Stop> {
-    let _ = dst;
+) -> std::result::Result<(), Stopped> {
     if reporter.checkpoint() == crate::Checkpoint::Cancel {
-        return Err(Stop::Cancelled);
+        return Err(cancelled(src));
     }
-    reporter.entries(1);
     failed(
         "copy",
+        src,
         std::io::Error::other("copying symlinks is not supported on Windows"),
     )
 }
@@ -772,43 +846,48 @@ fn copy_symlink(
 /// something that already exists — so `dst` is either wholly ours or was
 /// refused before a byte was written.
 fn copy_tree(
-    src: &PathBuf,
-    dst: &PathBuf,
+    src: &Path,
+    dst: &Path,
     reporter: &dyn crate::ProgressReporter,
-) -> std::result::Result<(), Stop> {
-    let md = fs::symlink_metadata(src).map_err(|e| Stop::Failed(FileOpError::new("read", e)))?;
+) -> std::result::Result<(), Stopped> {
+    let md = match fs::symlink_metadata(src) {
+        Ok(md) => md,
+        Err(e) => return failed("read", src, e),
+    };
 
     if md.is_symlink() || !md.is_dir() {
         return copy_one(src, dst, md.is_symlink(), reporter);
     }
 
     if reporter.checkpoint() == crate::Checkpoint::Cancel {
-        return Err(Stop::Cancelled);
+        return Err(cancelled(src));
     }
     // Refuses to overwrite: conflict policy is the caller's decision, and this
     // signature makes "silently replaced something" impossible to write by
-    // accident.
+    // accident. `create_dir`, not `create_dir_all` — the destination's parent is
+    // the directory the user pointed at, and inventing a path nobody named is
+    // not a decision a copy gets to make.
     if let Err(source) = fs::create_dir(dst) {
-        return failed("create", source);
+        return failed("create", dst, source);
     }
 
     match fill_tree(src, dst, reporter) {
         Ok(()) => Ok(()),
-        Err(stop) => {
+        Err(stopped) => {
             // `remove_dir_all` on a directory this call created. It cannot
             // reach anything the user owns, because `create_dir` above would
             // have failed on a destination that already existed.
             let _ = fs::remove_dir_all(dst);
-            Err(stop)
+            Err(stopped)
         }
     }
 }
 
 fn fill_tree(
-    src: &PathBuf,
-    dst: &PathBuf,
+    src: &Path,
+    dst: &Path,
     reporter: &dyn crate::ProgressReporter,
-) -> std::result::Result<(), Stop> {
+) -> std::result::Result<(), Stopped> {
     let mut files = Vec::new();
     for entry in jwalk::WalkDir::new(src)
         .min_depth(1)
@@ -819,8 +898,14 @@ fn fill_tree(
         .follow_links(false)
         .parallelism(crate::pool::parallelism())
     {
-        let entry =
-            entry.map_err(|source| Stop::Failed(FileOpError::new("read", source.into())))?;
+        let entry = entry
+            .map_err(|source| Stop::Failed(FileOpError::new("read", source.into())))
+            // The walk failed on the directory it could not read, and `src` is
+            // the nearest path still in hand at that point.
+            .map_err(|stop| Stopped {
+                path: src.to_path_buf(),
+                stop,
+            })?;
         let path = entry.path();
         let Ok(relative) = path.strip_prefix(src) else {
             continue;
@@ -831,14 +916,15 @@ fn fill_tree(
         // to descend — `follow_links(false)` already stops the walk, and this
         // keeps it out of the `create_dir` branch.
         if entry.file_type().is_dir() {
-            fs::create_dir(&target)
-                .map_err(|source| Stop::Failed(FileOpError::new("create", source)))?;
+            if let Err(source) = fs::create_dir(&target) {
+                return failed("create", &target, source);
+            }
         } else {
             files.push((path.to_path_buf(), target, entry.file_type().is_symlink()));
         }
     }
 
-    let failure = crate::pool::install(move || {
+    let failure: Option<Stopped> = crate::pool::install(move || {
         files
             .into_par_iter()
             .find_map_any(|(from, to, is_symlink)| {
@@ -846,19 +932,13 @@ fn fill_tree(
                 // enumerate before it can copy, and a cancel asked for during
                 // the walk is answered before the first byte is written.
                 if reporter.checkpoint() == crate::Checkpoint::Cancel {
-                    return Some((from, Stop::Cancelled));
+                    return Some(cancelled(&from));
                 }
-                copy_one(&from, &to, is_symlink, reporter)
-                    .err()
-                    .map(|error| (from, error))
+                copy_one(&from, &to, is_symlink, reporter).err()
             })
     });
     match failure {
-        Some((_, Stop::Cancelled)) => Err(Stop::Cancelled),
-        Some((path, Stop::Failed(error))) => {
-            let _ = path;
-            Err(Stop::Failed(error))
-        }
+        Some(stopped) => Err(stopped),
         None => Ok(()),
     }
 }

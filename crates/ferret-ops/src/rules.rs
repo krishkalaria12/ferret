@@ -2,7 +2,7 @@ use convert_case::{Case, Casing};
 use regex::{NoExpand, Regex, RegexBuilder};
 
 use crate::config::{MAX_NUMBER_WIDTH, MAX_RULES};
-use crate::{BatchRenameError, Result};
+use crate::{BatchRenameError, RenameResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleTarget {
@@ -91,7 +91,7 @@ pub(crate) struct CompiledRules<'a> {
 }
 
 impl<'a> CompiledRules<'a> {
-    pub(crate) fn new(rules: &'a [RenameRule]) -> Result<Self> {
+    pub(crate) fn new(rules: &'a [RenameRule]) -> RenameResult<Self> {
         if rules.len() > MAX_RULES {
             return Err(BatchRenameError::InvalidRule {
                 rule_index: MAX_RULES,
@@ -152,7 +152,7 @@ impl<'a> CompiledRules<'a> {
                 };
                 Ok(CompiledRule { rule, replacement })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<RenameResult<Vec<_>>>()?;
         Ok(Self { rules: compiled })
     }
 

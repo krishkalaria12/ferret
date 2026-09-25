@@ -4,7 +4,7 @@ use ferret_vfs::{Vfs, VfsError, VfsPath};
 
 use crate::plan::BatchRenamePlan;
 use crate::preflight::preflight_issues;
-use crate::{BatchRenameError, Result};
+use crate::{BatchRenameError, RenameResult};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -15,7 +15,7 @@ struct StagedRename {
     finalized: bool,
 }
 
-pub async fn apply(fs: &dyn Vfs, plan: &BatchRenamePlan) -> Result<usize> {
+pub async fn apply(fs: &dyn Vfs, plan: &BatchRenamePlan) -> RenameResult<usize> {
     let changed = plan.changed_len();
     if changed == 0 {
         return Ok(0);

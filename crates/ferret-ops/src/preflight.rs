@@ -4,13 +4,13 @@ use ferret_vfs::{ListingDetail, Vfs, VfsPath};
 use futures::StreamExt as _;
 
 use crate::plan::{BatchRenamePlan, NameKey, PlanIssue, RenameRow};
-use crate::{BatchRenameError, Result};
+use crate::{BatchRenameError, RenameResult};
 
 pub struct ExistingNames {
     directories: HashMap<VfsPath, HashSet<NameKey>>,
 }
 
-pub async fn load_existing(fs: &dyn Vfs, sources: &[VfsPath]) -> Result<ExistingNames> {
+pub async fn load_existing(fs: &dyn Vfs, sources: &[VfsPath]) -> RenameResult<ExistingNames> {
     let mut parents = Vec::new();
     let mut seen = HashSet::new();
     for source in sources {
@@ -60,7 +60,7 @@ pub fn validate_plan(plan: &mut BatchRenamePlan, existing: &ExistingNames) {
 pub(super) async fn preflight_issues(
     fs: &dyn Vfs,
     plan: &BatchRenamePlan,
-) -> Result<Vec<PlanIssue>> {
+) -> RenameResult<Vec<PlanIssue>> {
     let mut issues = plan.issues().cloned().collect::<Vec<_>>();
     if !issues.is_empty() {
         return Ok(issues);

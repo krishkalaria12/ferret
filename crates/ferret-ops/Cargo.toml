@@ -8,14 +8,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ferret-platform.workspace = true
 ferret-vfs.workspace = true
 caseless.workspace = true
 convert_case.workspace = true
 futures.workspace = true
+jwalk.workspace = true
+parking_lot.workspace = true
 regex.workspace = true
+smol.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-smol.workspace = true
