@@ -66,7 +66,7 @@ impl Render for DragPreview {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .shadow_md()
-            .text_size(px(12.))
+            .text_size(rem_from_ui_px(12.))
             .text_color(cx.theme().foreground)
             .child(self.label.clone())
     }

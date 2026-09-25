@@ -111,7 +111,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::System,
-            ui_font_size: 13.0,
+            ui_font_size: crate::config::DEFAULT_UI_FONT_SIZE,
             vibrancy: false,
             unknown: Map::new(),
         }
@@ -225,7 +225,7 @@ impl Default for Terminal {
             visible: false,
             height: 176.0,
             font_family: None,
-            font_size: 13.0,
+            font_size: crate::config::DEFAULT_TERMINAL_FONT_SIZE,
             line_height: 1.2,
             palette: "Groknight".into(),
             scrollback_lines: 10_000,

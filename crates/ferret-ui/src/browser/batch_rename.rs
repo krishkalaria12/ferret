@@ -490,7 +490,7 @@ impl BatchRenameDialog {
             .when_some(error, |element, error| {
                 element.child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(rem_from_ui_px(11.5))
                         .text_color(cx.theme().danger)
                         .child(error),
                 )
@@ -644,7 +644,7 @@ fn dialog_geometry(viewport_width: f32, viewport_height: f32) -> DialogGeometry 
 }
 
 impl Render for BatchRenameDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.sources.len();
         let changed = self
             .plan
@@ -689,10 +689,10 @@ impl Render for BatchRenameDialog {
             .h_full()
             .min_h_0()
             .overflow_hidden()
-            .text_size(px(13.))
+            .text_size(rem_from_ui_px(13.))
             .child(
                 h_flex()
-                    .h(px(48.))
+                    .min_h(px(48.))
                     .px_4()
                     .gap_2()
                     .border_b_1()
@@ -702,13 +702,13 @@ impl Render for BatchRenameDialog {
                         v_flex()
                             .child(
                                 div()
-                                    .text_size(px(16.))
+                                    .text_size(rem_from_ui_px(16.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("Batch Rename"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.5))
+                                    .text_size(rem_from_ui_px(11.5))
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{count} selected items")),
                             ),
@@ -772,7 +772,7 @@ impl Render for BatchRenameDialog {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(rem_from_ui_px(11.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme.muted_foreground)
                                     .child("RULES"),
@@ -800,7 +800,7 @@ impl Render for BatchRenameDialog {
                         .bg(theme.danger.opacity(0.1))
                         .text_color(theme.danger)
                         .child(Icon::new(gpui_component::IconName::TriangleAlert))
-                        .child(div().text_size(px(12.)).child(error))
+                        .child(div().text_size(rem_from_ui_px(12.)).child(error))
                         .child(
                             Button::new("batch-retry-load")
                                 .ghost()
@@ -814,11 +814,13 @@ impl Render for BatchRenameDialog {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(DataTable::new(&self.table).with_size(px(PREVIEW_ROW_HEIGHT))),
+                    .child(DataTable::new(&self.table).with_size(
+                        rem_from_ui_px(PREVIEW_ROW_HEIGHT).to_pixels(window.rem_size()),
+                    )),
             )
             .child(
                 h_flex()
-                    .h(px(48.))
+                    .min_h(px(48.))
                     .px_4()
                     .gap_3()
                     .border_t_1()
@@ -826,7 +828,7 @@ impl Render for BatchRenameDialog {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.5))
+                            .text_size(rem_from_ui_px(11.5))
                             .text_color(theme.muted_foreground)
                             .child(if self.fatal {
                                 SharedString::from(

@@ -89,7 +89,7 @@ impl Browser {
         h_flex()
             .id("tab-strip")
             .items_center()
-            .h(px(32.))
+            .min_h(px(32.))
             .px(px(6.))
             .gap(px(4.))
             .bg(theme.title_bar)
@@ -121,7 +121,7 @@ impl Browser {
                 TabBar::new("browser-tabs")
                     .max_width(px(super::TAB_MAX_WIDTH))
                     .selected_index(self.active)
-                    .text_size(px(12.5))
+                    .text_size(rem_from_ui_px(12.5))
                     .on_click(cx.listener(|this, ix: &usize, window, cx| {
                         this.activate_tab(*ix, window, cx);
                     }))

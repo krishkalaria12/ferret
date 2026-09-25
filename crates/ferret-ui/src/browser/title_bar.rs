@@ -201,6 +201,8 @@ impl Browser {
                             .menu("Show Hidden Files", Box::new(actions::ToggleHidden))
                             .separator()
                             .menu("Add Folder to Favorites", Box::new(actions::AddToFavorites))
+                            .separator()
+                            .menu("Settings…", Box::new(actions::OpenSettings))
                     }),
             );
 
@@ -241,7 +243,7 @@ impl Browser {
                         .ml_2()
                         .max_w(px(300.))
                         .truncate()
-                        .text_size(px(13.))
+                        .text_size(rem_from_ui_px(13.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.foreground)
                         .child(SharedString::from(format!("Ferret — {title}"))),

@@ -170,13 +170,13 @@ impl Render for CommitDialog {
                             .gap_0()
                             .child(
                                 div()
-                                    .text_size(px(15.))
+                                    .text_size(rem_from_ui_px(15.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("Commit Changes"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(rem_from_ui_px(12.))
                                     .text_color(theme.muted_foreground)
                                     .child(self.repository.clone()),
                             ),
@@ -187,7 +187,7 @@ impl Render for CommitDialog {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(rem_from_ui_px(12.))
                             .text_color(theme.muted_foreground)
                             .child("Message"),
                     )

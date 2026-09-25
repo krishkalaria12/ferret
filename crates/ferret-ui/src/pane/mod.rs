@@ -41,6 +41,7 @@ use crate::folder::{Folder, FolderEvent, ListingProfile};
 use crate::format::{format_date, format_size};
 use crate::state::FerretState;
 use crate::theme::BrowserPalette;
+use crate::typography::rem_from_ui_px;
 
 mod column_view;
 mod drag;
@@ -136,6 +137,7 @@ pub struct FilePane {
     toggles: ToggleQueue,
     /// Measured column widths, shared with the delegate.
     widths: ColumnWidths,
+    ui_font_size: gpui::Pixels,
     /// Columns whose edge was double-clicked, awaiting measurement.
     sizing_requests: SizeToContentQueue,
     /// Bumps on anything that should cancel a pending slow-click rename.
@@ -165,8 +167,6 @@ impl Focusable for FilePane {
 /// §4 says 26. The reference UI gives its rows more room, and at 26 with a
 /// 15 px icon the text has almost no leading — so this follows the reference.
 pub(super) const ROW_HEIGHT: f32 = 30.;
-/// Column header height (§4), and where the loading hint sits.
-pub(super) const COLUMN_HEADER_HEIGHT: f32 = 26.;
 pub(super) const ROW_FONT_SIZE: f32 = 13.;
 /// Column header type size (§4): chrome, one step down from the rows.
 pub(super) const HEADER_FONT_SIZE: f32 = 11.5;
@@ -284,6 +284,7 @@ impl FilePane {
             drops,
             toggles,
             widths,
+            ui_font_size: cx.theme().font_size,
             sizing_requests,
             rename_arm: 0,
             pending_rename: None,

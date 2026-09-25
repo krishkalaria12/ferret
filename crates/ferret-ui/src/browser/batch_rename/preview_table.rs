@@ -7,6 +7,8 @@ use gpui::{
 use gpui_component::table::{Column, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
+use crate::typography::rem_from_ui_px;
+
 pub(super) const PREVIEW_ROW_HEIGHT: f32 = 34.;
 
 #[derive(Default)]
@@ -91,7 +93,7 @@ impl TableDelegate for RenamePreviewDelegate {
             .items_center()
             .px_3()
             .truncate()
-            .text_size(px(12.5))
+            .text_size(rem_from_ui_px(12.5))
             .text_color(color)
             .child(text)
             .into_any_element()

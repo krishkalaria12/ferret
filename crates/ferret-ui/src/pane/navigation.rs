@@ -96,10 +96,10 @@ impl FilePane {
         }
     }
 
-    fn scroll_cursor_into_view(&mut self, row: usize, _cx: &mut Context<Self>) {
+    fn scroll_cursor_into_view(&mut self, row: usize, cx: &mut Context<Self>) {
         match self.view_mode {
             ViewMode::Icons => {
-                let per_row = self.tiles_per_row();
+                let per_row = self.tiles_per_row(cx);
                 self.icon_scroll
                     .scroll_to_item(row / per_row, gpui::ScrollStrategy::Nearest);
             }

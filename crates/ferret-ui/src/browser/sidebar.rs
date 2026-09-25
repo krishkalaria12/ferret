@@ -374,14 +374,14 @@ impl Browser {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(rem_from_ui_px(13.))
                             .text_color(foreground)
                             .child(connection.display_name()),
                     )
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.))
+                            .text_size(rem_from_ui_px(11.))
                             .text_color(subtitle_color)
                             .child(subtitle),
                     ),
@@ -503,7 +503,7 @@ impl Browser {
         let row = h_flex()
             .id(id.into())
             .w_full()
-            .h(px(SIDEBAR_ROW_HEIGHT))
+            .min_h(px(SIDEBAR_ROW_HEIGHT))
             .mx(px(8.))
             .rounded(px(6.))
             .px(px(10.))
@@ -561,7 +561,7 @@ impl Browser {
             .child(
                 div()
                     .truncate()
-                    .text_size(px(13.))
+                    .text_size(rem_from_ui_px(13.))
                     .text_color(fg)
                     .child(label.to_string()),
             )
@@ -634,15 +634,15 @@ impl Browser {
 /// `--app-fg-faint` — muted foreground at 70% (§7).
 fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
     div()
-        .h(px(SIDEBAR_SECTION_HEIGHT))
+        .min_h(px(SIDEBAR_SECTION_HEIGHT))
         // Air above each group, and none below: the label belongs to the
         // rows under it, so it should sit closer to them than to the group
         // it follows.
         .mt(px(14.))
         .mb(px(2.))
         .px(px(14.))
-        .text_size(px(11.))
-        .line_height(px(SIDEBAR_SECTION_HEIGHT))
+        .text_size(rem_from_ui_px(11.))
+        .line_height(rem_from_ui_px(SIDEBAR_SECTION_HEIGHT))
         // Sentence case at medium weight. Bold uppercase shouts a heading
         // that is only there to be scanned past.
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -652,13 +652,13 @@ fn section_label(label: &'static str, cx: &App) -> impl IntoElement {
 
 fn connection_section_label(this: WeakEntity<Browser>, cx: &App) -> impl IntoElement {
     h_flex()
-        .h(px(SIDEBAR_SECTION_HEIGHT))
+        .min_h(px(SIDEBAR_SECTION_HEIGHT))
         .mt(px(14.))
         .mb(px(2.))
         .px(px(14.))
         .items_center()
         .justify_between()
-        .text_size(px(11.))
+        .text_size(rem_from_ui_px(11.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground.opacity(0.8))
         .child("Connections")

@@ -55,6 +55,7 @@ use smol_str::SmolStr;
 
 use crate::format::{format_date, format_size};
 use crate::state::FerretState;
+use crate::typography::rem_from_ui_px;
 
 /// What the browser hands the pane when the selection settles.
 ///

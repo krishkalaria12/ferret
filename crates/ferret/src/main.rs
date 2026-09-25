@@ -106,6 +106,8 @@ fn bind_keys(cx: &mut App) {
         // terminal, so it stops being a quit key while one has focus.
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-q", Quit, OUTSIDE_TERMINAL),
+        KeyBinding::new("cmd-,", browser_actions::OpenSettings, None),
+        KeyBinding::new("ctrl-,", browser_actions::OpenSettings, OUTSIDE_TERMINAL),
         // History and hierarchy. Alt is Meta to a shell, so the Alt pairs are
         // scoped out alongside the Ctrl ones.
         KeyBinding::new("cmd-[", browser_actions::Back, None),

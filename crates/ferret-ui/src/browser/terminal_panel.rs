@@ -435,11 +435,23 @@ impl Browser {
         cx.notify();
     }
 
+    fn refresh_terminal_metrics(&mut self, cx: &App, window: &mut Window) {
+        let font_size = cx.global::<FerretState>().settings.terminal.font_size;
+        if font_size == self.terminal_font_size {
+            return;
+        }
+        let (font_family, cell_width) = terminal_metrics(cx, window);
+        self.terminal_font_size = font_size;
+        self.terminal_font_family = font_family;
+        self.terminal_cell_width = cell_width;
+    }
+
     pub(super) fn render_terminal_panel(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        self.refresh_terminal_metrics(cx, window);
         let palette = crate::theme::TerminalPalette::default();
         let theme = cx.theme();
         let border = theme.border;
@@ -467,7 +479,7 @@ impl Browser {
             .child(self.render_terminal_splitter(cx))
             .child(
                 h_flex()
-                    .h(px(TERMINAL_HEADER_HEIGHT))
+                    .min_h(px(TERMINAL_HEADER_HEIGHT))
                     .flex_shrink_0()
                     .items_center()
                     .gap_2()
@@ -494,7 +506,7 @@ impl Browser {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(rem_from_ui_px(12.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(foreground)
                             .child(if self.terminal_mount.is_some() {
@@ -508,7 +520,7 @@ impl Browser {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(rem_from_ui_px(12.))
                             .text_color(muted_foreground)
                             .child(cwd.clone()),
                     )
@@ -922,54 +934,6 @@ fn submits_or_clears_the_input_line(bytes: &[u8]) -> bool {
             | [0x1b, 0x03]
             | [0x1b, 0x15]
     )
-}
-
-pub(super) fn terminal_metrics(cx: &App, window: &mut Window) -> (SharedString, f32) {
-    let settings = &cx.global::<FerretState>().settings.terminal;
-    let family = settings
-        .font_family
-        .clone()
-        .unwrap_or_else(|| default_terminal_font(cx));
-    let run = gpui::TextRun {
-        len: 1,
-        font: gpui::font(SharedString::from(family.clone())),
-        color: gpui::black(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let width = window
-        .text_system()
-        .layout_line("M", px(settings.font_size), &[run], None)
-        .width;
-    (SharedString::from(family), f32::from(width).max(1.))
-}
-
-fn default_terminal_font(cx: &App) -> String {
-    let installed = cx.text_system().all_font_names();
-    let first_installed = |candidates: &[&str]| {
-        candidates
-            .iter()
-            .find(|candidate| installed.iter().any(|font| font == **candidate))
-            .map(|candidate| (*candidate).to_owned())
-    };
-    #[cfg(target_os = "macos")]
-    {
-        // Prefer a Nerd Font when present so configured prompts retain their
-        // private-use glyphs, as they do in Ghostty. Menlo remains the clean
-        // system fallback required by F-12.
-        first_installed(&["JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Menlo"])
-            .unwrap_or_else(|| "monospace".into())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        first_installed(&["CaskaydiaMono Nerd Font", "Cascadia Mono", "Consolas"])
-            .unwrap_or_else(|| "monospace".into())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        "monospace".into()
-    }
 }
 
 #[cfg(test)]

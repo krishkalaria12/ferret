@@ -19,12 +19,13 @@ use gpui::{
     App, AppContext, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
     div, px,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
+use gpui_component::{ActiveTheme as _, Sizable as _};
 
 /// A grid over one parsed sample, with its sort and header state.
 pub(crate) struct CsvGrid {
     pub table: Entity<TableState<CsvDelegate>>,
+    ui_font_size: std::cell::Cell<gpui::Pixels>,
 }
 
 impl CsvGrid {
@@ -41,11 +42,21 @@ impl CsvGrid {
                 .row_selectable(false)
                 .col_selectable(false)
         });
-        Self { table }
+        Self {
+            table,
+            ui_font_size: std::cell::Cell::new(window.rem_size()),
+        }
     }
 
-    pub fn element(&self) -> DataTable<CsvDelegate> {
-        DataTable::new(&self.table)
+    pub fn element(&self, cx: &mut App) -> DataTable<CsvDelegate> {
+        let ui_font_size = cx.theme().font_size;
+        if self.ui_font_size.replace(ui_font_size) != ui_font_size {
+            self.table.update(cx, |table, cx| {
+                table.refresh(cx);
+                cx.notify();
+            });
+        }
+        DataTable::new(&self.table).with_size(rem_from_ui_px(32.).to_pixels(ui_font_size))
     }
 
     /// Whether the inferred-header toggle exists, and whether it is on.
@@ -221,7 +232,7 @@ impl TableDelegate for CsvDelegate {
         self.rows.len()
     }
 
-    fn column(&self, col_ix: usize, _cx: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         let sort = match self.sort {
             Some((col, true)) if col == col_ix => ColumnSort::Ascending,
             Some((col, false)) if col == col_ix => ColumnSort::Descending,
@@ -230,7 +241,10 @@ impl TableDelegate for CsvDelegate {
         Column::new(format!("csv-col-{col_ix}"), self.labels[col_ix].clone())
             .sortable()
             .sort(sort)
-            .width(px(self.widths.get(col_ix).copied().unwrap_or(120.)))
+            .width(
+                rem_from_ui_px(self.widths.get(col_ix).copied().unwrap_or(120.))
+                    .to_pixels(cx.theme().font_size),
+            )
     }
 
     fn perform_sort(
@@ -273,7 +287,7 @@ impl TableDelegate for CsvDelegate {
             Some(text) => div()
                 .px(px(8.))
                 .py(px(3.))
-                .text_size(px(12.5))
+                .text_size(rem_from_ui_px(12.5))
                 .text_color(cx.theme().foreground)
                 .child(text)
                 .into_any_element(),
@@ -282,7 +296,7 @@ impl TableDelegate for CsvDelegate {
             None => div()
                 .px(px(8.))
                 .py(px(3.))
-                .text_size(px(12.5))
+                .text_size(rem_from_ui_px(12.5))
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from("—"))
                 .into_any_element(),

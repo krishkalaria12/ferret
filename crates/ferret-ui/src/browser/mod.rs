@@ -45,11 +45,13 @@ use crate::format::unique_name;
 use crate::pane::{FilePane, PaneEvent};
 use crate::preview::{PreviewOverlay, PreviewPanel};
 use crate::state::FerretState;
+use crate::typography::rem_from_ui_px;
 
 use commit_dialog::CommitDialog;
 use connection_dialog::ConnectionDialog;
 pub(crate) use git::GitHandle;
 use git::GitPanel;
+use terminal_metrics::terminal_metrics;
 // Only the allocations-per-frame budget constructs one directly.
 #[cfg(all(test, feature = "dhat-heap"))]
 pub(crate) use git::GitSnapshot;
@@ -66,9 +68,11 @@ mod power_search;
 mod preview_panel;
 mod render;
 mod send_to;
+mod settings_dialog;
 mod sidebar;
 mod tab_strip;
 mod tabs;
+mod terminal_metrics;
 mod terminal_panel;
 mod title_bar;
 
@@ -200,6 +204,7 @@ pub struct Browser {
     terminal_error: Option<String>,
     terminal_generation: u64,
     terminal_snapshot: Option<Arc<TerminalSnapshot>>,
+    terminal_font_size: f32,
     terminal_font_family: SharedString,
     terminal_cell_width: f32,
     terminal_columns: u16,
@@ -401,14 +406,14 @@ impl Browser {
             let terminal = &cx.global::<FerretState>().settings.terminal;
             (terminal.visible, terminal.height, terminal.sync_default)
         };
+        let terminal_font_size = cx.global::<FerretState>().settings.terminal.font_size;
         let (preview_visible, preview_width) = {
             let preview = &cx.global::<FerretState>().settings.preview;
             (preview.visible, preview.width)
         };
         let browser_handle = cx.weak_entity();
         let preview = cx.new(|cx| PreviewPanel::new(window, cx, browser_handle.clone()));
-        let (terminal_font_family, terminal_cell_width) =
-            terminal_panel::terminal_metrics(cx, window);
+        let (terminal_font_family, terminal_cell_width) = terminal_metrics(cx, window);
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -433,6 +438,7 @@ impl Browser {
             terminal_error: None,
             terminal_generation: 0,
             terminal_snapshot: None,
+            terminal_font_size,
             terminal_font_family,
             terminal_cell_width,
             terminal_columns: 120,

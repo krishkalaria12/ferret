@@ -392,7 +392,7 @@ impl Render for PowerSearch {
                         let open_target = result.clone();
                         h_flex()
                             .id(("power-search-row", index))
-                            .h(px(ROW_HEIGHT))
+                            .h(rem_from_ui_px(ROW_HEIGHT).to_pixels(cx.theme().font_size))
                             .px_3()
                             .border_b_1()
                             .border_color(cx.theme().border.opacity(0.55))
@@ -445,10 +445,10 @@ impl Render for PowerSearch {
             .h_full()
             .min_h_0()
             .overflow_hidden()
-            .text_size(px(13.))
+            .text_size(rem_from_ui_px(13.))
             .child(
                 h_flex()
-                    .h(px(46.))
+                    .min_h(px(46.))
                     .px_4()
                     .gap_2()
                     .border_b_1()
@@ -456,7 +456,7 @@ impl Render for PowerSearch {
                     .child(Icon::new(gpui_component::IconName::Search).text_color(theme.accent))
                     .child(
                         div()
-                            .text_size(px(16.))
+                            .text_size(rem_from_ui_px(16.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child("Power Search"),
                     )
@@ -590,7 +590,7 @@ impl Render for PowerSearch {
             )
             .child(
                 h_flex()
-                    .h(px(42.))
+                    .min_h(px(42.))
                     .px_3()
                     .border_b_1()
                     .border_color(theme.border)
@@ -623,7 +623,7 @@ impl Render for PowerSearch {
             )
             .child(
                 h_flex()
-                    .h(px(32.))
+                    .min_h(px(32.))
                     .px_3()
                     .bg(theme.secondary.opacity(0.45))
                     .border_b_1()
@@ -657,11 +657,11 @@ impl Render for PowerSearch {
             }))
             .child(
                 h_flex()
-                    .h(px(30.))
+                    .min_h(px(30.))
                     .px_3()
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(px(11.))
+                    .text_size(rem_from_ui_px(11.))
                     .text_color(theme.muted_foreground)
                     .child(if let Some(failure) = &self.failure {
                         SharedString::from(failure.clone())

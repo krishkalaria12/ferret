@@ -192,12 +192,6 @@ impl ListDelegate {
         self.columns.load()
     }
 
-    /// A column's width: the measured one if it has been sized to content,
-    /// otherwise the fixed default from §4.
-    fn width_for(&self, column: FileColumn, default: f32) -> f32 {
-        self.widths.lock().get(&column).copied().unwrap_or(default)
-    }
-
     fn column_at(&self, col_ix: usize) -> FileColumn {
         self.layout().at(col_ix)
     }
@@ -240,6 +234,14 @@ impl TableDelegate for ListDelegate {
         };
 
         let column = self.column_at(col_ix);
+        let scale = |value: f32| f32::from(rem_from_ui_px(value).to_pixels(cx.theme().font_size));
+        let width_for = |column, default| {
+            self.widths
+                .lock()
+                .get(&column)
+                .copied()
+                .unwrap_or_else(|| scale(default))
+        };
         match column {
             FileColumn::Name => {
                 // The Name column absorbs all spare width (§4): measured pane
@@ -250,14 +252,14 @@ impl TableDelegate for ListDelegate {
                     .visible()
                     .iter()
                     .map(|c| match c {
-                        FileColumn::Modified => DATE_WIDTH,
-                        FileColumn::Size => SIZE_WIDTH,
-                        FileColumn::Config => CONFIG_WIDTH,
+                        FileColumn::Modified => scale(DATE_WIDTH),
+                        FileColumn::Size => scale(SIZE_WIDTH),
+                        FileColumn::Config => scale(CONFIG_WIDTH),
                         FileColumn::Name => 0.,
                     })
                     .sum();
                 let available = self.pane_width.load(Ordering::Relaxed) as f32;
-                let name_width = (available - fixed - SLACK).max(NAME_MIN_WIDTH);
+                let name_width = (available - fixed - scale(SLACK)).max(scale(NAME_MIN_WIDTH));
                 Column::new(column.key(), column.label())
                     .sortable()
                     .sort(initial_for(SortKey::Name))
@@ -267,14 +269,14 @@ impl TableDelegate for ListDelegate {
             FileColumn::Modified => Column::new(column.key(), column.label())
                 .sortable()
                 .sort(initial_for(SortKey::Modified))
-                .width(px(self.width_for(column, DATE_WIDTH))),
+                .width(px(width_for(column, DATE_WIDTH))),
             FileColumn::Size => Column::new(column.key(), column.label())
                 .sortable()
                 .sort(initial_for(SortKey::Size))
-                .width(px(self.width_for(column, SIZE_WIDTH)))
+                .width(px(width_for(column, SIZE_WIDTH)))
                 .text_right(),
             FileColumn::Config => Column::new(column.key(), column.label())
-                .width(px(CONFIG_WIDTH))
+                .width(px(width_for(column, CONFIG_WIDTH)))
                 .resizable(false),
         }
     }
@@ -306,7 +308,7 @@ impl TableDelegate for ListDelegate {
                 .relative()
                 .size_full()
                 // §4: the header is chrome, one size down from the rows.
-                .text_size(px(HEADER_FONT_SIZE))
+                .text_size(rem_from_ui_px(HEADER_FONT_SIZE))
                 .on_prepaint(move |b, _, _| {
                     *probe.lock() = b;
                 })
@@ -542,7 +544,7 @@ impl TableDelegate for ListDelegate {
                     // what is broken, is worse than one without the target.
                     .flex_shrink_0()
                     .max_w_full()
-                    .text_size(px(ROW_FONT_SIZE))
+                    .text_size(rem_from_ui_px(ROW_FONT_SIZE))
                     .text_color(if selected {
                         selected_text
                     } else {
@@ -571,7 +573,7 @@ impl TableDelegate for ListDelegate {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(rem_from_ui_px(11.5))
                             .text_color(theme.warning)
                             .child(format!("→ {}", target.display())),
                     );
@@ -586,7 +588,7 @@ impl TableDelegate for ListDelegate {
                     .unwrap_or_default();
                 div()
                     .w_full()
-                    .text_size(px(ROW_FONT_SIZE))
+                    .text_size(rem_from_ui_px(ROW_FONT_SIZE))
                     // §7: dates stack down a column, so their digits must
                     // not shift width from row to row.
                     .font_features(crate::theme::tabular_numerals())
@@ -609,7 +611,7 @@ impl TableDelegate for ListDelegate {
                     .flex()
                     .justify_end()
                     .pr(px(10.))
-                    .text_size(px(ROW_FONT_SIZE))
+                    .text_size(rem_from_ui_px(ROW_FONT_SIZE))
                     // §7 names this one specifically: right-aligned sizes
                     // jitter worst without fixed-advance digits.
                     .font_features(crate::theme::tabular_numerals())
@@ -708,7 +710,7 @@ impl FilePane {
         cx: &mut Context<Self>,
     ) {
         let font = window.text_style().font();
-        let font_size = px(ROW_FONT_SIZE);
+        let font_size = rem_from_ui_px(ROW_FONT_SIZE).to_pixels(window.rem_size());
         let text_system = window.text_system();
 
         let mut widest = px(0.);
@@ -774,10 +776,11 @@ impl FilePane {
         if !self.folder.read(cx).is_slow_to_start() {
             return None;
         }
+        let header_height = rem_from_ui_px(ROW_HEIGHT).to_pixels(cx.theme().font_size);
         Some(
             div()
                 .absolute()
-                .top(px(COLUMN_HEADER_HEIGHT - 2.))
+                .top(header_height - px(2.))
                 .left_0()
                 .right_0()
                 .h(px(2.))

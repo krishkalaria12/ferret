@@ -142,7 +142,7 @@ impl Browser {
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(15.))
+                                .text_size(rem_from_ui_px(15.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme.danger)
                                 .child(format!("Mount {name} as root?")),
@@ -554,7 +554,7 @@ async fn ask_host_key(
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(15.))
+                                .text_size(rem_from_ui_px(15.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(format!("{endpoint} isn't in your known_hosts file")),
                         )
@@ -570,14 +570,14 @@ async fn ask_host_key(
                                 .bg(theme.secondary)
                                 .child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(rem_from_ui_px(11.))
                                         .text_color(theme.muted_foreground)
                                         .child(algorithm.clone()),
                                 )
                                 .child(
                                     div()
                                         .font_family("monospace")
-                                        .text_size(px(12.))
+                                        .text_size(rem_from_ui_px(12.))
                                         .child(fingerprint.clone()),
                                 ),
                         ),
@@ -658,7 +658,7 @@ async fn ask_secret(
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(14.))
+                                .text_size(rem_from_ui_px(14.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(title.clone()),
                         )
@@ -673,7 +673,7 @@ async fn ask_secret(
                         })
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(rem_from_ui_px(11.))
                                 .text_color(theme.muted_foreground)
                                 .child(
                                     "Ferret never writes secrets to its own files — \

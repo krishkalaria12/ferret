@@ -544,9 +544,13 @@ impl Browser {
                 .w(px(400.))
                 .close_button(false)
                 .title(SharedString::from("Unsaved changes"))
-                .child(div().text_size(px(13.)).child(SharedString::from(format!(
-                    "{name} has unsaved changes. Save them before leaving?"
-                ))))
+                .child(
+                    div()
+                        .text_size(rem_from_ui_px(13.))
+                        .child(SharedString::from(format!(
+                            "{name} has unsaved changes. Save them before leaving?"
+                        ))),
+                )
                 .footer(
                     h_flex()
                         .gap_2()

@@ -247,7 +247,7 @@ impl Browser {
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(14.))
+                                .text_size(rem_from_ui_px(14.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .child(title.clone()),
                         )
@@ -271,7 +271,7 @@ impl Browser {
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(rem_from_ui_px(11.))
                                 .text_color(theme.muted_foreground)
                                 .child(
                                     "Unchecked, anything already there is left alone \

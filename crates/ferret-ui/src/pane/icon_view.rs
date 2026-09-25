@@ -10,6 +10,14 @@ pub(super) struct Marquee {
     current: gpui::Point<gpui::Pixels>,
 }
 
+struct IconGeometry {
+    width: gpui::Pixels,
+    height: gpui::Pixels,
+    glyph: gpui::Pixels,
+    gap: gpui::Pixels,
+    padding: gpui::Pixels,
+}
+
 impl FilePane {
     /// Icon-view geometry (§4): 92 px tiles, 48 px glyph, 6 px gaps, 12 px
     /// padding.
@@ -19,17 +27,32 @@ impl FilePane {
     const GAP: f32 = 6.;
     const PAD: f32 = 12.;
 
-    pub(super) fn tiles_per_row(&self) -> usize {
+    pub(super) fn tiles_per_row(&self, cx: &App) -> usize {
+        let geometry = Self::icon_geometry(cx);
         let width = self.pane_width.load(Ordering::Relaxed) as f32;
-        (((width - Self::PAD * 2. + Self::GAP) / (Self::TILE_W + Self::GAP)).floor() as usize)
+        (((width - f32::from(geometry.padding) * 2. + f32::from(geometry.gap))
+            / (f32::from(geometry.width) + f32::from(geometry.gap)))
+        .floor() as usize)
             .max(1)
+    }
+
+    fn icon_geometry(cx: &App) -> IconGeometry {
+        let base = cx.theme().font_size;
+        IconGeometry {
+            width: rem_from_ui_px(Self::TILE_W).to_pixels(base),
+            height: rem_from_ui_px(Self::TILE_H).to_pixels(base),
+            glyph: rem_from_ui_px(Self::TILE_GLYPH).to_pixels(base),
+            gap: rem_from_ui_px(Self::GAP).to_pixels(base),
+            padding: rem_from_ui_px(Self::PAD).to_pixels(base),
+        }
     }
 }
 
 impl FilePane {
     pub(super) fn render_icon_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let geometry = Self::icon_geometry(cx);
         let n = self.folder.read(cx).row_count();
-        let rows = n.div_ceil(self.tiles_per_row());
+        let rows = n.div_ceil(self.tiles_per_row(cx));
         self.maybe_warm_thumbs(n, rows, cx);
 
         let height_probe = self.pane_height.clone();
@@ -66,7 +89,7 @@ impl FilePane {
                     cx.processor(
                         move |this, row_range: std::ops::Range<usize>, _window, cx| {
                             let n = this.folder.read(cx).row_count();
-                            let per_row = this.tiles_per_row();
+                            let per_row = this.tiles_per_row(cx);
                             row_range
                                 .map(|row| {
                                     let start = row * per_row;
@@ -77,8 +100,8 @@ impl FilePane {
                                     }
                                     h_flex()
                                         .w_full()
-                                        .px(px(Self::PAD))
-                                        .gap(px(Self::GAP))
+                                        .px(geometry.padding)
+                                        .gap(geometry.gap)
                                         .children(tiles)
                                         .into_any_element()
                                 })
@@ -96,6 +119,7 @@ impl FilePane {
             return div().into_any_element();
         };
         let theme = cx.theme();
+        let geometry = Self::icon_geometry(cx);
         let palette = BrowserPalette::resolve(cx);
         let selected = self.folder.read(cx).is_row_selected(ix);
         let focused = self.pane_focused.load(Ordering::Relaxed);
@@ -130,7 +154,7 @@ impl FilePane {
         // the same way.
         let inner = match self.thumb_tile(&entry, cx) {
             Some(tile) => tile,
-            None => entry_icon(&entry, Self::TILE_GLYPH, icon_color, cx),
+            None => entry_icon(&entry, f32::from(geometry.glyph), icon_color, cx),
         };
         let tile_icon = match self.git_status(&entry) {
             Some(status) => div()
@@ -163,14 +187,14 @@ impl FilePane {
 
         div()
             .id(("tile", ix))
-            .w(px(Self::TILE_W))
-            .h(px(Self::TILE_H))
+            .w(geometry.width)
+            .h(geometry.height)
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(Self::GAP))
-            .p(px(7.))
+            .gap(geometry.gap)
+            .p(rem_from_ui_px(7.).to_pixels(theme.font_size))
             .rounded(px(6.))
             .bg(fill)
             .when(!selected, |tile| {
@@ -216,8 +240,8 @@ impl FilePane {
                 div()
                     .w_full()
                     .line_clamp(2)
-                    .text_size(px(11.5))
-                    .line_height(px(14.))
+                    .text_size(rem_from_ui_px(11.5))
+                    .line_height(rem_from_ui_px(14.))
                     .text_center()
                     .text_color(label_color)
                     .when(broken, |text| text.line_through())
@@ -237,8 +261,9 @@ impl FilePane {
             return None;
         }
         let cached = cx.global::<FerretState>().rendered_thumbs.get(entry)?;
+        let glyph = rem_from_ui_px(Self::TILE_GLYPH).to_pixels(cx.theme().font_size);
         let scale =
-            (Self::TILE_GLYPH / cached.width as f32).min(Self::TILE_GLYPH / cached.height as f32);
+            (f32::from(glyph) / cached.width as f32).min(f32::from(glyph) / cached.height as f32);
         Some(
             gpui::img(gpui::ImageSource::Render(cached.image))
                 .w(px(cached.width as f32 * scale))
@@ -266,8 +291,9 @@ impl FilePane {
         if height <= 0.0 || n == 0 {
             return;
         }
-        let per_row = self.tiles_per_row();
-        let stride = Self::TILE_H + Self::GAP;
+        let geometry = Self::icon_geometry(cx);
+        let per_row = self.tiles_per_row(cx);
+        let stride = f32::from(geometry.height) + f32::from(geometry.gap);
         let offset = gpui_component::scroll::ScrollbarHandle::offset(&self.icon_scroll).y;
         let first_row = (f32::from(offset) / stride).floor().max(0.0) as usize;
         let visible_rows = (height / stride).ceil() as usize;
@@ -438,11 +464,12 @@ impl FilePane {
         let scrolled = gpui_component::scroll::ScrollbarHandle::offset(
             &self.table.read(cx).vertical_scroll_handle,
         );
-        let local_y = position.y - origin.y - px(COLUMN_HEADER_HEIGHT) - scrolled.y;
+        let row_height = rem_from_ui_px(ROW_HEIGHT).to_pixels(cx.theme().font_size);
+        let local_y = position.y - origin.y - row_height - scrolled.y;
         if local_y < px(0.) {
             return None; // In the header.
         }
-        let row = (f32::from(local_y) / ROW_HEIGHT).floor() as usize;
+        let row = (f32::from(local_y) / f32::from(row_height)).floor() as usize;
         (row < self.folder.read(cx).row_count()).then_some(row)
     }
 
@@ -461,9 +488,10 @@ impl FilePane {
         let scrolled = gpui_component::scroll::ScrollbarHandle::offset(
             &self.table.read(cx).vertical_scroll_handle,
         );
+        let row_height = rem_from_ui_px(ROW_HEIGHT).to_pixels(cx.theme().font_size);
         let to_row = |y: gpui::Pixels| {
-            let local = y - origin.y - px(COLUMN_HEADER_HEIGHT) - scrolled.y;
-            (f32::from(local) / ROW_HEIGHT).floor() as isize
+            let local = y - origin.y - row_height - scrolled.y;
+            (f32::from(local) / f32::from(row_height)).floor() as isize
         };
         let first = to_row(top).clamp(0, n as isize - 1) as usize;
         let last = to_row(bottom).clamp(0, n as isize - 1) as usize;
@@ -487,7 +515,7 @@ impl FilePane {
         // (its own handler runs in the inner bubble phase and marks the
         // folder's selection).
         let n = self.folder.read(cx).row_count();
-        if self.tile_at(event.position, n).is_some() {
+        if self.tile_at(event.position, n, cx).is_some() {
             return;
         }
         self.marquee = Some(Marquee {
@@ -541,21 +569,25 @@ impl FilePane {
         let top = a.y.min(b.y);
         let bottom = a.y.max(b.y);
 
-        let per_row = self.tiles_per_row();
+        let geometry = Self::icon_geometry(cx);
+        let per_row = self.tiles_per_row(cx);
         let n = self.folder.read(cx).row_count();
         let col_range = |lo: gpui::Pixels, hi: gpui::Pixels| {
-            let first = (((lo - px(Self::PAD) + px(Self::GAP)) / px(Self::TILE_W + Self::GAP))
+            let first = (((lo - geometry.padding + geometry.gap) / (geometry.width + geometry.gap))
                 .floor() as isize)
                 .clamp(0, per_row as isize - 1);
-            let last = (((hi - px(Self::PAD)) / px(Self::TILE_W + Self::GAP)).floor() as isize)
+            let last = (((hi - geometry.padding) / (geometry.width + geometry.gap)).floor()
+                as isize)
                 .clamp(0, per_row as isize - 1);
             first..=last
         };
         let row_range = |lo: gpui::Pixels, hi: gpui::Pixels| {
-            let first =
-                (((lo - px(Self::PAD)) / px(Self::TILE_H + Self::GAP)).floor() as isize).max(0);
-            let last =
-                (((hi - px(Self::PAD)) / px(Self::TILE_H + Self::GAP)).floor() as isize).max(0);
+            let first = (((lo - geometry.padding) / (geometry.height + geometry.gap)).floor()
+                as isize)
+                .max(0);
+            let last = (((hi - geometry.padding) / (geometry.height + geometry.gap)).floor()
+                as isize)
+                .max(0);
             first..=last
         };
 
@@ -577,17 +609,19 @@ impl FilePane {
         cx.notify();
     }
 
-    fn tile_at(&self, position: gpui::Point<gpui::Pixels>, n: usize) -> Option<usize> {
+    fn tile_at(&self, position: gpui::Point<gpui::Pixels>, n: usize, cx: &App) -> Option<usize> {
         let origin = *self.pane_origin.lock();
         let offset = gpui_component::scroll::ScrollbarHandle::offset(&self.icon_scroll);
         let local = gpui::point(
             position.x - origin.x + offset.x,
             position.y - origin.y + offset.y,
         );
-        let per_row = self.tiles_per_row();
-        let col = (((local.x - px(Self::PAD) + px(Self::GAP)) / px(Self::TILE_W + Self::GAP))
+        let geometry = Self::icon_geometry(cx);
+        let per_row = self.tiles_per_row(cx);
+        let col = (((local.x - geometry.padding + geometry.gap) / (geometry.width + geometry.gap))
             .floor()) as isize;
-        let row = (((local.y - px(Self::PAD)) / px(Self::TILE_H + Self::GAP)).floor()) as isize;
+        let row =
+            (((local.y - geometry.padding) / (geometry.height + geometry.gap)).floor()) as isize;
         if col < 0 || row < 0 || col as usize >= per_row {
             return None;
         }

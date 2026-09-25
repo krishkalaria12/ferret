@@ -142,7 +142,7 @@ impl Render for ConnectionDialog {
                         v_flex()
                             .child(
                                 div()
-                                    .text_size(px(15.))
+                                    .text_size(rem_from_ui_px(15.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(if self.editing.is_some() {
                                         "Edit Connection"
@@ -152,7 +152,7 @@ impl Render for ConnectionDialog {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(rem_from_ui_px(12.))
                                     .text_color(theme.muted_foreground)
                                     .child("SSH remote server"),
                             ),
@@ -160,7 +160,7 @@ impl Render for ConnectionDialog {
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(rem_from_ui_px(11.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child("SERVER"),
@@ -171,7 +171,7 @@ impl Render for ConnectionDialog {
             .child(field("Port", &self.port))
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(rem_from_ui_px(11.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child("AUTHENTICATION"),
@@ -182,7 +182,7 @@ impl Render for ConnectionDialog {
                 el.child(
                     div()
                         .text_color(theme.danger)
-                        .text_size(px(12.))
+                        .text_size(rem_from_ui_px(12.))
                         .child(error),
                 )
             })
@@ -191,7 +191,7 @@ impl Render for ConnectionDialog {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(rem_from_ui_px(11.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
                             .child("SSH COMMAND"),

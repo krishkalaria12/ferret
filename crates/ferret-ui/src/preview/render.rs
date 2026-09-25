@@ -152,7 +152,7 @@ impl PreviewPanel {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
-                .child(grid.element())
+                .child(grid.element(cx))
                 .into_any_element(),
             PaneState::Unsupported { entry, message, .. } => {
                 self.render_fallback(entry, message, cx)
@@ -220,7 +220,7 @@ impl PreviewPanel {
                 div()
                     .max_w(px(320.))
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(rem_from_ui_px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(text)),
             )
@@ -245,7 +245,7 @@ impl PreviewPanel {
         if remote {
             body = body.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(rem_from_ui_px(12.))
                     .text_color(cx.theme().muted_foreground)
                     .child("Reading over the connection…"),
             );
@@ -279,7 +279,7 @@ impl PreviewPanel {
                 div()
                     .max_w(px(320.))
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(rem_from_ui_px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(message.clone()),
             )
@@ -323,7 +323,7 @@ impl PreviewPanel {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.))
+                    .text_size(rem_from_ui_px(13.))
                     .text_color(cx.theme().foreground)
                     .child(message.clone()),
             )
@@ -359,7 +359,7 @@ impl PreviewPanel {
             .py(px(6.))
             .border_t_1()
             .border_color(cx.theme().border)
-            .text_size(px(11.5))
+            .text_size(rem_from_ui_px(11.5))
             .text_color(cx.theme().muted_foreground)
             .child(footer)
     }

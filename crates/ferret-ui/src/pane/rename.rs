@@ -241,6 +241,7 @@ impl FilePane {
     pub(super) fn render_rename_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let renaming = self.renaming.as_ref()?;
         let theme = cx.theme();
+        let row_height = rem_from_ui_px(ROW_HEIGHT).to_pixels(theme.font_size);
         let editor = Input::new(&renaming.input).small();
 
         let row_top = (self.view_mode == ViewMode::List)
@@ -250,11 +251,11 @@ impl FilePane {
                 let scrolled = gpui_component::scroll::ScrollbarHandle::offset(
                     &self.table.read(cx).vertical_scroll_handle,
                 );
-                px(COLUMN_HEADER_HEIGHT + row as f32 * ROW_HEIGHT) + scrolled.y
+                row_height + row_height * row as f32 + scrolled.y
             })
             // Only when the row is actually on screen; a rename started and
             // then scrolled away should not paint over the header.
-            .filter(|top| *top >= px(COLUMN_HEADER_HEIGHT));
+            .filter(|top| *top >= row_height);
 
         let frame = h_flex()
             .absolute()

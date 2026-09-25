@@ -204,7 +204,7 @@ impl PreviewPanel {
                 )
                 .child(
                     gpui::div()
-                        .text_size(px(11.5))
+                        .text_size(rem_from_ui_px(11.5))
                         .text_color(cx.theme().muted_foreground)
                         .child(label),
                 )

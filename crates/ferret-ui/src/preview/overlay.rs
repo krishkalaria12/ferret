@@ -594,7 +594,7 @@ impl PreviewOverlay {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(14.))
+                            .text_size(rem_from_ui_px(14.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(cx.theme().foreground)
                             .child(title),
@@ -602,14 +602,14 @@ impl PreviewOverlay {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(rem_from_ui_px(12.))
                             .text_color(cx.theme().muted_foreground)
                             .child(detail),
                     ),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(rem_from_ui_px(11.5))
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from("space · esc to close")),
             )
@@ -676,7 +676,7 @@ impl PreviewOverlay {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(grid.element())
+                    .child(grid.element(cx))
                     .into_any_element(),
                 None => self.render_centred(SharedString::from("No rows to show."), cx),
             },
@@ -722,7 +722,7 @@ impl PreviewOverlay {
                 div()
                     .max_w(px(420.))
                     .text_center()
-                    .text_size(px(13.5))
+                    .text_size(rem_from_ui_px(13.5))
                     .text_color(cx.theme().muted_foreground)
                     .child(text),
             )
@@ -741,7 +741,7 @@ impl PreviewOverlay {
                     .py(px(6.))
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .text_size(px(12.))
+                    .text_size(rem_from_ui_px(12.))
                     .text_color(cx.theme().muted_foreground)
                     .child(footer)
                     .into_any_element()
@@ -777,7 +777,7 @@ impl PreviewOverlay {
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(rem_from_ui_px(12.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(label),
                         )

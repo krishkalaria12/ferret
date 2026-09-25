@@ -5,6 +5,15 @@ use super::*;
 
 impl Render for FilePane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui_font_size = cx.theme().font_size;
+        if ui_font_size != self.ui_font_size {
+            self.ui_font_size = ui_font_size;
+            self.widths.lock().clear();
+            self.table.update(cx, |table, cx| {
+                table.refresh(cx);
+                cx.notify();
+            });
+        }
         // The slow-click timer has no window to focus an editor with, so it
         // leaves the request here and the next frame starts the rename.
         if let Some(path) = self.pending_rename.take() {
@@ -42,6 +51,7 @@ impl Render for FilePane {
         // without it this wrapper shrinks to its content, the table gets no
         // definite height, and a virtualised list with no height paints no
         // rows at all — silently, and only at runtime.
+        let row_height = rem_from_ui_px(ROW_HEIGHT).to_pixels(window.rem_size());
         let table = div()
             .size_full()
             .on_children_prepainted(move |children: Vec<gpui::Bounds<gpui::Pixels>>, _, cx| {
@@ -70,7 +80,7 @@ impl Render for FilePane {
             .child(
                 DataTable::new(&self.table)
                     .bordered(false)
-                    .with_size(px(ROW_HEIGHT)),
+                    .with_size(row_height),
             );
 
         // Menu placement and marquee hit-testing work in pane-local space,

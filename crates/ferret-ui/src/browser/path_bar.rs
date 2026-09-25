@@ -204,7 +204,7 @@ impl Browser {
         // The strip the field floats in — ground, not a bordered band. The
         // field itself carries the edges.
         let bar = h_flex()
-            .h(px(PATH_BAR_HEIGHT))
+            .min_h(px(PATH_BAR_HEIGHT))
             .px(px(10.))
             .gap(px(8.))
             .items_center()
@@ -215,7 +215,7 @@ impl Browser {
         // the biggest single thing separating the shell from the reference.
         let field = |editing: bool| {
             h_flex()
-                .h(px(PATH_FIELD_HEIGHT))
+                .min_h(px(PATH_FIELD_HEIGHT))
                 .flex_1()
                 .min_w_0()
                 .items_center()
@@ -326,7 +326,7 @@ impl Browser {
                         .px(px(6.))
                         .rounded(px(4.))
                         .bg(danger.opacity(0.16))
-                        .text_size(px(10.5))
+                        .text_size(rem_from_ui_px(10.5))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(danger)
                         .child("ROOT"),
@@ -363,7 +363,7 @@ impl Browser {
                 h_flex()
                     .id(("completion", ix))
                     .w_full()
-                    .h(px(24.))
+                    .min_h(px(24.))
                     .px(px(8.))
                     .gap_2()
                     .items_center()
@@ -381,7 +381,7 @@ impl Browser {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(rem_from_ui_px(12.))
                             .text_color(if ix == highlighted {
                                 crate::theme::text_on(selected, theme.foreground)
                             } else {

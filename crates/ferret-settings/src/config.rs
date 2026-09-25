@@ -29,6 +29,9 @@ pub const FOLDER_PREFS_CAPACITY: usize = 4_000;
 /// edge would write the file on every frame.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
+pub const DEFAULT_UI_FONT_SIZE: f32 = 13.0;
+pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 13.0;
+
 /// Bounds on the interface font size, so a hand-edited file cannot make the app
 /// unusable and unfixable through its own UI.
 pub const MIN_FONT_SIZE: f32 = 9.0;

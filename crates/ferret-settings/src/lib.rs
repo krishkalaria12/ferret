@@ -310,6 +310,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unusable_terminal_font_size_is_clamped_with_a_warning() {
+        let (settings, warnings) = Settings::from_json(r#"{ "terminal": { "font_size": 400 } }"#);
+        assert_eq!(settings.terminal.font_size, MAX_FONT_SIZE);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].key, "terminal.font_size");
+    }
+
+    #[test]
     fn an_unusable_terminal_height_is_clamped_with_a_warning() {
         let (settings, warnings) = Settings::from_json(r#"{ "terminal": { "height": 9000 } }"#);
         assert_eq!(settings.terminal.height, MAX_TERMINAL_HEIGHT);

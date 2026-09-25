@@ -294,7 +294,7 @@ impl FilePane {
         h_flex()
             .id(id)
             .w_full()
-            .h(px(ROW_HEIGHT))
+            .h(rem_from_ui_px(ROW_HEIGHT).to_pixels(cx.theme().font_size))
             .flex_shrink_0()
             .items_center()
             .gap_2()
@@ -307,7 +307,7 @@ impl FilePane {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(ROW_FONT_SIZE))
+                    .text_size(rem_from_ui_px(ROW_FONT_SIZE))
                     .text_color(text)
                     .when(broken, |label| label.line_through())
                     .child(gpui::SharedString::new(entry.name())),
@@ -354,7 +354,12 @@ impl FilePane {
             };
             return frame
                 .justify_center()
-                .child(div().text_size(px(12.)).text_center().child(label))
+                .child(
+                    div()
+                        .text_size(rem_from_ui_px(12.))
+                        .text_center()
+                        .child(label),
+                )
                 .into_any_element();
         };
 
@@ -376,14 +381,14 @@ impl FilePane {
             .child(
                 div()
                     .w_full()
-                    .text_size(px(12.5))
+                    .text_size(rem_from_ui_px(12.5))
                     .text_center()
                     .text_color(theme.foreground)
                     .child(gpui::SharedString::new(entry.name())),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(rem_from_ui_px(11.5))
                     .font_features(crate::theme::tabular_numerals())
                     .text_center()
                     .child(detail),

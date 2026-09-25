@@ -25,6 +25,7 @@ mod preview;
 mod state;
 mod theme;
 mod thumbs;
+mod typography;
 
 pub use assets::Assets;
 pub use browser::{Browser, TITLE_BAR_HEIGHT, TRAFFIC_LIGHT_DIAMETER};

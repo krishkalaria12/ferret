@@ -62,6 +62,7 @@ actions!(
         FocusFilter,
         ClearFilter,
         NewWindow,
+        OpenSettings,
         CompletionNext,
         CompletionPrev,
         AcceptCompletion,

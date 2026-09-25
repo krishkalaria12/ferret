@@ -138,7 +138,7 @@ impl PreviewPanel {
                     .child(
                         gpui::div()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(rem_from_ui_px(13.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(SharedString::from(title)),
@@ -146,7 +146,7 @@ impl PreviewPanel {
                     .child(
                         gpui::div()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(rem_from_ui_px(11.5))
                             .text_color(theme.muted_foreground)
                             .child(detail),
                     ),

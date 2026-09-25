@@ -42,7 +42,7 @@ impl Browser {
             .items_center()
             .gap_2()
             .pr(px(8.))
-            .text_size(px(GIT_FONT_SIZE))
+            .text_size(rem_from_ui_px(GIT_FONT_SIZE))
             // The counts change under a watcher without the user doing
             // anything, so proportional figures would make the buttons beside
             // them jump sideways when 9 becomes 10 (§3).

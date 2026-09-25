@@ -72,9 +72,17 @@ pub fn register(glass: bool, font_size: f32, cx: &mut App) {
         theme.dark_theme = dark;
     }
     Theme::change(mode, None, cx);
-    // After `change`, which re-applies a whole theme config and would put the
-    // library's own size back.
-    Theme::global_mut(cx).font_size = gpui::px(font_size);
+    set_interface_font_size(font_size, cx);
+}
+
+pub(crate) fn set_interface_font_size(font_size: f32, cx: &mut App) {
+    use gpui_component::Theme;
+
+    let theme = Theme::global_mut(cx);
+    theme.font_size = gpui::px(font_size);
+    theme.mono_font_size = gpui::px(font_size);
+    Theme::sync_base(cx);
+    cx.refresh_windows();
 }
 
 /// The sixteen ANSI colours plus foreground, background and cursor, as a terminal

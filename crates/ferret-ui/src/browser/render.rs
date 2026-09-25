@@ -8,7 +8,7 @@ impl Browser {
         let theme = cx.theme();
         let dir = self.active().folder.read(cx).dir.clone();
         h_flex()
-            .h(px(36.))
+            .min_h(px(36.))
             .px(px(12.))
             .gap_3()
             .items_center()
@@ -24,7 +24,7 @@ impl Browser {
                 div()
                     .flex_1()
                     .truncate()
-                    .text_size(px(13.))
+                    .text_size(rem_from_ui_px(13.))
                     .child(SharedString::from(format!(
                         "Ferret can't find this folder. It may have been deleted or moved: {dir}"
                     ))),
@@ -71,8 +71,8 @@ impl Browser {
             .when_some(git, |bar, segment| bar.right(segment))
             // §4: h24, 11.5 px, muted. The library defaults to an auto height
             // and `text_xs`, so the row would drift a pixel or two off spec.
-            .h(px(STATUS_BAR_HEIGHT))
-            .text_size(px(CHROME_FONT_SIZE))
+            .min_h(px(STATUS_BAR_HEIGHT))
+            .text_size(rem_from_ui_px(CHROME_FONT_SIZE))
             // The counts stack against the rows above them (§7).
             .font_features(crate::theme::tabular_numerals())
     }
@@ -137,6 +137,9 @@ impl Render for Browser {
                     this.send_selection_to(&send.id, window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &actions::OpenSettings, window, cx| {
+                this.open_settings_dialog(window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &actions::ToggleSidebar, _, cx| this.toggle_sidebar(cx)),
             )
