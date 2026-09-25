@@ -215,6 +215,24 @@ impl Folder {
     }
 
     pub(super) fn resort(&mut self) {
+        self.resort_children();
+        self.resort_inner(true);
+    }
+
+    pub(super) fn resort_preserving_selection_totals(&mut self) {
+        self.resort_children();
+        self.resort_inner(false);
+    }
+
+    pub(super) fn resort_children(&mut self) {
+        let slab = &self.slab;
+        let rules = self.rules;
+        for ids in self.children.values_mut() {
+            ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, rules));
+        }
+    }
+
+    fn resort_inner(&mut self, recount: bool) {
         let rules = self.rules;
         // Taken out so the comparator can read the slab while the id vector is
         // mutable. Sorting now permutes `u32`s, not `Entry`s.
@@ -236,7 +254,11 @@ impl Folder {
             ids.sort_unstable_by(|a, b| cmp_slots(slab, *a, *b, rules));
         }
         self.entries = ids;
-        self.rebuild_index_and_order();
+        if recount {
+            self.rebuild_index_and_order();
+        } else {
+            self.rebuild_index_and_order_without_recount();
+        }
     }
 
     fn rebuild_order(&mut self) {
@@ -266,6 +288,11 @@ impl Folder {
     /// keep their capacity, and both are keyed on `u32`s rather than on cloned
     /// paths (A-05, D-36).
     pub(super) fn rebuild_index_and_order(&mut self) {
+        self.rebuild_index_and_order_without_recount();
+        self.recount_selection();
+    }
+
+    fn rebuild_index_and_order_without_recount(&mut self) {
         let mut order = std::mem::take(&mut self.order);
         order.clear();
 
@@ -290,8 +317,6 @@ impl Folder {
             row_of_id.insert(entry.id, row);
         }
         self.row_of_id = row_of_id;
-
-        self.recount_selection();
     }
 
     /// Splice one expanded folder's visible children in beneath it, and

@@ -7,6 +7,8 @@ fn entry(name: &str, kind: EntryKind, len: u64, modified: Option<SystemTime>) ->
         modified,
         // Mirror what LocalFs produces: the leading dot is hidden.
         hidden: name.starts_with('.'),
+        name_hidden: name.starts_with('.'),
+        platform_hidden: false,
     }))
 }
 
@@ -81,6 +83,39 @@ fn folders_come_first_then_natural_name_order() {
     let mut f = populated();
     f.set_show_hidden(true);
     assert_eq!(row_names(&f), ["src", ".hidden", "report.pdf", "zebra.txt"]);
+}
+
+#[test]
+fn a_renamed_parent_maps_descendant_expansion_paths() {
+    let source = VfsPath::local("/x/old");
+    let descendant = VfsPath::local("/x/old/child/deep");
+    assert_eq!(
+        Folder::map_descendant(&descendant, &source, &VfsPath::local("/x/new")),
+        Some(VfsPath::local("/x/new/child/deep"))
+    );
+}
+
+#[test]
+fn expanded_children_follow_the_active_sort_rules() {
+    let mut f = populated();
+    let parent = f
+        .entries
+        .iter()
+        .find_map(|id| {
+            f.entry(*id)
+                .filter(|entry| entry.name() == "src")
+                .map(|_| *id)
+        })
+        .unwrap();
+    let z = f.insert(child("src", "z.txt", EntryKind::File, 1), Placement::Nested);
+    let a = f.insert(child("src", "a.txt", EntryKind::File, 1), Placement::Nested);
+    f.children.insert(parent, vec![z, a]);
+    f.expanded.insert(parent);
+    f.loading = false;
+
+    f.resort();
+
+    assert_eq!(f.children.get(&parent), Some(&vec![a, z]));
 }
 
 #[test]

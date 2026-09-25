@@ -218,6 +218,8 @@ impl Vfs for SftpVfs {
             symlinks: true,
             permissions: true,
             atomic_rename: self.atomic_rename,
+            rename_noreplace: true,
+            atomic_rename_noreplace: false,
             // No identity-checked atomic replacement over SFTP: a remote
             // write cannot offer the conflict refusal `write_atomic`
             // requires, so in-place preview editing stays unavailable there.
@@ -567,6 +569,36 @@ impl Vfs for SftpVfs {
         .map_err(|error| map_error(error, "rename", from))
     }
 
+    async fn rename_noreplace(&self, from: &VfsPath, to: &VfsPath) -> ferret_vfs::Result<()> {
+        let source = self.remote_path(from)?;
+        let destination = self.remote_path(to)?;
+        self.cache.invalidate(&source);
+        self.cache.invalidate(&destination);
+        let raw = self.raw.clone();
+        crate::spawn(async move { raw.rename(source, destination).await.map(drop) })
+            .await
+            .map_err(|error| error.into_vfs("rename", from))?
+            .map_err(|error| {
+                let already_exists = matches!(&error, SftpError::Status(status)
+                if {
+                    let message = status.error_message.to_ascii_lowercase();
+                    message.contains("already exists")
+                        || message.contains("file exists")
+                        || message.contains("destination exists")
+                });
+                if already_exists {
+                    VfsError::AlreadyExists { path: to.clone() }
+                } else {
+                    VfsError::RenameFailed {
+                        action: "rename",
+                        from: from.clone(),
+                        to: to.clone(),
+                        source: std::io::Error::other(error.to_string()),
+                    }
+                }
+            })
+    }
+
     /// Remove a file or a whole directory tree.
     ///
     /// `Trash` is refused rather than quietly downgraded: there is no remote
@@ -854,31 +886,7 @@ pub(crate) fn safe_local_name(name: &str) -> std::result::Result<(), &'static st
     if !valid_name(name) {
         return Err("not a usable file name");
     }
-    if name.contains('\\') {
-        return Err("contains a path separator");
-    }
-    // `CON`, `NUL`, `COM1` and friends are devices on Windows whatever the
-    // extension, and a file named after one cannot be created or removed.
-    const RESERVED: [&str; 22] = [
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-    ];
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
-    if RESERVED.contains(&stem.as_str()) {
-        return Err("is a reserved device name on Windows");
-    }
-    // Windows silently strips these, so `report.` and `report` become the same
-    // file — which is how one download quietly overwrites another.
-    if name.ends_with('.') || name.ends_with(' ') {
-        return Err("ends with a dot or a space");
-    }
-    if name
-        .chars()
-        .any(|c| matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-    {
-        return Err("contains a character Windows cannot store");
-    }
-    Ok(())
+    ferret_vfs::validate_portable_file_name(name)
 }
 
 fn invalid_path(path: &VfsPath, message: &'static str) -> VfsError {
@@ -968,6 +976,8 @@ fn metadata_from_attrs(name: &str, attrs: &FileAttributes) -> Metadata {
             .mtime
             .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds.into()))),
         hidden: name.starts_with('.'),
+        name_hidden: name.starts_with('.'),
+        platform_hidden: false,
     }
 }
 

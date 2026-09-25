@@ -171,10 +171,6 @@ impl FilePane {
 
 /// The row and selection halves of §8's three menus.
 ///
-/// They differ by more than a label: renaming is a single-item operation, so
-/// a multi-selection menu that offered it would have to pick one of them
-/// silently. Everything else states its count, because "Move to Trash" over
-/// nine selected files should say so before it happens.
 ///
 /// `trashable` is false on a mount: a server has no trash, so offering to move
 /// something there would be offering an action that cannot happen. The
@@ -206,11 +202,14 @@ pub(super) fn entry_menu_items(
         .item(PopupMenuItem::new("Copy").action(Box::new(actions::Copy)))
         .separator();
 
-    let menu = if multiple {
-        menu
-    } else {
-        menu.item(PopupMenuItem::new("Rename…").action(Box::new(actions::Rename)))
-    };
+    let menu = menu.item(
+        PopupMenuItem::new(if multiple {
+            "Batch Rename…"
+        } else {
+            "Rename…"
+        })
+        .action(Box::new(actions::Rename)),
+    );
 
     // "Send to" (F-22), offered only for local files: a server-to-server copy
     // would have to relay through this machine, which is a different

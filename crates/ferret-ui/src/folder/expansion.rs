@@ -139,6 +139,7 @@ impl Folder {
                     })
                     .collect();
                 folder.children.insert(parent, ids);
+                folder.resort_children();
                 folder.rebuild_index_and_order();
                 if restoring {
                     // A folder nested inside this one may have just been
@@ -262,6 +263,94 @@ impl Folder {
         self.watch = None;
         cx.emit(FolderEvent::Gone);
         cx.notify();
+    }
+
+    pub fn suspend_watch(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.watch = None;
+    }
+
+    pub fn apply_renames(
+        &mut self,
+        renames: &[(VfsPath, VfsPath)],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+        let mut updates = Vec::with_capacity(renames.len());
+        for (source, destination) in renames {
+            let Some(id) = self.id_of(source) else {
+                return false;
+            };
+            let Some(entry) = self.entry(id) else {
+                return false;
+            };
+            if entry.is_dir_like() && self.expanded.contains(&id) {
+                return false;
+            }
+            let Some(new_name) = destination.file_name() else {
+                return false;
+            };
+            let old_visible = self.is_visible(entry);
+            let replacement = entry.renamed(destination.clone(), new_name);
+            updates.push((
+                id,
+                source.clone(),
+                destination.clone(),
+                entry.name().to_string(),
+                new_name.to_string(),
+                replacement,
+                old_visible,
+            ));
+        }
+
+        self.generation = self.generation.wrapping_add(1);
+        let mut root_names = Vec::new();
+        let mut path_updates = Vec::with_capacity(updates.len());
+        for (id, source, destination, old_name, new_name, replacement, old_visible) in updates {
+            let new_visible = self.is_visible(&replacement);
+            if source.parent().as_ref() == Some(&self.dir) {
+                root_names.push((old_name, new_name, id));
+            }
+            path_updates.push((source, destination, id));
+            if let Some(entry) = self.entry_by_id_mut(id) {
+                *entry = replacement;
+            }
+            if self.selection.contains(&id) {
+                let weight = self.row_weight(id);
+                match (old_visible, new_visible) {
+                    (false, true) => {
+                        self.selected_visible_count += 1;
+                        self.selected_visible_bytes += weight;
+                    }
+                    (true, false) => {
+                        self.selected_visible_count = self.selected_visible_count.saturating_sub(1);
+                        self.selected_visible_bytes =
+                            self.selected_visible_bytes.saturating_sub(weight);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (source, _, _) in &path_updates {
+            self.by_path.remove(source);
+        }
+        for (_, destination, id) in path_updates {
+            self.by_path.insert(destination, id);
+        }
+        for (old_name, _, _) in &root_names {
+            self.by_name.remove(&SmolStr::new(old_name));
+        }
+        for (_, new_name, id) in root_names {
+            self.by_name.insert(SmolStr::new(new_name), id);
+        }
+        self.invalidate_selected_paths();
+        self.resort_preserving_selection_totals();
+        cx.emit(FolderEvent::RowsChanged);
+        cx.emit(FolderEvent::PathsChanged);
+        cx.notify();
+        true
     }
 
     /// Re-list the same directory, keeping selection and cursor by path.

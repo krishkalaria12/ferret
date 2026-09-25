@@ -76,6 +76,10 @@ pub struct Metadata {
     /// Hidden by name (leading dot) *or* by the platform's own flag — the
     /// `HIDDEN` / `SYSTEM` attributes on Windows, `UF_HIDDEN` on macOS.
     pub hidden: bool,
+    #[serde(default)]
+    pub name_hidden: bool,
+    #[serde(default)]
+    pub platform_hidden: bool,
 }
 
 /// One row in the file list.
@@ -133,6 +137,25 @@ impl Entry {
             kind,
             metadata: None,
             link_target: None,
+        }
+    }
+
+    pub fn renamed(&self, path: VfsPath, name: impl AsRef<str>) -> Self {
+        let name = name.as_ref();
+        let name_hidden = path.is_hidden_by_name();
+        let metadata = self.metadata.map(|mut metadata| {
+            metadata.platform_hidden |= metadata.hidden && !metadata.name_hidden;
+            metadata.name_hidden = name_hidden;
+            metadata.hidden = metadata.name_hidden || metadata.platform_hidden;
+            metadata
+        });
+        Self {
+            path,
+            name: SmolStr::new(name),
+            ext: lowercase_extension(name),
+            kind: self.kind,
+            metadata,
+            link_target: self.link_target.clone(),
         }
     }
 
@@ -252,6 +275,50 @@ mod tests {
     fn hidden_falls_back_to_the_name_when_metadata_is_pending() {
         let pending = Entry::new(VfsPath::local("/x/.ssh"), ".ssh", EntryKind::Dir);
         assert!(pending.is_hidden());
+    }
+
+    #[test]
+    fn renaming_recomputes_name_hidden_without_losing_platform_hidden() {
+        let hidden = Entry::new(VfsPath::local("/x/.old"), ".old", EntryKind::File).with_metadata(
+            Some(Metadata {
+                hidden: true,
+                name_hidden: true,
+                ..Default::default()
+            }),
+        );
+        assert!(!hidden.renamed(VfsPath::local("/x/new"), "new").is_hidden());
+
+        let visible = Entry::new(VfsPath::local("/x/old"), "old", EntryKind::File)
+            .with_metadata(Some(Metadata::default()));
+        assert!(
+            visible
+                .renamed(VfsPath::local("/x/.new"), ".new")
+                .is_hidden()
+        );
+
+        let platform_hidden = Entry::new(VfsPath::local("/x/old"), "old", EntryKind::File)
+            .with_metadata(Some(Metadata {
+                hidden: true,
+                ..Default::default()
+            }));
+        assert!(
+            platform_hidden
+                .renamed(VfsPath::local("/x/new"), "new")
+                .is_hidden()
+        );
+
+        let both_hidden = Entry::new(VfsPath::local("/x/.old"), ".old", EntryKind::File)
+            .with_metadata(Some(Metadata {
+                hidden: true,
+                name_hidden: true,
+                platform_hidden: true,
+                ..Default::default()
+            }));
+        assert!(
+            both_hidden
+                .renamed(VfsPath::local("/x/new"), "new")
+                .is_hidden()
+        );
     }
 
     #[test]

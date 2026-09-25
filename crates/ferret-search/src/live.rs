@@ -680,5 +680,7 @@ pub(crate) fn metadata_for(path: &Path, name: &str) -> Option<Metadata> {
         len: metadata.len(),
         modified: metadata.modified().ok(),
         hidden: name.starts_with('.'),
+        name_hidden: name.starts_with('.'),
+        platform_hidden: false,
     })
 }

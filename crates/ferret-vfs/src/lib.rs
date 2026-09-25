@@ -48,7 +48,7 @@ mod vfs;
 pub use entry::{Entry, EntryKind, Metadata, SymlinkTarget};
 pub use errors::{Result, VfsError};
 pub use local::LocalFs;
-pub use path::{MountId, VfsPath};
+pub use path::{MountId, VfsPath, validate_portable_file_name};
 pub use router::Router;
 pub use vfs::{
     Capabilities, DirEntryBatch, FileIdentity, ListingDetail, ReadDirStream, RemoveMode, Vfs,

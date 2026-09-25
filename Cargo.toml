@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ferret",
     "crates/ferret-git",
+    "crates/ferret-ops",
     "crates/ferret-platform",
     "crates/ferret-preview",
     "crates/ferret-remote",
@@ -60,6 +61,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f6a93f9da331048b689e35b33a52bab8c7c4034e" }
 
 ferret-git = { path = "crates/ferret-git" }
+ferret-ops = { path = "crates/ferret-ops" }
 ferret-platform = { path = "crates/ferret-platform" }
 ferret-preview = { path = "crates/ferret-preview" }
 ferret-remote = { path = "crates/ferret-remote" }
@@ -84,6 +86,8 @@ aho-corasick = "1"
 # code and is wrong on real data. Small, no transitive weight; hand-rolling it
 # is the policy violation the policy exists to prevent.
 csv = "1"
+caseless = "0.2"
+convert_case = "0.12"
 # F-31. The Markdown parser behind preview resource policy (PV-D10): image
 # nodes are found structurally, never by regex. Already in the graph through
 # `gpui-component`, which parses through `markdown::to_mdast` — same crate,
@@ -239,6 +243,7 @@ smol = "2"
 smol_str = { version = "0.3", features = ["serde"] }
 thiserror = "2"
 trash = "5"
+unicode-normalization = "0.1"
 # Q-02. Extended preview grammars, one per language (PV-D05). Each carries
 # the generated C parser plus its Rust bindings; highlight queries are
 # vendored into `ferret-ui/assets/queries/` (never trusted from the package

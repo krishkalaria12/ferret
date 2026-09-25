@@ -17,15 +17,12 @@ impl Folder {
     /// and completion via [`Self::finish_loading`]. Stale generations drop
     /// their work silently — navigation ahead of a slow walk is normal.
     pub fn start_loading(&mut self, cx: &mut Context<Self>) {
-        self.generation += 1;
-        let generation = self.generation;
+        let carried = self.carried_state();
+        self.start_loading_with_carried(carried, cx);
+    }
 
-        // The user's identity state is theirs and survives a refresh, but the
-        // ids it is expressed in belong to the listing being discarded. Carry
-        // it across as paths; `apply_batch` resolves each one back to a fresh
-        // id as its entry lands, so a selected row is painted selected the
-        // moment it reappears.
-        self.carried = CarriedState {
+    fn carried_state(&self) -> CarriedState {
+        CarriedState {
             selection: self.selected_ids_as_paths(),
             anchor: self
                 .anchor
@@ -33,14 +30,88 @@ impl Folder {
             cursor: self
                 .cursor
                 .and_then(|id| Some(self.entry(id)?.path.clone())),
-            // Which folders are *open* is intent too; the children themselves
-            // are re-read once the parent listing lands.
-            expanded: self
-                .expanded
-                .iter()
-                .filter_map(|&id| Some(self.entry(id)?.path.clone()))
-                .collect(),
+            expanded: self.expanded_paths(),
+        }
+    }
+
+    pub fn reload_with_mapped_selection(
+        &mut self,
+        selected: HashSet<VfsPath>,
+        cursor: Option<VfsPath>,
+        renames: &[(VfsPath, VfsPath)],
+        cx: &mut Context<Self>,
+    ) {
+        let destinations = renames
+            .iter()
+            .map(|(source, destination)| (source.clone(), destination.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let expanded = self
+            .expanded_paths()
+            .into_iter()
+            .map(|path| {
+                destinations
+                    .get(&path)
+                    .cloned()
+                    .or_else(|| {
+                        destinations.iter().find_map(|(source, destination)| {
+                            Self::map_descendant(&path, source, destination)
+                        })
+                    })
+                    .unwrap_or(path)
+            })
+            .collect();
+        self.reload_with_paths(selected, cursor, expanded, cx);
+    }
+
+    pub(super) fn map_descendant(
+        path: &VfsPath,
+        source: &VfsPath,
+        destination: &VfsPath,
+    ) -> Option<VfsPath> {
+        if !path.starts_with(source) {
+            return None;
+        }
+        let mut names = Vec::new();
+        let mut cursor = path.clone();
+        while &cursor != source {
+            let name = cursor.file_name()?.to_string();
+            names.push(name);
+            cursor = cursor.parent()?;
+        }
+        let mut mapped = destination.clone();
+        for name in names.iter().rev() {
+            mapped = mapped.join(name);
+        }
+        Some(mapped)
+    }
+
+    fn reload_with_paths(
+        &mut self,
+        selected: HashSet<VfsPath>,
+        cursor: Option<VfsPath>,
+        expanded: HashSet<VfsPath>,
+        cx: &mut Context<Self>,
+    ) {
+        let carried = CarriedState {
+            selection: selected,
+            anchor: cursor.clone(),
+            cursor,
+            expanded,
         };
+        self.start_loading_with_carried(carried, cx);
+    }
+
+    fn expanded_paths(&self) -> HashSet<VfsPath> {
+        self.expanded
+            .iter()
+            .filter_map(|&id| Some(self.entry(id)?.path.clone()))
+            .collect()
+    }
+
+    fn start_loading_with_carried(&mut self, carried: CarriedState, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        self.carried = carried;
 
         // Every index derived from the old listing goes with it. Leaving the
         // slab behind is not cosmetic: a watcher probe arriving during the
@@ -109,8 +180,8 @@ impl Folder {
                             folder.apply_batch(batch, cx);
                             true
                         });
-                        if ok.is_err() {
-                            return; // Folder dropped: stop walking.
+                        if !matches!(ok, Ok(true)) {
+                            return;
                         }
                     }
                     Err(err) => {
@@ -230,7 +301,7 @@ impl Folder {
         cx.notify();
     }
 
-    fn attach_watch(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn attach_watch(&mut self, cx: &mut Context<Self>) {
         if !self.profile.watch {
             // A listing nobody is working in does not hold a subscription
             // (A-14) — and on macOS every registration costs the directories

@@ -105,15 +105,12 @@ impl Render for FilePane {
             .on_action(cx.listener(|this, _: &actions::Open, window, cx| {
                 if cx.global::<FerretState>().settings.browser.enter_opens {
                     this.open_selection(cx);
-                } else if let Some(path) = this.folder.read(cx).cursor_path() {
-                    this.begin_rename(path, window, cx);
+                } else {
+                    this.rename_selection_or_cursor(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &actions::Rename, window, cx| {
-                let target = this.folder.read(cx).cursor_path();
-                if let Some(path) = target {
-                    this.begin_rename(path, window, cx);
-                }
+                this.rename_selection_or_cursor(window, cx)
             }))
             .on_action(cx.listener(|this, _: &actions::CancelEdit, _, cx| {
                 this.cancel_rename(cx);

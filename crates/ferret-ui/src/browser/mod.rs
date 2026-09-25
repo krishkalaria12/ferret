@@ -54,6 +54,7 @@ use git::GitPanel;
 #[cfg(all(test, feature = "dhat-heap"))]
 pub(crate) use git::GitSnapshot;
 
+mod batch_rename;
 mod commit_dialog;
 mod connect;
 mod connection_dialog;
@@ -243,6 +244,7 @@ pub struct Browser {
     /// Reused across opens so inputs and result state are owned by an entity,
     /// never rebuilt by `Dialog`'s per-frame builder.
     power_search: Option<Entity<power_search::PowerSearch>>,
+    batch_rename: Option<Entity<batch_rename::BatchRenameDialog>>,
     /// The inline name filter, always mounted at the right of the path bar.
     filter_input: Entity<InputState>,
     /// Held so the filter input keeps notifying the folder.
@@ -447,6 +449,7 @@ impl Browser {
             clipboard: None,
             path_editing: None,
             power_search: None,
+            batch_rename: None,
             filter_input,
             _filter_subscription: filter_subscription,
             filter_task: None,

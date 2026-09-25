@@ -131,16 +131,26 @@ fn a_remote_folder_lists_creates_renames_and_deletes() {
     );
     assert!(entries.iter().all(|entry| entry.name() != "."));
 
-    // Rename.
+    // Rename without replacement.
+    let occupied = dir.join("occupied.txt");
+    smol::block_on(sftp.create_file(&occupied)).expect("create a collision");
+    assert!(smol::block_on(sftp.rename_noreplace(&file, &occupied)).is_err());
+    assert!(smol::block_on(sftp.exists(&file)));
     let renamed = dir.join("renamed.txt");
-    smol::block_on(sftp.rename(&file, &renamed)).expect("rename");
-    assert_eq!(list_names(&sftp, &dir), ["inner", "renamed.txt"]);
+    smol::block_on(sftp.rename_noreplace(&file, &renamed)).expect("rename");
+    assert_eq!(
+        list_names(&sftp, &dir),
+        ["inner", "occupied.txt", "renamed.txt"]
+    );
 
     // Trash is refused rather than quietly deleting: there is none on a
     // server, and the UI has to be told so it can say so.
     let trashed = smol::block_on(sftp.remove(&renamed, RemoveMode::Trash));
     assert!(trashed.is_err(), "a server has no trash");
-    assert_eq!(list_names(&sftp, &dir), ["inner", "renamed.txt"]);
+    assert_eq!(
+        list_names(&sftp, &dir),
+        ["inner", "occupied.txt", "renamed.txt"]
+    );
 
     // A tree deletes depth-first, because SFTP has no recursive remove.
     smol::block_on(sftp.create_file(&nested.join("deep.txt"))).expect("create a nested file");

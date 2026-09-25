@@ -56,6 +56,104 @@ async fn streams_a_listing_into_rows(cx: &mut gpui::TestAppContext) {
     fs::remove_dir_all(&root).ok();
 }
 
+#[gpui::test]
+async fn applies_renames_in_place_and_preserves_selection(cx: &mut gpui::TestAppContext) {
+    let root = std::env::temp_dir().join(format!(
+        "ferret-ui-rename-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.txt"), b"a").unwrap();
+    fs::write(root.join("b.txt"), b"b").unwrap();
+
+    cx.update(|cx| {
+        cx.set_global(crate::state::load_state());
+    });
+    let folder = cx.new(|_| {
+        Folder::new(
+            VfsPath::local(root.clone()),
+            SortRules::by_name(),
+            false,
+            ListingProfile::BROWSING,
+        )
+    });
+    folder.update(cx, |folder, cx| folder.start_loading(cx));
+    cx.executor().allow_parking();
+    for _ in 0..600 {
+        cx.run_until_parked();
+        if folder.read_with(cx, |folder, _| {
+            !folder.is_loading() && folder.row_count() == 2
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    folder.update(cx, |folder, cx| {
+        folder.select_rows([0, 1]);
+        let sources = folder.selected_paths();
+        let renames = sources
+            .iter()
+            .map(|source| {
+                let name = if source.file_name() == Some("a.txt") {
+                    "z.txt"
+                } else {
+                    "a.txt"
+                };
+                (source.clone(), source.parent().unwrap().join(name))
+            })
+            .collect::<Vec<_>>();
+        assert!(folder.apply_renames(&renames, cx));
+    });
+
+    let names = folder.read_with(cx, |folder, _| row_names_for_test(folder));
+    assert_eq!(names, ["a.txt", "z.txt"]);
+    let selected = folder.read_with(cx, |folder, _| folder.selected_paths());
+    assert_eq!(
+        selected,
+        [
+            VfsPath::local(root.join("a.txt")),
+            VfsPath::local(root.join("z.txt"))
+        ]
+    );
+
+    folder.update(cx, |folder, cx| {
+        let sources = folder.selected_paths();
+        let renames = sources
+            .iter()
+            .map(|source| {
+                let name = if source.file_name() == Some("a.txt") {
+                    "z.txt"
+                } else {
+                    "a.txt"
+                };
+                (source.clone(), source.parent().unwrap().join(name))
+            })
+            .collect::<Vec<_>>();
+        assert!(folder.apply_renames(&renames, cx));
+        assert_eq!(
+            folder.by_name.get("a.txt").copied(),
+            folder.id_of(&VfsPath::local(root.join("a.txt")))
+        );
+        assert_eq!(
+            folder.by_name.get("z.txt").copied(),
+            folder.id_of(&VfsPath::local(root.join("z.txt")))
+        );
+    });
+
+    fs::remove_dir_all(&root).ok();
+}
+
+fn row_names_for_test(folder: &Folder) -> Vec<String> {
+    (0..folder.row_count())
+        .map(|row| folder.entry_at(row).unwrap().name().to_string())
+        .collect()
+}
+
 /// An ancestor column in column view must not attach a watcher.
 ///
 /// This is the visible half of A-14: entering column view in a deep path

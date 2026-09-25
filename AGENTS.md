@@ -150,6 +150,10 @@ base shippable.
 │   │   ├── src/discover.rs # rev-parse --show-cdup --absolute-git-dir
 │   │   ├── src/status.rs   # porcelain v2 parser + the per-path status index
 │   │   └── src/ops.rs      # status, stage_all, commit, pull, push
+│   ├── ferret-ops/       # File-operation planners and executors (GPUI-free)
+│   │   ├── src/plan.rs    # Whole-batch validation and destination graph
+│   │   ├── src/apply.rs   # Staged, rollback-safe execution
+│   │   └── src/rules.rs   # Rename rule language
 │   ├── ferret-remote/    # Saved SSH connections, SFTP mounts, transfers (GPUI-free)
 │   │   ├── src/session.rs   # Dial, host-key check, authenticate, disconnect
 │   │   ├── src/sftp.rs      # `SftpVfs` — the Vfs impl; streaming listings
@@ -191,6 +195,7 @@ base shippable.
 | `crates/ferret` | `ferret` | Starts GPUI, registers global actions, configures the native window, mounts the root view. |
 | `crates/ferret-ui` | `ferret-ui` | Owns views, components, local UI state, styling, and theme tokens. |
 | `crates/ferret-git` | `ferret-git` | Repository discovery, `git status` parsing and the four operations the status bar offers. Reaches git through the **git binary** (D-04), so the user's credential helper, SSH agent, hooks and config all keep working. Knows nothing about GPUI. See `docs/git.html`. |
+| `crates/ferret-ops` | `ferret-ops` | File-operation planners and executors, including whole-batch rename validation and rollback-safe application. Knows nothing about GPUI. |
 | `crates/ferret-remote` | `ferret-remote` | Saved SSH connections, host-key policy, the OS keychain, the SFTP `Vfs` backend and file transfers. Interactive SSH shells out to the **`ssh` binary** (D-07), so the user's own config, agent and jump hosts keep working; only browsing uses the in-process client (D-06). Owns the single Tokio runtime `russh` needs and lets no `russh` type cross its boundary. Knows nothing about GPUI. See `docs/ssh-scp-plan.html`. |
 | `crates/ferret-search` | `ferret-search` | Filename and content search: the live walk, the persistent index, the local protocol, and the planner that merges them. GPUI-free. |
 | `crates/ferret-searchd` | `ferret-searchd` | The unprivileged per-user daemon that owns the index's lifecycle. Optional at runtime — Ferret searches live without it. |
@@ -203,7 +208,7 @@ application lifecycle code belongs in `ferret`; reusable visual behavior belongs
 in `ferret-ui`. Expose cross-crate APIs through the owning crate's `src/lib.rs`
 instead of reaching into private modules.
 
-More service crates arrive as features land (`ferret-ops`, `ferret-search`, …).
+More service crates arrive as features land (`ferret-search`, …).
 Do not create them speculatively — add one when the code that belongs in it
 exists. `ferret-core` is the same: the shared domain types currently live in
 `ferret-vfs` and move out when a second service crate needs them.

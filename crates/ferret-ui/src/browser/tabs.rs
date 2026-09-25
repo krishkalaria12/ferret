@@ -76,6 +76,7 @@ impl Browser {
             |this, _pane, event: &PaneEvent, window, cx| match event {
                 PaneEvent::EnterDirectory(path) => this.navigate(path.clone(), window, cx),
                 PaneEvent::OpenFile(path) => this.open_with_default(path.clone(), window, cx),
+                PaneEvent::BatchRename(paths) => this.open_batch_rename(paths.clone(), window, cx),
                 PaneEvent::DropPaths {
                     sources,
                     dest,
@@ -107,7 +108,9 @@ impl Browser {
             &folder,
             window,
             |this, folder, event: &FolderEvent, window, cx| match event {
-                FolderEvent::SelectionChanged => this.sync_preview(folder, false, window, cx),
+                FolderEvent::SelectionChanged | FolderEvent::PathsChanged => {
+                    this.sync_preview(folder, false, window, cx)
+                }
                 FolderEvent::LoadFinished => this.sync_preview(folder, true, window, cx),
                 _ => {}
             },

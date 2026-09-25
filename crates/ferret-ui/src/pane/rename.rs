@@ -36,11 +36,25 @@ impl FilePane {
         cx.notify();
     }
 
+    pub fn rename_selection_or_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename_busy {
+            return;
+        }
+        if self.folder.read(cx).selection_count() > 1 {
+            let paths = self.selected_paths_shared(cx);
+            cx.emit(PaneEvent::BatchRename(paths));
+            return;
+        }
+        if let Some(path) = self.folder.read(cx).cursor_path() {
+            self.begin_rename(path, window, cx);
+        }
+    }
+
     pub fn begin_rename(&mut self, path: VfsPath, window: &mut Window, cx: &mut Context<Self>) {
         let Some(name) = path.file_name() else {
             return;
         };
-        if !self.folder.read(cx).has_entry(&path) || self.renaming.is_some() {
+        if !self.folder.read(cx).has_entry(&path) || self.renaming.is_some() || self.rename_busy {
             return;
         }
 
@@ -82,41 +96,95 @@ impl FilePane {
         if new_name.is_empty() || new_name == old_name {
             return; // Nothing changed: treat as cancel.
         }
-        if new_name.contains('/') || new_name.contains('\\') {
-            eprintln!("rename: name may not contain separators: {new_name:?}");
+        if let Err(reason) = ferret_ops::validate_file_name(&new_name) {
+            use gpui_component::{WindowExt as _, notification::Notification};
+            window.push_notification(Notification::error(format!("{new_name:?} {reason}.")), cx);
             return;
         }
 
-        let parent = renaming
-            .path
-            .parent()
-            .unwrap_or_else(|| renaming.path.clone());
-        let dest = parent.join(&new_name);
         let fs = cx.global::<FerretState>().fs.clone();
         let src = renaming.path.clone();
-        let window_handle = window.window_handle();
-
-        // A mount has no watcher, so the renamed row would keep its old name
-        // until something else reloaded the listing.
-        let needs_reload = !src.is_local();
-        let folder = self.folder.clone();
-
-        cx.spawn(async move |_, cx| match fs.rename(&src, &dest).await {
-            Ok(()) => {
-                if needs_reload {
-                    folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
+        if !fs.capabilities_for(&src).rename_noreplace {
+            use gpui_component::{WindowExt as _, notification::Notification};
+            window.push_notification(
+                Notification::error(format!(
+                    "{src} cannot be renamed without risking an overwrite on this filesystem."
+                )),
+                cx,
+            );
+            return;
+        }
+        let parent = src.parent().unwrap_or_else(|| src.clone());
+        let dest = parent.join(&new_name);
+        let atomic = fs.capabilities_for(&src).atomic_rename_noreplace;
+        let plan = if atomic {
+            match ferret_ops::plan_single(src.clone(), &new_name) {
+                Ok(plan) => Some(plan),
+                Err(error) => {
+                    use gpui_component::{WindowExt as _, notification::Notification};
+                    window.push_notification(Notification::error(error.to_string()), cx);
+                    return;
                 }
             }
-            Err(err) => {
-                let _ = window_handle.update(cx, |_, window, cx| {
-                    use gpui_component::{WindowExt as _, notification::Notification};
-                    window.push_notification(Notification::error(err.to_string()), cx);
-                });
+        } else {
+            None
+        };
+        let source_path = src.clone();
+        let destination_path = dest.clone();
+        let thumbs = cx.global::<FerretState>().rendered_thumbs.clone();
+        let window_handle = window.window_handle();
+        let folder = self.folder.clone();
+        if folder.read(cx).is_busy() {
+            use gpui_component::{WindowExt as _, notification::Notification};
+            window.push_notification(
+                Notification::error("Wait for the folder listing to finish before renaming."),
+                cx,
+            );
+            return;
+        }
+        folder.update(cx, |folder, _| folder.suspend_watch());
+        self.rename_busy = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result: std::result::Result<usize, String> = match plan {
+                Some(plan) => ferret_ops::apply(&fs, &plan)
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => fs
+                    .rename_noreplace(&src, &dest)
+                    .await
+                    .map(|()| 1)
+                    .map_err(|error| error.to_string()),
+            };
+            let _ = this.update(cx, |pane, cx| {
+                pane.rename_busy = false;
+                cx.notify();
+            });
+            match result {
+                Ok(_) => {
+                    thumbs.remove_many(&[source_path.clone(), destination_path.clone()]);
+                    folder.update(cx, |folder, cx| {
+                        let renames = [(source_path, destination_path.clone())];
+                        let selected = std::collections::HashSet::from([destination_path.clone()]);
+                        folder.reload_with_mapped_selection(
+                            selected,
+                            Some(destination_path),
+                            &renames,
+                            cx,
+                        );
+                    });
+                }
+                Err(error) => {
+                    folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        use gpui_component::{WindowExt as _, notification::Notification};
+                        window.push_notification(Notification::error(error), cx);
+                    });
+                }
             }
         })
         .detach();
-        // On local disk the directory watcher repaints the listing once the
-        // rename lands.
     }
 
     pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
@@ -143,7 +211,7 @@ impl FilePane {
             let _ = this.update(cx, |this, cx| {
                 // Anything at all since the click — a second click, a key, a
                 // new selection — has already bumped the generation.
-                if this.rename_arm != armed || this.renaming.is_some() {
+                if this.rename_arm != armed || this.renaming.is_some() || this.rename_busy {
                     return;
                 }
                 let still_alone = {

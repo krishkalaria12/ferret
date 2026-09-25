@@ -123,6 +123,8 @@ const UNMOUNTED_CAPABILITIES: Capabilities = Capabilities {
     symlinks: false,
     permissions: false,
     atomic_rename: false,
+    rename_noreplace: false,
+    atomic_rename_noreplace: false,
     atomic_write: false,
     watch: false,
     // A backend with no listing has no metadata to carry: `false` is the
@@ -152,7 +154,7 @@ impl Vfs for Router {
                 .mounts
                 .load()
                 .get(mount)
-                .map(|fs| fs.capabilities())
+                .map(|fs| fs.capabilities_for(path))
                 // An unmounted path can do nothing, which is the honest answer
                 // while a tab sits waiting to reconnect.
                 .unwrap_or(UNMOUNTED_CAPABILITIES),
@@ -271,6 +273,10 @@ impl Vfs for Router {
         self.pair(from, to)?.rename(from, to).await
     }
 
+    async fn rename_noreplace(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
+        self.pair(from, to)?.rename_noreplace(from, to).await
+    }
+
     async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
         self.pair(from, to)?.copy(from, to).await
     }
@@ -338,6 +344,8 @@ mod tests {
                 symlinks: true,
                 permissions: true,
                 atomic_rename: false,
+                rename_noreplace: true,
+                atomic_rename_noreplace: false,
                 atomic_write: false,
                 watch: false,
                 metadata_in_listing: true,
@@ -370,6 +378,10 @@ mod tests {
         }
 
         async fn rename(&self, _from: &VfsPath, _to: &VfsPath) -> Result<()> {
+            Ok(())
+        }
+
+        async fn rename_noreplace(&self, _from: &VfsPath, _to: &VfsPath) -> Result<()> {
             Ok(())
         }
 

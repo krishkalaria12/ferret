@@ -57,6 +57,15 @@ pub enum VfsError {
     )]
     CrossBackend { from: VfsPath, to: VfsPath },
 
+    #[error("Couldn't {action} {from} to {to}: {source}")]
+    RenameFailed {
+        action: &'static str,
+        from: VfsPath,
+        to: VfsPath,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("Couldn't {action} {path}: {source}")]
     Io {
         action: &'static str,
@@ -80,6 +89,19 @@ impl VfsError {
             _ => VfsError::Io {
                 action,
                 path: path.clone(),
+                source,
+            },
+        }
+    }
+
+    pub fn from_rename_io(from: &VfsPath, to: &VfsPath, source: io::Error) -> Self {
+        match source.kind() {
+            io::ErrorKind::NotFound => VfsError::NotFound { path: from.clone() },
+            io::ErrorKind::AlreadyExists => VfsError::AlreadyExists { path: to.clone() },
+            _ => VfsError::RenameFailed {
+                action: "rename",
+                from: from.clone(),
+                to: to.clone(),
                 source,
             },
         }
@@ -120,6 +142,18 @@ mod tests {
         assert!(msg.contains("rename"), "{msg}");
         assert!(msg.contains("/x/y"), "{msg}");
         assert!(msg.contains("disk on fire"), "{msg}");
+    }
+
+    #[test]
+    fn rename_failures_name_both_paths() {
+        let err = VfsError::from_rename_io(
+            &VfsPath::local("/x/old"),
+            &VfsPath::local("/x/new"),
+            io::Error::other("rename failed"),
+        );
+        let message = err.to_string();
+        assert!(message.contains("/x/old"), "{message}");
+        assert!(message.contains("/x/new"), "{message}");
     }
 
     #[test]

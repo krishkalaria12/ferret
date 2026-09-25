@@ -130,6 +130,22 @@ impl RenderedThumbCache {
             }
         }
     }
+
+    pub fn remove_many(&self, paths: &[VfsPath]) {
+        loop {
+            let current = self.images.load_full();
+            if !paths.iter().any(|path| current.contains_key(path)) {
+                return;
+            }
+            let removed = paths.iter().collect::<std::collections::HashSet<_>>();
+            let mut next = (*current).clone();
+            next.retain(|path, _| !removed.contains(path));
+            let previous = self.images.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return;
+            }
+        }
+    }
 }
 
 /// Build the `RenderImage` for a validated tile bitmap, once, off the render
@@ -170,6 +186,8 @@ mod tests {
             len,
             modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             hidden: false,
+            name_hidden: false,
+            platform_hidden: false,
         });
         entry
     }

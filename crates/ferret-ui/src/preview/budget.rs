@@ -54,6 +54,8 @@ fn entry(name: &str, len: u64) -> Entry {
         len,
         modified: Some(SystemTime::UNIX_EPOCH),
         hidden: false,
+        name_hidden: false,
+        platform_hidden: false,
     }))
 }
 

@@ -206,6 +206,64 @@ pub(crate) fn lowercase_extension(name: &str) -> Option<SmolStr> {
     Some(SmolStr::new(ext))
 }
 
+pub fn validate_portable_file_name(name: &str) -> std::result::Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("is empty");
+    }
+    if name == "." || name == ".." {
+        return Err("is a directory traversal name");
+    }
+    if name.contains('/') || name.contains('\\') || name.as_bytes().contains(&0) {
+        return Err("contains a path separator");
+    }
+    if name.chars().any(char::is_control) {
+        return Err("contains a control character");
+    }
+    if name
+        .chars()
+        .any(|character| matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err("contains a character Windows cannot store");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("ends with a dot or a space");
+    }
+    let device_stem = name
+        .trim_start_matches('.')
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches([' ', '.']);
+    if is_windows_device(device_stem) {
+        return Err("is a reserved device name on Windows");
+    }
+    if portable_name_length(name) > 255 {
+        return Err("is too long for a file name");
+    }
+    Ok(())
+}
+
+fn is_windows_device(name: &str) -> bool {
+    const DEVICES: [&str; 28] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "com¹",
+        "com²", "com³", "lpt¹", "lpt²", "lpt³",
+    ];
+    let name = name.to_lowercase();
+    DEVICES.contains(&name.as_str())
+}
+
+#[cfg(windows)]
+fn portable_name_length(name: &str) -> usize {
+    use std::os::windows::ffi::OsStrExt as _;
+    std::ffi::OsStr::new(name).encode_wide().count()
+}
+
+#[cfg(not(windows))]
+fn portable_name_length(name: &str) -> usize {
+    name.len()
+}
+
 /// How a [`VfsPath`] crosses a process boundary.
 ///
 /// A local path is not text — it is a sequence of platform units that only

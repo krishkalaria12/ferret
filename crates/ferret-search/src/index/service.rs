@@ -504,6 +504,8 @@ fn current_metadata(row: &FileRow) -> Option<(Metadata, EntryKind)> {
             len: metadata.len(),
             modified: metadata.modified().ok(),
             hidden: row.hidden,
+            name_hidden: row.hidden,
+            platform_hidden: false,
         },
         kind,
     ))

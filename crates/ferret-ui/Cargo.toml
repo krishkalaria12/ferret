@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 ferret-git.workspace = true
+ferret-ops.workspace = true
 ferret-platform.workspace = true
 ferret-preview.workspace = true
 ferret-remote.workspace = true

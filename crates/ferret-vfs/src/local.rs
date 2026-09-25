@@ -41,6 +41,8 @@ impl Vfs for LocalFs {
             symlinks: true,
             permissions: true,
             atomic_rename: true,
+            rename_noreplace: cfg!(any(target_os = "macos", windows)),
+            atomic_rename_noreplace: cfg!(any(target_os = "macos", windows)),
             // Same-directory temp plus rename: atomic replacement with the
             // identity check `write_atomic` performs. A future remote backend
             // answers false here unless it can offer the same conflict checks —
@@ -283,6 +285,28 @@ impl Vfs for LocalFs {
         .await
     }
 
+    async fn rename_noreplace(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
+        let source = Self::require_local(from)?;
+        let destination = Self::require_local(to)?;
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let _ = (source, destination);
+            return Err(VfsError::Unsupported {
+                capability: "rename without replacing",
+            });
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let from_path = from.clone();
+            let to_path = to.clone();
+            smol::unblock(move || {
+                rename_noreplace_local(&source, &destination)
+                    .map_err(|error| VfsError::from_rename_io(&from_path, &to_path, error))
+            })
+            .await
+        }
+    }
+
     async fn remove(&self, path: &VfsPath, mode: RemoveMode) -> Result<()> {
         let local = Self::require_local(path)?;
         let owned = path.clone();
@@ -402,6 +426,8 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
         len: md.len(),
         modified: md.modified().ok(),
         hidden: path.is_hidden_by_name() || platform_hidden(md),
+        name_hidden: path.is_hidden_by_name(),
+        platform_hidden: platform_hidden(md),
     }
 }
 
@@ -901,6 +927,84 @@ fn flush_file_buffers(file: &fs::File, owned: &VfsPath) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn rename_noreplace_local(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the source contains NUL")
+    })?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the destination contains NUL",
+        )
+    })?;
+    let renamed =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if renamed == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_noreplace_local(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let source = windows_extended_length(source);
+    let destination = windows_extended_length(destination);
+    let renamed = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if renamed == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_extended_length(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    for unit in &mut path {
+        if *unit == 47 {
+            *unit = 92;
+        }
+    }
+    let is_device = path.starts_with(&[92, 92, 63, 92]) || path.starts_with(&[92, 92, 46, 92]);
+    let mut extended = if is_device || path.len() < 240 {
+        path
+    } else if path.starts_with(&[92, 92]) {
+        let mut result = vec![92, 92, 63, 92, 85, 78, 67, 92];
+        result.extend_from_slice(&path[2..]);
+        result
+    } else if path.first() == Some(&92) {
+        let mut result = vec![92, 92, 63, 92];
+        result.extend_from_slice(&path[1..]);
+        result
+    } else if path.len() >= 3 && path[1] == 58 && path[2] == 92 {
+        let mut result = vec![92, 92, 63, 92];
+        result.extend_from_slice(&path);
+        result
+    } else {
+        path
+    };
+    extended.push(0);
+    extended
+}
+
 /// Move the flushed temp file over the destination.
 ///
 /// Unix `rename` is atomic on one filesystem, which the same-directory temp
@@ -935,51 +1039,10 @@ fn replace_file_windows(
     dest: &std::path::Path,
     owned: &VfsPath,
 ) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
     fn wide(path: &std::path::Path) -> Vec<u16> {
-        let extended = extended_length(path);
-        extended.as_os_str().encode_wide().chain([0]).collect()
-    }
-
-    /// Prefix over-long absolute paths for the extended-length API.
-    fn extended_length(path: &std::path::Path) -> std::path::PathBuf {
-        use std::path::{Component, Prefix};
-        let text = path.as_os_str().to_string_lossy();
-        if text.len() < 240 || text.starts_with(r"\\?\") {
-            return path.to_path_buf();
-        }
-        let mut out = String::with_capacity(text.len() + 8);
-        // UNC (`\\host\share`) and device (`\\.\`) paths need their own
-        // prefix; anything else absolute takes the plain one.
-        let mut components = path.components();
-        match components.next() {
-            Some(Component::Prefix(prefix)) => match prefix.kind() {
-                Prefix::UNC(host, share) => {
-                    out.push_str(r"\\?\UNC\");
-                    out.push_str(&host.to_string_lossy());
-                    out.push('\\');
-                    out.push_str(&share.to_string_lossy());
-                    for rest in components {
-                        out.push('\\');
-                        out.push_str(&rest.as_os_str().to_string_lossy());
-                    }
-                    return std::path::PathBuf::from(out);
-                }
-                _ => return path.to_path_buf(),
-            },
-            Some(Component::RootDir) => {
-                // `C:\…` absolute: strip the leading `\` handling below by
-                // rebuilding from components under the prefix.
-                out.push_str(r"\\?\");
-                out.push_str(&text.trim_start_matches('\\'));
-                return std::path::PathBuf::from(out);
-            }
-            _ => {}
-        }
-        // Relative or oddly-prefixed: leave alone rather than corrupt.
-        path.to_path_buf()
+        windows_extended_length(path)
     }
 
     let temp_wide = wide(temp);

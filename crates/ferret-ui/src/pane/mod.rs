@@ -69,6 +69,7 @@ pub enum PaneEvent {
     EnterDirectory(VfsPath),
     /// Double-click or Open action on a file: hand to the OS.
     OpenFile(VfsPath),
+    BatchRename(Arc<[VfsPath]>),
     /// Sort or view preferences changed; the browser persists them.
     ViewChanged,
     /// Rows were dropped on a folder (§8). The browser owns the filesystem
@@ -128,6 +129,7 @@ pub struct FilePane {
     typeahead_at: std::time::Instant,
     /// The active inline rename, rendered as a small overlay editor.
     renaming: Option<Renaming>,
+    rename_busy: bool,
     /// Drops recorded by row/tile listeners, drained on the next frame.
     drops: DropQueue,
     /// Disclosure clicks, likewise.
@@ -212,12 +214,16 @@ impl FilePane {
         let mut subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
             cx.subscribe_in(&folder, window, |this, _, event, _window, cx| match event {
-                FolderEvent::RowsChanged | FolderEvent::LoadFinished => {
+                FolderEvent::RowsChanged
+                | FolderEvent::PathsChanged
+                | FolderEvent::LoadFinished => {
                     if let Some(rename) = &this.renaming
                         && !this.folder.read(cx).has_entry(&rename.path)
                     {
                         this.renaming = None;
                     }
+                    this.thumb_range = 0..0;
+                    this.thumb_task = None;
                     this.table.update(cx, |_, cx| cx.notify());
                     cx.notify();
                 }
@@ -274,6 +280,7 @@ impl FilePane {
             typeahead: String::new(),
             typeahead_at: std::time::Instant::now(),
             renaming: None,
+            rename_busy: false,
             drops,
             toggles,
             widths,
@@ -293,6 +300,10 @@ impl FilePane {
 
     pub fn selected_paths(&self, cx: &App) -> Vec<VfsPath> {
         self.folder.read(cx).selected_paths()
+    }
+
+    pub fn selected_paths_shared(&self, cx: &App) -> Arc<[VfsPath]> {
+        self.folder.read(cx).selected_paths_shared()
     }
 
     /// Emit a pane event from the outside (browser-driven Open, filter

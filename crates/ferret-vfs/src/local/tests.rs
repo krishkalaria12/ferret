@@ -262,6 +262,26 @@ fn copying_a_file_does_not_overwrite_an_existing_destination() {
     fs::remove_dir_all(&root).ok();
 }
 
+#[test]
+fn rename_noreplace_refuses_to_overwrite() {
+    let root = tempdir("rename-conflict");
+    let source = root.join("source.txt");
+    let destination = root.join("destination.txt");
+    fs::write(&source, b"new").unwrap();
+    fs::write(&destination, b"old").unwrap();
+
+    let fs_ = LocalFs::new();
+    let error = smol::block_on(
+        fs_.rename_noreplace(&VfsPath::local(&source), &VfsPath::local(&destination)),
+    )
+    .unwrap_err();
+    assert!(matches!(error, VfsError::AlreadyExists { .. }), "{error:?}");
+    assert_eq!(fs::read(&source).unwrap(), b"new");
+    assert_eq!(fs::read(&destination).unwrap(), b"old");
+
+    fs::remove_dir_all(&root).ok();
+}
+
 #[cfg(unix)]
 #[test]
 fn watch_reports_changes() {

@@ -1,0 +1,21 @@
+[package]
+name = "ferret-ops"
+description = "Ferret file-operation planners and executors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferret-vfs.workspace = true
+caseless.workspace = true
+convert_case.workspace = true
+futures.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+smol.workspace = true

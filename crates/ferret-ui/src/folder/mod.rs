@@ -85,6 +85,7 @@ pub enum FolderEvent {
     RowsChanged,
     /// Only the selection moved.
     SelectionChanged,
+    PathsChanged,
     /// Loading finished (successfully or not).
     LoadFinished,
     /// The sort key or order changed, from wherever — the column header, the
@@ -439,6 +440,10 @@ impl Folder {
         self.loading
     }
 
+    pub fn is_busy(&self) -> bool {
+        self.loading || self.pending_child_loads != 0
+    }
+
     /// Whether the listing has produced nothing for long enough to say so.
     ///
     /// Deliberately not "is loading": a directory that streams rows needs no
@@ -533,11 +538,17 @@ impl Folder {
         if let Some(cached) = self.selected_visible_paths.borrow().as_ref() {
             return cached.clone();
         }
-        let paths: Arc<[VfsPath]> = self
-            .visible_entries()
-            .filter(|(id, _)| self.selection.contains(id))
-            .map(|(_, entry)| entry.path.clone())
-            .collect();
+        let mut selected = self
+            .selection
+            .iter()
+            .filter_map(|id| {
+                let row = *self.row_of_id.get(id)?;
+                let path = self.entry(*id)?.path.clone();
+                Some((row, path))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_unstable_by_key(|(row, _)| *row);
+        let paths: Arc<[VfsPath]> = selected.into_iter().map(|(_, path)| path).collect();
         *self.selected_visible_paths.borrow_mut() = Some(paths.clone());
         paths
     }

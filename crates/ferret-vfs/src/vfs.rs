@@ -24,6 +24,8 @@ pub struct Capabilities {
     pub permissions: bool,
     /// `rename` is atomic, so a move cannot leave both or neither.
     pub atomic_rename: bool,
+    pub rename_noreplace: bool,
+    pub atomic_rename_noreplace: bool,
     /// A complete file may be replaced atomically with conflict refusal (see
     /// [`Vfs::write_atomic`]), so the preview pane can offer in-place editing.
     /// A generic writable or rename capability is insufficient for that
@@ -301,6 +303,8 @@ pub trait Vfs: Send + Sync + 'static {
     }
 
     async fn rename(&self, from: &VfsPath, to: &VfsPath) -> Result<()>;
+
+    async fn rename_noreplace(&self, from: &VfsPath, to: &VfsPath) -> Result<()>;
 
     /// Copy a file or a whole directory tree to a new path.
     ///
