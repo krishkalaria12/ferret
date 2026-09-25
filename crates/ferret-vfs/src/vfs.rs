@@ -2,6 +2,7 @@ use crate::watch::Watch;
 use crate::{Entry, Metadata, Result, VfsPath};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// One payload from a directory listing stream.
@@ -318,6 +319,39 @@ pub trait Vfs: Send + Sync + 'static {
         })
     }
 
+    /// [`Vfs::copy`], reporting as it goes and stopping when asked.
+    ///
+    /// The default runs [`Vfs::copy`] and then reports the source's size in one
+    /// go, so a backend that has not implemented chunked copying still lands on
+    /// a full progress bar rather than an indeterminate one — it just sits at
+    /// the start until the copy is over. A default of `Unsupported` would have
+    /// been shorter and would have made every mount unqueueable until its
+    /// backend grew this method.
+    ///
+    /// A backend that overrides it must honour two promises:
+    ///
+    /// * **`checkpoint` is consulted between units of work**, so a cancel lands
+    ///   within one chunk rather than at the end of the file.
+    /// * **A cancelled copy leaves no destination behind.** Partial data that
+    ///   looks complete is worse than no data, so the half-written file — or
+    ///   half-created tree — is removed before
+    ///   [`crate::VfsError::Cancelled`] is returned.
+    async fn copy_observed(
+        &self,
+        from: &VfsPath,
+        to: &VfsPath,
+        reporter: Arc<dyn crate::ProgressReporter>,
+    ) -> Result<()> {
+        self.copy(from, to).await?;
+        // Best effort: a backend whose listings carry no size leaves the total
+        // unknown, which the queue already has a state for.
+        if let Ok(meta) = self.metadata(from).await {
+            reporter.bytes(meta.len);
+        }
+        reporter.entries(1);
+        Ok(())
+    }
+
     /// Watch a directory for changes. See [`crate::watch`].
     ///
     /// Dropping the returned [`Watch`] unregisters it.
@@ -345,4 +379,29 @@ pub trait Vfs: Send + Sync + 'static {
     }
 
     async fn remove(&self, path: &VfsPath, mode: RemoveMode) -> Result<()>;
+
+    /// [`Vfs::remove`], reporting entries as they go and stopping when asked.
+    ///
+    /// The default removes the whole tree and reports one entry at the end.
+    ///
+    /// A cancel here is *not* rolled back, and cannot be: a delete that has
+    /// already unlinked four thousand files has nothing to undo them from. What
+    /// the override must do is stop promptly — the point of a Cancel button on
+    /// a delete is that it stops, not that it rewinds. A partially deleted
+    /// directory is an ordinary state a person can be in, and the queue says
+    /// how much of the job actually landed.
+    ///
+    /// Note that a cancelled delete still has to remove the directories it
+    /// emptied. Leaving `Photos/` behind with nothing in it would read as a
+    /// failed operation rather than a cancelled one.
+    async fn remove_observed(
+        &self,
+        path: &VfsPath,
+        mode: RemoveMode,
+        reporter: Arc<dyn crate::ProgressReporter>,
+    ) -> Result<()> {
+        self.remove(path, mode).await?;
+        reporter.entries(1);
+        Ok(())
+    }
 }

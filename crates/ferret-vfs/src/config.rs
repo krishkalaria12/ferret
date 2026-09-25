@@ -79,6 +79,28 @@ pub const MAX_WORKER_THREADS: usize = 16;
 /// call the pane does or it is measuring something else.
 pub const METADATA_BATCH_SIZE: usize = 256;
 
+/// Bytes read and written per iteration of a copy, and therefore how often a
+/// copy asks whether it should stop.
+///
+/// One mebibyte. Large enough that the syscall and the progress report are
+/// noise next to the I/O — at 64 KiB a fast NVMe drive spends more time in
+/// `write` than in the page cache. Small enough that a Cancel lands within a
+/// chunk: a copy of a 4 GB file stops in about 4 ms rather than 64, and the
+/// progress bar moves in visible steps instead of jumping.
+pub const COPY_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// How many entries a delete checks for cancellation after, when it deletes a
+/// tree in parallel.
+///
+/// The check is one relaxed atomic load, so it is nearly free — but it is not
+/// *free*, and a 200,000-file delete that loads it per file spends more time
+/// loading it than the `unlink` it is guarding would. One in
+/// [`REMOVE_CHECKPOINT_EVERY`] keeps the cost at nothing while bounding how far
+/// a cancel overshoots: 256 `unlink`s on a warm cache is under a millisecond,
+/// and on a cold network volume — the case a cancel is really for — it is the
+/// difference between stopping and not stopping.
+pub const REMOVE_CHECKPOINT_EVERY: usize = 256;
+
 /// Bytes read when sniffing a file's type or building a preview.
 ///
 /// Nothing may read a whole file speculatively: arrow-keying down a directory

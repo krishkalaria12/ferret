@@ -41,6 +41,16 @@ pub enum VfsError {
     #[error("This location doesn't support {capability}.")]
     Unsupported { capability: &'static str },
 
+    /// Somebody stopped the operation part-way through.
+    ///
+    /// Not a failure and never shown as one: the operations queue (F-60) reads
+    /// it as "this job ended early", which is a different thing from "this job
+    /// broke". It names its path anyway, because the message a person sees next
+    /// to it — "Cancelled" beside a half-finished copy — is more useful when
+    /// the copy's path is already on screen.
+    #[error("{path} was cancelled before the operation finished.")]
+    Cancelled { path: VfsPath },
+
     /// A remote path whose mount is not connected — a tab restored from a
     /// previous session, a server that dropped, or a record the user deleted.
     #[error("Ferret isn't connected to the server that holds {path}.")]
