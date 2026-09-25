@@ -267,6 +267,39 @@ impl Default for Preview {
     }
 }
 
+/// The operations queue's docked panel (F-60).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Operations {
+    /// Whether the panel is visible in a new window.
+    ///
+    /// Off by default, like the terminal: the panel earns its space by being
+    /// opened when something is actually in flight, and the status bar already
+    /// says so without it.
+    pub visible: bool,
+    /// Height in logical pixels. Clamped on load; see `config`.
+    pub height: f32,
+    /// Whether a finished job stays in the list until it is cleared.
+    ///
+    /// On by default. A queue that forgets a copy the moment it finishes cannot
+    /// answer "did that actually copy?", which is the question people ask it
+    /// most often.
+    pub keep_finished: bool,
+    #[serde(flatten, skip_serializing_if = "Map::is_empty")]
+    pub unknown: Map<String, Value>,
+}
+
+impl Default for Operations {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            height: crate::config::DEFAULT_OPERATIONS_HEIGHT,
+            keep_finished: true,
+            unknown: Map::new(),
+        }
+    }
+}
+
 /// The whole settings file.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -276,6 +309,7 @@ pub struct Settings {
     pub sidebar: Sidebar,
     pub terminal: Terminal,
     pub preview: Preview,
+    pub operations: Operations,
     /// Top-level sections this version does not know about, kept verbatim —
     /// which is what a `window` or `keymap` section in an existing file
     /// becomes. Those were removed rather than left declared and unread

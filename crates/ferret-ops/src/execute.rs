@@ -281,7 +281,8 @@ pub async fn run(
     let mut completed = 0u64;
     let mut fatal: Option<OpsError> = None;
 
-    for source in job.sources.iter() {
+    for transfer in job.transfers.iter() {
+        let source = &transfer.source;
         if handle.is_cancelled() {
             return stopped(handle, total, failures, completed);
         }
@@ -325,18 +326,18 @@ pub async fn run(
                 }
             },
             JobKind::Copy | JobKind::Move => {
-                let Some(destination) = job.destination.as_ref() else {
+                let Some(into) = transfer.destination.as_ref() else {
+                    // A malformed request, and the queue is the only thing that
+                    // can build one, so this cannot come from a gesture. Said
+                    // out loud anyway: a job that quietly did nothing is worse
+                    // than one that admits it could not start.
                     fatal = Some(OpsError::Unsupported {
                         path: source.clone(),
-                        capability: "run a copy or move with no destination".to_string(),
+                        capability: "copy or move with no destination".to_string(),
                     });
                     break;
                 };
-                // A source with no name is a filesystem root, and joining it would
-                // produce the destination itself — which `copy_observed` then
-                // refuses, because a copy onto itself is not a thing.
-                let into = destination.join(source.file_name().unwrap_or_default());
-                match copy_or_move(fs, job.kind, source, &into, reporter.clone()).await {
+                match copy_or_move(fs, job.kind, source, into, reporter.clone()).await {
                     Ok(()) => completed += 1,
                     Err(error) => {
                         if handle.is_cancelled() {
@@ -382,7 +383,7 @@ pub async fn run(
     // beside it is the same information as a failure and one more step of
     // reading; the panel's job is to say what happened, and nothing happened.
     // Partial failure stays a success, because partial is what it says.
-    let total_sources = job.sources.len() as u64;
+    let total_sources = job.transfers.len() as u64;
     if total_sources > 0 && failures.len() as u64 == total_sources && completed == 0 {
         return Outcome {
             state: JobState::Failed,
@@ -506,10 +507,10 @@ async fn trash_one(platform: &Arc<dyn Platform>, source: &VfsPath) -> Result<()>
 /// too — otherwise pressing Cancel on a job stuck in `Measuring` would look
 /// like nothing happened until the walk finished.
 pub async fn measure_job(job: &Job, handle: &Arc<Handle>) -> Result<Option<Measurement>> {
-    if job.sources.is_empty() {
+    if job.transfers.is_empty() {
         return Err(OpsError::NothingToDo);
     }
-    let total = measure(&job.sources, handle).await;
+    let total = measure(&job.sources(), handle).await;
     // An inexact measurement is reported as no measurement. A bar that fills to
     // 97% and stops, on a job that is genuinely finished, teaches people that
     // the number is decoration.

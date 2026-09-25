@@ -51,6 +51,7 @@ use commit_dialog::CommitDialog;
 use connection_dialog::ConnectionDialog;
 pub(crate) use git::GitHandle;
 use git::GitPanel;
+use operations::OperationsDrag;
 use terminal_metrics::terminal_metrics;
 // Only the allocations-per-frame budget constructs one directly.
 #[cfg(all(test, feature = "dhat-heap"))]
@@ -63,6 +64,7 @@ mod connection_dialog;
 mod git;
 mod git_bar;
 mod mutations;
+mod operations;
 mod path_bar;
 mod power_search;
 mod preview_panel;
@@ -299,6 +301,25 @@ pub struct Browser {
     /// Reused while opening and editing saved SSH endpoints. Input state must
     /// live in an entity because a dialog builder runs again every frame.
     connection_dialog: Option<Entity<ConnectionDialog>>,
+    /// Whether the operations queue's panel is docked below the pane (F-60).
+    operations_visible: bool,
+    /// Logical pixels, clamped to `settings::MIN/MAX_OPERATIONS_HEIGHT`.
+    operations_height: f32,
+    /// Live drag state for the operations splitter.
+    operations_drag: Option<OperationsDrag>,
+    /// Focus for the panel, so its two scoped shortcuts can reach it (§8:
+    /// "Focus must be visible"). A panel nobody can put the keyboard into could
+    /// not have shortcuts at all, so opening it focuses it.
+    operations_focus: gpui::FocusHandle,
+    /// The tick behind that floor, and the observer registration. Held here so
+    /// both die with the window: an observer that outlived its window would
+    /// keep being called for the life of the process.
+    _operations_observer: Option<ferret_ops::Observer>,
+    /// Wakes the window when the queue moves. See
+    /// [`Browser::start_operations_observer`].
+    operations_events: Option<gpui::Task<()>>,
+    /// The floor under those wake-ups, for a job too slow to publish often.
+    operations_tick: Option<gpui::Task<()>>,
     /// The running transfer, drawn in the status bar. One at a time: the
     /// interim queue exists so browsing continues during a copy, not so
     /// several copies can compete for one link.
@@ -470,6 +491,13 @@ impl Browser {
             preview_overlay: None,
             overlay_open: false,
             connection_dialog: None,
+            operations_visible: cx.global::<FerretState>().settings.operations.visible,
+            operations_height: cx.global::<FerretState>().settings.operations.height,
+            operations_drag: None,
+            operations_focus: cx.focus_handle(),
+            _operations_observer: None,
+            operations_events: None,
+            operations_tick: None,
             transfer: None,
             transfer_task: None,
             _git_activation: Self::observe_git_activation(window, cx),
@@ -481,6 +509,7 @@ impl Browser {
             this.restart_terminal(cx);
         }
         this.start_place_refresh(cx);
+        this.start_operations_observer(cx);
         this
     }
 
@@ -493,6 +522,7 @@ impl Browser {
         self.end_sidebar_drag(cx);
         self.end_terminal_drag(cx);
         self.end_preview_drag(cx);
+        self.end_operations_drag(cx);
         self.end_tab_drag(cx);
         self.end_favorite_drag(cx);
     }
@@ -605,46 +635,8 @@ enum Region {
     Terminal,
 }
 
-/// One toast for a batch operation. A single failure shows its own message
-/// unedited — every `VfsError` names its subject — and a batch leads with the
-/// count so the toast does not become a wall of near-identical lines.
-fn summarize_failures(operation: &str, failures: &[String]) -> Option<String> {
-    match failures {
-        [] => None,
-        [only] => Some(only.clone()),
-        [first, ..] => Some(format!(
-            "{} items could not {operation}. First: {first}",
-            failures.len()
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn a_lone_failure_is_shown_unedited() {
-        // Every VfsError names its subject, so a single failure is already a
-        // sentence the user can act on; wrapping it would only bury the path.
-        let message = summarize_failures(
-            "move to the trash",
-            &["Ferret can't read /private/var/root — you don't have permission.".into()],
-        );
-        assert_eq!(
-            message.as_deref(),
-            Some("Ferret can't read /private/var/root — you don't have permission.")
-        );
-    }
-
-    #[test]
-    fn a_batch_leads_with_the_count() {
-        let message = summarize_failures("paste", &["a failed".into(), "b failed".into()])
-            .expect("failures must produce a message");
-        assert!(message.starts_with("2 items could not paste"), "{message}");
-        assert!(message.contains("a failed"), "the first error survives");
-    }
-
     /// The string half of the clipboard, which is what actually round-trips
     /// on the pinned GPUI revision (D-42).
     fn paths_from_text(text: &str) -> Vec<String> {
@@ -674,10 +666,5 @@ mod tests {
         assert!(paths_from_text("Dear Sir or Madam,\n\nI write to you").is_empty());
         assert!(paths_from_text("notes.txt").is_empty(), "not absolute");
         assert!(paths_from_text("").is_empty());
-    }
-
-    #[test]
-    fn success_produces_no_toast() {
-        assert_eq!(summarize_failures("paste", &[]), None);
     }
 }

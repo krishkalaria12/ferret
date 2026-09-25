@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# F-60. The bridge between the queue's worker threads and the window thread:
+# `AsyncApp` holds an `Rc` and cannot be sent, so the observer's only way to
+# reach a view is a channel that a task on GPUI's own executor drains.
+async-channel.workspace = true
 ferret-git.workspace = true
 ferret-ops.workspace = true
 ferret-platform.workspace = true

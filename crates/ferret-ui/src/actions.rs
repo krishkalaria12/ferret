@@ -17,6 +17,9 @@ pub mod context {
     pub const SIDEBAR: &str = "Sidebar";
     /// The terminal panel has focus.
     pub const TERMINAL: &str = "Terminal";
+    /// The operations queue's panel. Holds the two queue-wide shortcuts, so
+    /// they cannot fire from the file pane.
+    pub const OPERATIONS: &str = "Operations";
     /// The preview pane has focus.
     pub const PREVIEW: &str = "Preview";
     /// The full-window preview overlay has focus. It holds no text fields,
@@ -38,6 +41,15 @@ actions!(
         ToggleHidden,
         ToggleSidebar,
         ToggleTerminal,
+        /// Show or hide the operations queue's panel (F-60). Global like the
+        /// terminal's, because it is also how you get the panel back when it has
+        /// focus nowhere else.
+        ToggleOperations,
+        /// Empty the queue of everything that has finished.
+        ClearFinishedOperations,
+        /// Stop every job: what is running halts, what has not started is
+        /// dropped. The panic button.
+        CancelAllOperations,
         FocusTerminalOrPane,
         ToggleTerminalSync,
         /// Paste is its own action inside the terminal: the pane's `Paste`

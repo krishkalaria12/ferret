@@ -149,16 +149,40 @@ pub struct JobProgress {
 impl JobProgress {
     /// Completion as a fraction, or `None` while the total is unknown.
     ///
-    /// Bytes rather than entries, because a copy's cost is bytes and a delete's
-    /// cost is entries; each job's own kind decides which half it reads.
+    /// Bytes rather than entries. A delete moves no bytes, so for one of those
+    /// this is `None` and the caller must ask [`JobProgress::entries_fraction`]
+    /// instead — which is why the two exist rather than one that guesses.
     pub fn fraction(&self) -> Option<f32> {
-        let total = self.bytes_total?;
+        Self::ratio(self.bytes_done, self.bytes_total)
+    }
+
+    /// Completion counted in files, for the jobs that move no bytes.
+    pub fn entries_fraction(&self) -> Option<f32> {
+        Self::ratio(self.entries_done, self.entries_total)
+    }
+
+    /// Whichever half describes this kind of job. See [`JobKind::moves_bytes`].
+    pub fn fraction_of(&self, kind: JobKind) -> Option<f32> {
+        if kind.moves_bytes() {
+            self.fraction()
+        } else {
+            self.entries_fraction()
+        }
+    }
+
+    fn ratio(done: u64, total: Option<u64>) -> Option<f32> {
+        let total = total?;
         (total > 0)
-            .then(|| (self.bytes_done as f64 / total as f64) as f32)
+            .then(|| (done as f64 / total as f64) as f32)
             .map(|value| value.clamp(0., 1.))
     }
 
     /// Time left at the current rate, or `None` when it cannot be estimated.
+    ///
+    /// Bytes only, and so `None` for a job that moves none: the rate is sampled
+    /// from bytes, and dividing a file count by a bytes-per-second figure would
+    /// be a number with no meaning behind it. A delete shows how far along it
+    /// is and stops there.
     ///
     /// Refuses to answer until the job has moved enough to have a rate worth
     /// quoting. The first chunk of a 4 GB copy takes longer than the rest, so
@@ -176,17 +200,48 @@ impl JobProgress {
     }
 }
 
+/// One item moving from one place to another.
+///
+/// A pair rather than "a source and a folder", because the two ends are settled
+/// together and at the same moment: a drop onto a folder holding `report.pdf`
+/// moves it to `report 2.pdf`, and that name is decided on the window thread
+/// where the listing is readable. A queue that re-derived the name from the
+/// source would have to decide it again somewhere it cannot see the listing,
+/// and would lose the "file 2" the gesture already worked out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transfer {
+    pub source: VfsPath,
+    /// Where it lands. `None` for a delete and for a trash, which is the only
+    /// thing that separates those two from a copy.
+    pub destination: Option<VfsPath>,
+}
+
+impl Transfer {
+    pub fn to(source: VfsPath, destination: VfsPath) -> Self {
+        Self {
+            source,
+            destination: Some(destination),
+        }
+    }
+
+    /// A transfer that only removes, for a delete and for a trash.
+    pub fn away(source: VfsPath) -> Self {
+        Self {
+            source,
+            destination: None,
+        }
+    }
+}
+
 /// One queued operation, as the queue currently understands it.
 #[derive(Clone, Debug)]
 pub struct Job {
     pub id: JobId,
     pub kind: JobKind,
     pub state: JobState,
-    /// What the sources are. An `Arc` because every repaint of the panel reads
-    /// this, and a 40,000-file selection is not something to copy per frame.
-    pub sources: Arc<Vec<VfsPath>>,
-    /// The directory everything lands in, for the kinds that have one.
-    pub destination: Option<VfsPath>,
+    /// What moves where. An `Arc` because every repaint of the panel reads this,
+    /// and a 40,000-file selection is not something to copy per frame.
+    pub transfers: Arc<Vec<Transfer>>,
     pub progress: JobProgress,
     /// Sources that failed, with the reason. A job that copied 999 of 1,000 is
     /// not a success and not a failure; it is this.
@@ -196,29 +251,64 @@ pub struct Job {
     pub error: Option<String>,
     /// Sources completed so far, for a job still running.
     pub entries_completed: u64,
+    /// The panel's line for this job, built once.
+    ///
+    /// Computed at enqueue rather than per frame on purpose: the panel repaints
+    /// on every progress event, and a job row that allocated a `String` each
+    /// time would be the one thing in the browser that does work proportional
+    /// to the number of jobs on *every* repaint. The sources never change, so
+    /// neither does this.
+    pub label: String,
 }
 
 impl Job {
     /// The line the panel shows for this job.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The paths being read or removed, for measurement.
+    ///
+    /// Collected rather than borrowed so [`crate::measure`] can take a slice;
+    /// it is built once per job, off the render path, and the alternative is a
+    /// measurement API shaped around an iterator it does not need.
+    pub fn sources(&self) -> Vec<VfsPath> {
+        self.transfers
+            .iter()
+            .map(|transfer| transfer.source.clone())
+            .collect()
+    }
+
+    /// The directory everything lands in, when they all land in one.
+    ///
+    /// For the reload afterwards. The transfers are what the executor follows,
+    /// because they are not always the same folder.
+    pub fn destination(&self) -> Option<&VfsPath> {
+        self.transfers
+            .first()
+            .and_then(|transfer| transfer.destination.as_ref())
+    }
+
+    /// The label every job starts from, before it runs.
     ///
     /// A name where there is one, and a count where there is not: "Copying
     /// report.pdf" says what is happening, and "Copying 1,204 items" is the
     /// only honest thing to say about a selection nobody is going to read
     /// 1,204 names of.
-    pub fn label(&self) -> String {
-        match self.sources.as_slice() {
+    pub fn describe(kind: JobKind, sources: &[VfsPath]) -> String {
+        match sources {
             [one] => one
                 .file_name()
-                .map(|name| format!("{} {name}", self.kind.verb()))
-                .unwrap_or_else(|| format!("{} 1 item", self.kind.verb())),
-            [] => format!("{} nothing", self.kind.verb()),
-            many => format!("{} {} items", self.kind.verb(), many.len()),
+                .map(|name| format!("{} {name}", kind.verb()))
+                .unwrap_or_else(|| format!("{} 1 item", kind.verb())),
+            [] => format!("{} nothing", kind.verb()),
+            many => format!("{} {} items", kind.verb(), many.len()),
         }
     }
 
     /// The line the status bar shows while this is the job being watched.
     pub fn status(&self) -> String {
-        let mut line = self.label();
+        let mut line = self.label.clone();
         if self.state == JobState::Measuring {
             line.push_str(" — measuring…");
             return line;
@@ -241,7 +331,7 @@ impl Job {
             JobState::Succeeded => self.kind.past().to_string(),
             JobState::Cancelled => "Cancelled".to_string(),
             JobState::Failed => "Failed".to_string(),
-            _ => self.label(),
+            _ => self.label.clone(),
         };
         // A failure names its own path, so the first one is quoted whole: it
         // is the only line in the panel that can say what to do about it.
@@ -279,16 +369,21 @@ mod tests {
     use super::*;
 
     fn job(sources: Vec<VfsPath>, state: JobState) -> Job {
+        let label = Job::describe(JobKind::Copy, &sources);
+        let transfers = sources
+            .into_iter()
+            .map(|source| Transfer::to(source, VfsPath::local("/elsewhere")))
+            .collect();
         Job {
             id: JobId(1),
             kind: JobKind::Copy,
             state,
-            sources: Arc::new(sources),
-            destination: None,
+            transfers: Arc::new(transfers),
             progress: JobProgress::default(),
             failures: Vec::new(),
             error: None,
             entries_completed: 0,
+            label,
         }
     }
 

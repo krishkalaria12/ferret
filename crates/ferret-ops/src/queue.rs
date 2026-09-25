@@ -45,7 +45,7 @@ use ferret_vfs::{Vfs, VfsPath};
 use crate::config::{HISTORY_LIMIT, MAX_CONCURRENT_JOBS};
 use crate::errors::{OpsError, Result};
 use crate::execute::{self, Handle};
-use crate::job::{Job, JobId, JobKind, JobProgress, JobState};
+use crate::job::{Job, JobId, JobKind, JobProgress, JobState, Transfer};
 
 /// What the queue tells its observers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,46 +59,71 @@ pub enum Event {
 }
 
 /// What a caller wants done. The queue decides when.
+///
+/// The pairs are already named and placed by the time a request gets here. That
+/// is the whole reason [`Transfer`] exists: the name a drop settles on — "file
+/// 2" beside an existing one — can only be decided where the listing is
+/// readable, and a queue that took bare sources would have to decide it again
+/// somewhere it cannot see.
 #[derive(Clone, Debug)]
 pub struct Request {
     pub kind: JobKind,
-    pub sources: Vec<VfsPath>,
-    /// The directory everything lands in. `None` for a delete or a trash.
-    pub destination: Option<VfsPath>,
+    pub transfers: Vec<Transfer>,
 }
 
 impl Request {
+    /// Copy each source into `destination` under its own name.
     pub fn copy(sources: Vec<VfsPath>, destination: VfsPath) -> Self {
+        Self::copy_named(
+            sources.into_iter().map(|source| (source, None)).collect(),
+            destination,
+        )
+    }
+
+    /// Copy each source into `destination` under a name the caller has already
+    /// settled. `None` in the pair means "its own name".
+    pub fn copy_named(sources: Vec<(VfsPath, Option<String>)>, destination: VfsPath) -> Self {
         Self {
             kind: JobKind::Copy,
-            sources,
-            destination: Some(destination),
+            transfers: join(sources, destination),
         }
     }
 
     pub fn move_to(sources: Vec<VfsPath>, destination: VfsPath) -> Self {
         Self {
             kind: JobKind::Move,
-            sources,
-            destination: Some(destination),
+            transfers: join(
+                sources.into_iter().map(|source| (source, None)).collect(),
+                destination,
+            ),
         }
     }
 
     pub fn trash(sources: Vec<VfsPath>) -> Self {
         Self {
             kind: JobKind::Trash,
-            sources,
-            destination: None,
+            transfers: sources.into_iter().map(Transfer::away).collect(),
         }
     }
 
     pub fn delete(sources: Vec<VfsPath>) -> Self {
         Self {
             kind: JobKind::Delete,
-            sources,
-            destination: None,
+            transfers: sources.into_iter().map(Transfer::away).collect(),
         }
     }
+}
+
+/// Pair each source with its destination, inventing a name only when the
+/// caller did not settle one.
+pub fn join(sources: Vec<(VfsPath, Option<String>)>, destination: VfsPath) -> Vec<Transfer> {
+    sources
+        .into_iter()
+        .map(|(source, name)| {
+            let name = name.unwrap_or_else(|| source.file_name().unwrap_or_default().to_string());
+            Transfer::to(source, destination.join(&name))
+        })
+        .collect()
 }
 
 /// A job plus the handle its running copy reads.
@@ -153,22 +178,25 @@ impl Queue {
     /// watched it sit in the list. What *is* deferred is the measurement —
     /// that is work, and work belongs to the worker.
     pub fn enqueue(&self, request: Request) -> Result<JobId> {
-        if request.sources.is_empty() {
+        if request.transfers.is_empty() {
             return Err(OpsError::NothingToDo);
         }
-        if let Some(destination) = request.destination.as_ref()
-            && !request
-                .sources
-                .iter()
-                .all(|source| same_backend(source, destination))
-        {
+        if let Some(crossing) = request.transfers.iter().find_map(|transfer| {
+            let destination = transfer.destination.as_ref()?;
+            (!same_backend(&transfer.source, destination))
+                .then(|| (transfer.source.clone(), destination.clone()))
+        }) {
             return Err(OpsError::CrossBackend {
-                from: request.sources[0].clone(),
-                to: destination.clone(),
+                from: crossing.0,
+                to: crossing.1,
             });
         }
         if request.kind == JobKind::Trash
-            && let Some(remote) = request.sources.iter().find(|source| !source.is_local())
+            && let Some(remote) = request
+                .transfers
+                .iter()
+                .find(|transfer| !transfer.source.is_local())
+                .map(|transfer| transfer.source.clone())
         {
             // There is no trash on a server. The UI splits a mixed selection
             // before it gets here; this is the check that says so if it ever
@@ -180,16 +208,24 @@ impl Queue {
         }
 
         let id = JobId::next(self.next_id());
+        let label = Job::describe(
+            request.kind,
+            &request
+                .transfers
+                .iter()
+                .map(|transfer| transfer.source.clone())
+                .collect::<Vec<_>>(),
+        );
         let job = Job {
             id,
             kind: request.kind,
             state: JobState::Queued,
-            sources: Arc::new(request.sources),
-            destination: request.destination,
+            transfers: Arc::new(request.transfers),
             progress: JobProgress::default(),
             failures: Vec::new(),
             error: None,
             entries_completed: 0,
+            label,
         };
         {
             let mut entries = self.inner.entries.lock();

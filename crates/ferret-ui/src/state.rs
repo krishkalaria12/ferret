@@ -33,6 +33,15 @@ pub struct FerretState {
     /// watches, probes or mutates; the clone is a refcount bump, and local
     /// paths still go straight to `LocalFs` inside it.
     pub fs: Router,
+    /// Every bulk mutation in the application (F-60), and the only path to
+    /// one.
+    ///
+    /// Here rather than on a view for the reason the mounts are: a copy has to
+    /// outlive the tab that started it, the panel that was showing it, and
+    /// possibly the window. Anything the queue holds is a `JobId` and an `Arc`
+    /// of paths, so a job whose tab is long gone still finishes and still says
+    /// what it did.
+    pub ops: ferret_ops::Queue,
     pub platform: Arc<dyn Platform>,
     /// The bundled fallback set: always answers, never blocks (D-18).
     pub icons: &'static FileIcons,
@@ -152,13 +161,21 @@ pub fn load_state() -> FerretState {
         eprintln!("connections: {warning}");
     }
 
+    let platform = ferret_platform::platform();
+    // One router, two holders. `Router` is a refcount over a shared mount table,
+    // so the queue and every view are looking at the same mounts — a second
+    // `Router::new()` would be a second table, and a mount registered after
+    // startup would be invisible to the half of the queue using it.
+    let fs = Router::new();
+
     FerretState {
         settings,
         prefs,
         connections,
         mounts: crate::mounts::Mounts::default(),
-        fs: Router::new(),
-        platform: ferret_platform::platform(),
+        ops: ferret_ops::queue(Arc::new(fs.clone()), Arc::clone(&platform)),
+        fs,
+        platform,
         icons: FileIcons::embedded(),
         os_icons: ferret_platform::icon_provider(),
         rendered_os_icons: RenderedIconCache::default(),

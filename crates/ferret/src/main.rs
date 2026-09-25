@@ -148,6 +148,39 @@ fn bind_keys(cx: &mut App) {
         // terminal in the first place.
         KeyBinding::new("cmd-j", browser_actions::ToggleTerminal, None),
         KeyBinding::new("ctrl-j", browser_actions::ToggleTerminal, None),
+        // The operations queue (F-60). Shift rather than a bare letter, so it
+        // cannot collide with the terminal's own Ctrl-J newline on Windows and
+        // does not sit next to ⌘J the way a plain "operations" shortcut would.
+        KeyBinding::new("cmd-shift-j", browser_actions::ToggleOperations, None),
+        KeyBinding::new(
+            "ctrl-shift-j",
+            browser_actions::ToggleOperations,
+            OUTSIDE_TERMINAL,
+        ),
+        // The two queue-wide acts, both scoped to the panel's own key context
+        // and both with a visible button beside them. A shortcut that fired
+        // from the file pane would be one somebody presses by accident, and
+        // there is nothing here worth a global binding: both are one click away.
+        //
+        // `esc` to stop everything and `cmd-backspace` to clear is the pair
+        // every transfer window uses, and neither is taken in this window —
+        // the pane's own delete keys are scoped to `FILE_PANE`, which this is
+        // not.
+        KeyBinding::new(
+            "escape",
+            browser_actions::CancelAllOperations,
+            Some(context::OPERATIONS),
+        ),
+        KeyBinding::new(
+            "cmd-backspace",
+            browser_actions::ClearFinishedOperations,
+            Some(context::OPERATIONS),
+        ),
+        KeyBinding::new(
+            "ctrl-backspace",
+            browser_actions::ClearFinishedOperations,
+            Some(context::OPERATIONS),
+        ),
         KeyBinding::new("ctrl-`", browser_actions::FocusTerminalOrPane, None),
         KeyBinding::new("cmd-shift-.", browser_actions::ToggleHidden, None),
         KeyBinding::new("ctrl-h", browser_actions::ToggleHidden, OUTSIDE_TERMINAL),

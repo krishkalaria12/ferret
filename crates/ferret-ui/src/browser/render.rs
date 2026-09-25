@@ -62,11 +62,16 @@ impl Browser {
 
         let git = self.render_git_segment(cx);
         let transfer = self.render_transfer_segment(cx);
+        // Before the transfer segment: a drop that crosses a backend and a
+        // queued local copy cannot both be the thing the user is watching, and
+        // the local one is the one the queue knows how to stop.
+        let operations = self.render_operations_segment(cx);
 
         StatusBar::new()
             // The item count truncates before the git segment does: a count is
             // re-derivable by looking at the list, and a branch name is not.
             .left(div().min_w_0().truncate().child(text))
+            .when_some(operations, |bar, segment| bar.right(segment))
             .when_some(transfer, |bar, segment| bar.right(segment))
             .when_some(git, |bar, segment| bar.right(segment))
             // §4: h24, 11.5 px, muted. The library defaults to an auto height
@@ -92,6 +97,7 @@ impl Render for Browser {
         let dragging = self.sidebar_drag.is_some()
             || self.terminal_drag.is_some()
             || self.preview_drag.is_some()
+            || self.operations_drag.is_some()
             || self.tab_drag.is_some()
             || self.favorite_drag.is_some();
 
@@ -107,6 +113,7 @@ impl Render for Browser {
                     this.update_sidebar_drag(event.position.x, cx);
                     this.update_terminal_drag(event.position.y, cx);
                     this.update_preview_drag(event.position.x, cx);
+                    this.update_operations_drag(event.position.y, cx);
                 }))
                 .on_mouse_up(
                     gpui::MouseButton::Left,
@@ -151,6 +158,21 @@ impl Render for Browser {
             .on_action(
                 cx.listener(|this, _: &actions::FocusTerminalOrPane, window, cx| {
                     this.focus_terminal_or_pane(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::ToggleOperations, window, cx| {
+                    this.toggle_operations(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::CancelAllOperations, _, cx| {
+                    this.cancel_all_operations(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::ClearFinishedOperations, _, cx| {
+                    this.clear_finished_operations(cx)
                 }),
             )
             .on_action(cx.listener(|this, _: &actions::ToggleTerminalSync, _, cx| {
@@ -393,6 +415,13 @@ impl Render for Browser {
                                     .child(self.render_active_pane(window, cx)),
                             )
                             .child(self.render_status_bar(cx))
+                            // The queue docks directly above the status bar and
+                            // below the terminal, so the two panels stack
+                            // rather than overlap and the most recent thing the
+                            // person asked about is the one they see.
+                            .when(self.operations_visible, |el| {
+                                el.child(self.render_operations_panel(cx))
+                            })
                             .when(self.terminal_visible, |el| {
                                 el.child(self.render_terminal_panel(window, cx))
                             }),

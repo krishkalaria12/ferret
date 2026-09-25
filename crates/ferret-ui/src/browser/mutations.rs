@@ -196,33 +196,21 @@ impl Browser {
             return;
         }
 
-        let platform = cx.global::<FerretState>().platform.clone();
-        let thumbs = cx.global::<FerretState>().rendered_thumbs.clone();
         // Privacy, synchronously: a trashed photo's tile must not survive in
-        // memory. The disk entry expires by age/cap (its key needs the stat
-        // of a file that is about to vanish, so it cannot be derived here) —
-        // memory is what the next frame could paint.
+        // memory. The disk entry expires by age/cap (its key needs the stat of
+        // a file that is about to vanish, so it cannot be derived here) —
+        // memory is what the next frame could paint. Ahead of the job, not in
+        // it, because the job's thread is not the one that can reach this.
+        let thumbs = cx.global::<FerretState>().rendered_thumbs.clone();
         for path in &local {
             thumbs.remove(path);
         }
-        let window_handle = window.window_handle();
-        cx.spawn(async move |_, cx| {
-            let mut failures = Vec::new();
-            for path in local {
-                let Some(local) = path.as_local().map(Path::to_path_buf) else {
-                    continue;
-                };
-                if let Err(err) = platform.move_to_trash(&local).await {
-                    failures.push(err.to_string());
-                }
-            }
-            if let Some(message) = summarize_failures("move to the trash", &failures) {
-                let _ = window_handle.update(cx, |_, window, cx| {
-                    window.push_notification(Notification::error(message), cx);
-                });
-            }
-        })
-        .detach();
+
+        // Through the queue like everything else (F-60). Trashing 4,000 photos
+        // is a long operation with a long tail of failures, and a detached
+        // loop has nowhere to put either: no row, no progress, no way to stop
+        // it short of quitting.
+        self.enqueue_operation(ferret_ops::Request::trash(local), window, cx);
         // Watchers refresh the listing as entries vanish.
     }
 
@@ -305,8 +293,18 @@ impl Browser {
     /// already happened.
     fn delete_now(&mut self, paths: Vec<VfsPath>, window: &mut Window, cx: &mut Context<Self>) {
         // A mount has no watcher, so nothing else will notice the rows are
-        // gone. The reload is scheduled here rather than left to the user.
+        // gone. The reload is scheduled here rather than left to the user —
+        // and *before* the job, because the job may not finish for a while and
+        // the rows it is deleting are on screen until it does.
         let needs_reload = paths.iter().any(|path| !path.is_local());
+        if needs_reload {
+            cx.global::<FerretState>()
+                .fs
+                .invalidate(&self.active().folder.read(cx).dir);
+            self.active()
+                .folder
+                .update(cx, |folder, cx| folder.reload_preserving_state(cx));
+        }
         // Same privacy drop as trashing: memory tiles go synchronously.
         let thumbs = cx.global::<FerretState>().rendered_thumbs.clone();
         for path in &paths {
@@ -315,26 +313,34 @@ impl Browser {
         // Through the Vfs, not the platform: deleting irreversibly is
         // filesystem mechanics with nothing OS-specific in it, and
         // `RemoveMode::Permanent` is where the parallel tree delete lives
-        // (D-34).
-        let fs = cx.global::<FerretState>().fs.clone();
-        let window_handle = window.window_handle();
-        cx.spawn(async move |this, cx| {
-            let mut failures = Vec::new();
-            for path in paths {
-                if let Err(err) = fs.remove(&path, ferret_vfs::RemoveMode::Permanent).await {
-                    failures.push(err.to_string());
-                }
+        // (D-34). The queue is what puts a row and a Cancel button on it.
+        self.enqueue_operation(ferret_ops::Request::delete(paths), window, cx);
+    }
+
+    /// Hand a job to the queue, and open the panel so it can be seen.
+    ///
+    /// The one door every bulk mutation goes through (F-60). A refusal is a
+    /// toast rather than silence: the queue declines a cross-backend pair and a
+    /// trash on a server, and a gesture that did nothing without saying so is
+    /// the outcome F-60 exists to remove.
+    pub(super) fn enqueue_operation(
+        &mut self,
+        request: ferret_ops::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let queue = cx.global::<FerretState>().ops.clone();
+        match queue.enqueue(request) {
+            Ok(_) => {
+                // Opened, not just available. The whole promise of a queue is
+                // that the work is visible while it happens, and a panel nobody
+                // was told about is a panel nobody opens.
+                self.show_operations(window, cx);
             }
-            if needs_reload {
-                let _ = this.update(cx, |this, cx| this.refresh(cx));
+            Err(error) => {
+                window.push_notification(Notification::error(error.to_string()), cx);
             }
-            if let Some(message) = summarize_failures("be deleted", &failures) {
-                let _ = window_handle.update(cx, |_, window, cx| {
-                    window.push_notification(Notification::error(message), cx);
-                });
-            }
-        })
-        .detach();
+        }
     }
 
     /// Drop a set of paths into `dest` (§8).
@@ -360,54 +366,44 @@ impl Browser {
             self.transfer_across_backends(sources, dest, window, cx);
             return;
         }
-        let fs = cx.global::<FerretState>().fs.clone();
-        let window_handle = window.window_handle();
-        let initiating_folder = self.active().folder.clone();
-        let remote_endpoints = transfer_endpoints(&sources, &dest);
-        // Names are settled here, so a copy beside its original gets "file 2"
-        // rather than failing or overwriting.
-        let planned = self.plan_names(sources, &dest, cx);
-        let needs_reload = !remote_endpoints.is_empty();
+        // Names are settled here, on the window thread, because only there is
+        // the folder model readable — one index lookup per *dropped* file rather
+        // than per file in the directory (A-23). The settled names travel with
+        // the job, so a copy beside its original gets "file 2" instead of
+        // failing or overwriting.
+        let named: Vec<(VfsPath, Option<String>)> = self
+            .plan_names(sources, &dest, cx)
+            .into_iter()
+            .map(|(source, name)| (source, Some(name)))
+            .collect();
+        // A mount has no watcher, so the destination will not refresh itself.
+        // Scheduled before the job, because the job may not finish for a while
+        // and the rows it is creating should not be missing for the whole of it.
+        self.reload_if_remote(&dest, cx);
 
-        cx.spawn(async move |_, cx| {
-            let mut failures = Vec::new();
-
-            for (src, target) in planned {
-                let into = dest.join(&target);
-
-                let result = if force_copy {
-                    fs.copy(&src, &into).await
-                } else {
-                    match fs.rename(&src, &into).await {
-                        // Across volumes there is no rename to do: copy, then
-                        // remove the original, which is what a move means.
-                        Err(ferret_vfs::VfsError::CrossVolume { .. }) => {
-                            match fs.copy(&src, &into).await {
-                                Ok(()) => fs.remove(&src, ferret_vfs::RemoveMode::Permanent).await,
-                                Err(err) => Err(err),
-                            }
-                        }
-                        other => other,
-                    }
-                };
-                if let Err(err) = result {
-                    failures.push(err.to_string());
-                }
+        let request = if force_copy {
+            ferret_ops::Request::copy_named(named, dest)
+        } else {
+            // A move carries the same pairs. Not a second code path: the queue
+            // decides between a rename and a copy-then-delete per item, because
+            // only it knows what the filesystem said about that one.
+            ferret_ops::Request {
+                kind: ferret_ops::JobKind::Move,
+                transfers: ferret_ops::join(named, dest),
             }
-
-            if needs_reload {
-                Browser::reload_transfer_folder(&initiating_folder, &fs, &remote_endpoints, cx);
-            }
-
-            let verb = if force_copy { "copy" } else { "move" };
-            if let Some(message) = summarize_failures(verb, &failures) {
-                let _ = window_handle.update(cx, |_, window, cx| {
-                    window.push_notification(Notification::error(message), cx);
-                });
-            }
-        })
-        .detach();
+        };
+        self.enqueue_operation(request, window, cx);
         // Both directories are watched, so the rows follow on their own.
+    }
+
+    /// Reload a folder that has no watcher to do it.
+    fn reload_if_remote(&mut self, dir: &VfsPath, cx: &mut Context<Self>) {
+        if !dir.is_local() {
+            let fs = cx.global::<FerretState>().fs.clone();
+            let folder = self.active().folder.clone();
+            fs.invalidate(dir);
+            folder.update(cx, |folder, cx| folder.reload_preserving_state(cx));
+        }
     }
 
     /// Copy or cut the selection to the **system** pasteboard (D-42).
@@ -472,7 +468,6 @@ impl Browser {
             (None, Some((local, cut))) => (local, cut),
             (None, None) => return,
         };
-        let restore_on_copy = (!cut).then(|| sources.clone());
         let dest_dir = self.active().folder.read(cx).dir.clone();
         // A cut item pasted into its own folder is a no-op, and dropping it
         // before naming keeps it from claiming a "file 2" nothing will use.
@@ -480,45 +475,41 @@ impl Browser {
             .into_iter()
             .filter(|src| !(cut && src.parent().as_ref() == Some(&dest_dir)))
             .collect();
-        let planned = self.plan_names(sources, &dest_dir, cx);
-        let fs = cx.global::<FerretState>().fs.clone();
-        let window_handle = window.window_handle();
+        if sources.is_empty() {
+            return;
+        }
+        // Kept for the clipboard below, which a copy leaves in place so it can
+        // be pasted twice or somewhere else. A cut is consumed, so its clipboard
+        // entry is gone either way.
+        let for_clipboard = sources.clone();
+        let named: Vec<(VfsPath, Option<String>)> = self
+            .plan_names(sources, &dest_dir, cx)
+            .into_iter()
+            .map(|(source, name)| (source, Some(name)))
+            .collect();
+        // A mount has no watcher, so the pasted rows would not appear at all.
+        // Before the job rather than after it: the copy may take a while, and
+        // the files should be visible for the whole of it rather than not at
+        // all until the end.
+        self.reload_if_remote(&dest_dir, cx);
 
-        cx.spawn(async move |_, cx| {
-            let mut failures = Vec::new();
-            for (src, target) in planned {
-                // Checked here rather than on the window thread: a pasteboard
-                // full of prose produces lines that look like paths, and this
-                // is where a `stat` is allowed to be slow.
-                if !fs.exists(&src).await {
-                    continue;
-                }
-                let dest = dest_dir.join(&target);
-
-                let result = match fs.copy(&src, &dest).await {
-                    Ok(()) => {
-                        if cut {
-                            fs.remove(&src, ferret_vfs::RemoveMode::Permanent).await
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    Err(err) => Err(err),
-                };
-                if let Err(err) = result {
-                    failures.push(err.to_string());
-                }
-            }
-            if let Some(message) = summarize_failures("paste", &failures) {
-                let _ = window_handle.update(cx, |_, window, cx| {
-                    window.push_notification(Notification::error(message), cx);
-                });
-            }
-        })
-        .detach();
+        // A cut becomes a move, which is what it is: one queue job whose
+        // per-item decision between a rename and a copy-then-delete belongs to
+        // the queue, not to a loop here. Nothing is copied and then deleted by
+        // this code, which is the shape that loses a file when the second half
+        // fails.
+        let transfers = ferret_ops::join(named, dest_dir);
+        let kind = if cut {
+            ferret_ops::JobKind::Move
+        } else {
+            ferret_ops::JobKind::Copy
+        };
+        self.enqueue_operation(ferret_ops::Request { kind, transfers }, window, cx);
 
         // Copies stay on the clipboard: paste twice, paste elsewhere.
-        self.clipboard = restore_on_copy.map(|sources| (sources, false));
+        if !cut {
+            self.clipboard = Some((for_clipboard, false));
+        }
     }
 
     pub(super) fn toggle_hidden(&mut self, cx: &mut Context<Self>) {

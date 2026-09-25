@@ -30,11 +30,11 @@ pub mod config;
 pub use apply::apply;
 pub use errors::{BatchRenameError, OpsError, RenameResult, Result};
 pub use execute::{Handle, ProgressSink};
-pub use job::{Job, JobId, JobKind, JobProgress, JobState};
+pub use job::{Job, JobId, JobKind, JobProgress, JobState, Transfer};
 pub use measure::Measurement;
 pub use plan::{BatchRenamePlan, PlanIssue, RenameRow};
 pub use preflight::ExistingNames;
-pub use queue::{Event, Observer, Queue, Request};
+pub use queue::{Event, Observer, Queue, Request, join};
 pub use rules::{
     CaseChange, CaseStyle, ExtensionChange, FindReplace, MatchSyntax, NumberPlacement, Numbering,
     RenameRule, RuleTarget, TextAffix, validate_file_name,

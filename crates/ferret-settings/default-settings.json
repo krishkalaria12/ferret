@@ -40,5 +40,10 @@
     "width": 400.0,
     "line_numbers": false,
     "thumbnails": true
+  },
+  "operations": {
+    "visible": false,
+    "height": 180.0,
+    "keep_finished": true
   }
 }
