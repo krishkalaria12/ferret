@@ -9,7 +9,7 @@ use ferret_vfs::VfsPath;
 use unicode_normalization::UnicodeNormalization as _;
 
 use crate::rules::{CompiledRules, RenameRule, TransformError, validate_file_name};
-use crate::{BatchRenameError, Result};
+use crate::{BatchRenameError, RenameResult};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BatchRenamePlan {
@@ -247,7 +247,7 @@ impl RenameRow {
     }
 }
 
-pub(super) fn build_single(source: VfsPath, new_name: &str) -> Result<BatchRenamePlan> {
+pub(super) fn build_single(source: VfsPath, new_name: &str) -> RenameResult<BatchRenamePlan> {
     let old_name = source
         .file_name()
         .ok_or_else(|| BatchRenameError::InvalidRule {
@@ -282,7 +282,10 @@ pub(super) fn build_single(source: VfsPath, new_name: &str) -> Result<BatchRenam
     Ok(BatchRenamePlan::from_rows(rows))
 }
 
-pub(super) fn build_plan(sources: &[VfsPath], rules: &[RenameRule]) -> Result<BatchRenamePlan> {
+pub(super) fn build_plan(
+    sources: &[VfsPath],
+    rules: &[RenameRule],
+) -> RenameResult<BatchRenamePlan> {
     let compiled = CompiledRules::new(rules)?;
     let mut rows = Vec::with_capacity(sources.len());
     for source in sources {

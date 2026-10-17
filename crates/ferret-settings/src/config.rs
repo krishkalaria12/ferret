@@ -49,6 +49,17 @@ pub const MAX_SIDEBAR_WIDTH: f32 = 400.0;
 pub const MIN_TERMINAL_HEIGHT: f32 = 120.0;
 pub const MAX_TERMINAL_HEIGHT: f32 = 420.0;
 
+/// Bounds on the operations panel height.
+///
+/// The minimum shows a job row whole — icon, name, bar, rate, and its two
+/// buttons — because a queue that truncates the control you need to stop a
+/// transfer has the wrong priorities. The maximum leaves the file pane present
+/// at Ferret's minimum window height, so watching a large copy never turns the
+/// file manager into only a copy log.
+pub const MIN_OPERATIONS_HEIGHT: f32 = 110.0;
+pub const MAX_OPERATIONS_HEIGHT: f32 = 400.0;
+pub const DEFAULT_OPERATIONS_HEIGHT: f32 = 180.0;
+
 /// Bounds on the preview pane width (`docs/preview-plan.html` §3).
 ///
 /// The default is 42% of the available browser workspace at the 1180 px

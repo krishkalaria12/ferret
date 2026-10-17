@@ -49,6 +49,16 @@ pub enum VfsError {
     #[error("This location doesn't support {capability}.")]
     Unsupported { capability: &'static str },
 
+    /// Somebody stopped the operation part-way through.
+    ///
+    /// Not a failure and never shown as one: the operations queue (F-60) reads
+    /// it as "this job ended early", which is a different thing from "this job
+    /// broke". It names its path anyway, because the message a person sees next
+    /// to it — "Cancelled" beside a half-finished copy — is more useful when
+    /// the copy's path is already on screen.
+    #[error("{path} was cancelled before the operation finished.")]
+    Cancelled { path: VfsPath },
+
     /// A remote path whose mount is not connected — a tab restored from a
     /// previous session, a server that dropped, or a record the user deleted.
     #[error("Ferret isn't connected to the server that holds {path}.")]
@@ -126,6 +136,33 @@ impl VfsError {
     /// not by shouting.
     pub fn is_gone(&self) -> bool {
         matches!(self, VfsError::NotFound { .. })
+    }
+
+    /// The path this error is about, when it names one.
+    ///
+    /// For the two variants that do not — [`VfsError::Unsupported`], which is
+    /// about a backend rather than a file, and [`VfsError::CrossBackend`],
+    /// which is about a pair — this returns the side that matters: the source
+    /// for a crossing, and nothing for an unsupported capability. A caller
+    /// that has to name the subject in a sentence should not have to match on
+    /// every variant to find it.
+    pub fn path(&self) -> Option<&VfsPath> {
+        match self {
+            VfsError::NotFound { path }
+            | VfsError::PermissionDenied { path }
+            | VfsError::SymlinkLoop { path }
+            | VfsError::SymlinkPermissionRequired { path }
+            | VfsError::AlreadyExists { path }
+            | VfsError::NotADirectory { path }
+            | VfsError::CrossVolume { path }
+            | VfsError::Conflict { path }
+            | VfsError::Cancelled { path }
+            | VfsError::NotMounted { path }
+            | VfsError::Io { path, .. } => Some(path),
+            VfsError::RenameFailed { from, .. } => Some(from),
+            VfsError::CrossBackend { from, .. } => Some(from),
+            VfsError::Unsupported { .. } => None,
+        }
     }
 }
 

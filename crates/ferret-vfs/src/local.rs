@@ -9,7 +9,7 @@ use futures::stream::StreamExt;
 use rayon::prelude::*;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -310,7 +310,19 @@ impl Vfs for LocalFs {
     async fn copy(&self, from: &VfsPath, to: &VfsPath) -> Result<()> {
         let src = Self::require_local(from)?;
         let dst = Self::require_local(to)?;
-        smol::unblock(move || copy_tree(&src, &dst)).await
+        let meters = crate::Meters::new();
+        smol::unblock(move || copy_tree(&src, &dst, &meters).map_err(into_vfs)).await
+    }
+
+    async fn copy_observed(
+        &self,
+        from: &VfsPath,
+        to: &VfsPath,
+        reporter: Arc<dyn crate::ProgressReporter>,
+    ) -> Result<()> {
+        let src = Self::require_local(from)?;
+        let dst = Self::require_local(to)?;
+        smol::unblock(move || copy_tree(&src, &dst, reporter.as_ref()).map_err(into_vfs)).await
     }
 
     fn watch(&self, dir: &VfsPath) -> Result<crate::Watch> {
@@ -364,7 +376,6 @@ impl Vfs for LocalFs {
 
     async fn remove(&self, path: &VfsPath, mode: RemoveMode) -> Result<()> {
         let local = Self::require_local(path)?;
-        let owned = path.clone();
         match mode {
             // Wired to the platform trash in `ferret-platform` when that lands.
             // Refusing is the right placeholder: silently deleting permanently
@@ -373,11 +384,29 @@ impl Vfs for LocalFs {
                 capability: "moving to the Trash",
             }),
             RemoveMode::Permanent => {
-                smol::unblock(move || {
-                    remove_tree(&local)
-                        .map_err(|source| VfsError::from_io(source.action, &owned, source.source))
-                })
-                .await
+                let meters = crate::Meters::new();
+                smol::unblock(move || remove_tree(&local, &meters).map_err(into_vfs)).await
+            }
+        }
+    }
+
+    async fn remove_observed(
+        &self,
+        path: &VfsPath,
+        mode: RemoveMode,
+        reporter: Arc<dyn crate::ProgressReporter>,
+    ) -> Result<()> {
+        let local = Self::require_local(path)?;
+        match mode {
+            // The trash is the platform's, not this trait's, and a mount has
+            // none at all. Refusing here keeps the one delete path that is not
+            // a plain unlink in exactly one place.
+            RemoveMode::Trash => Err(VfsError::Unsupported {
+                capability: "moving to the Trash",
+            }),
+            RemoveMode::Permanent => {
+                smol::unblock(move || remove_tree(&local, reporter.as_ref()).map_err(into_vfs))
+                    .await
             }
         }
     }
@@ -497,6 +526,7 @@ fn to_metadata(md: &fs::Metadata, path: &VfsPath) -> Metadata {
 /// The parallel paths below cross a `rayon` boundary where the `VfsPath` is
 /// not in hand, so the action travels with the error and the caller attaches
 /// the path it already knows.
+#[derive(Debug)]
 struct FileOpError {
     action: &'static str,
     source: std::io::Error,
@@ -508,7 +538,71 @@ impl FileOpError {
     }
 }
 
+impl From<FileOpError> for Stop {
+    fn from(error: FileOpError) -> Self {
+        Stop::Failed(error)
+    }
+}
+
 /// Delete a file, a link, or a whole tree.
+///
+/// Parallel across the top level only, and every subtree beneath it goes
+/// through `std::fs::remove_dir_all` (D-34). That split is deliberate. std's
+/// implementation walks with `openat` and refuses to descend a directory that
+/// Why a file operation stopped: it broke, or somebody cancelled it.
+///
+/// The distinction is the whole point of the reported variants. "Permission
+/// denied" is a problem the user has to solve; "cancelled" is a thing they
+/// asked for, and a queue that rendered the second as an error toast would be
+/// complaining about an instruction.
+#[derive(Debug)]
+enum Stop {
+    Failed(FileOpError),
+    Cancelled,
+}
+
+/// A file operation that stopped, and the path it stopped on.
+///
+/// The path travels with the failure because a tree operation has hundreds of
+/// them and the root is almost never the one that failed. Reporting "no longer
+/// exists" against the folder somebody dropped *is* telling the truth about the
+/// folder; it is just not the sentence that helps.
+struct Stopped {
+    path: PathBuf,
+    stop: Stop,
+}
+
+/// A failure as the crate reports it.
+fn into_vfs(stopped: Stopped) -> VfsError {
+    match stopped.stop {
+        Stop::Cancelled => VfsError::Cancelled {
+            path: VfsPath::local(&stopped.path),
+        },
+        Stop::Failed(error) => {
+            VfsError::from_io(error.action, &VfsPath::local(&stopped.path), error.source)
+        }
+    }
+}
+
+fn failed<T>(
+    action: &'static str,
+    path: &std::path::Path,
+    source: std::io::Error,
+) -> std::result::Result<T, Stopped> {
+    Err(Stopped {
+        path: path.to_path_buf(),
+        stop: Stop::Failed(FileOpError::new(action, source)),
+    })
+}
+
+fn cancelled(path: &std::path::Path) -> Stopped {
+    Stopped {
+        path: path.to_path_buf(),
+        stop: Stop::Cancelled,
+    }
+}
+
+/// Delete a file, a link, or a whole tree, stopping when the reporter says so.
 ///
 /// Parallel across the top level only, and every subtree beneath it goes
 /// through `std::fs::remove_dir_all` (D-34). That split is deliberate. std's
@@ -521,27 +615,64 @@ impl FileOpError {
 ///
 /// It is not a micro-optimisation: the common shape is a directory of many
 /// files, and those unlinks run across the pool rather than one at a time.
-fn remove_tree(path: &std::path::Path) -> std::result::Result<(), FileOpError> {
-    let md = fs::symlink_metadata(path).map_err(|e| FileOpError::new("read", e))?;
+///
+/// A cancel stops the walk where it is and nothing is unwound — an unlink
+/// cannot be taken back, so there is nothing to roll back to. What it does do
+/// is stop promptly and report the entries that did land, so the queue can say
+/// "cancelled after 4,120 of 40,000" rather than leaving the user to guess
+/// whether the half that is still there is the half they cancelled.
+fn remove_tree(
+    path: &std::path::Path,
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stopped> {
+    let md = match fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(e) => return failed("read", path, e),
+    };
     if !md.is_dir() {
         // Never follow a symlink out of the tree being deleted: remove the
         // link itself.
-        return fs::remove_file(path).map_err(|e| FileOpError::new("delete", e));
+        if reporter.checkpoint() == crate::Checkpoint::Cancel {
+            return Err(cancelled(path));
+        }
+        if let Err(e) = fs::remove_file(path) {
+            return failed("delete", path, e);
+        }
+        reporter.entries(1);
+        return Ok(());
     }
 
-    let children: Vec<PathBuf> = fs::read_dir(path)
-        .map_err(|e| FileOpError::new("read", e))?
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .collect();
+    let children: Vec<PathBuf> = match fs::read_dir(path) {
+        Ok(children) => children
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .collect(),
+        Err(e) => return failed("read", path, e),
+    };
 
+    // The top-level children are counted as they are removed, so this is where
+    // a cancel is observed. Not per child: see
+    // `config::REMOVE_CHECKPOINT_EVERY` for why the atomic is amortised.
+    let removed = AtomicU64::new(0);
     // Collected rather than short-circuited: a delete that hits one
     // permission-denied child should still remove everything it can, and then
     // say what failed. `remove_dir` below fails anyway if anything is left.
-    let failures: Vec<FileOpError> = crate::pool::install(move || {
+    let outcome: Vec<std::result::Result<u64, Stopped>> = crate::pool::install(|| {
         children
             .into_par_iter()
-            .filter_map(|child| {
-                let md = fs::symlink_metadata(&child).ok()?;
+            .map(|child| {
+                let since_check = removed.fetch_add(1, Ordering::Relaxed);
+                if since_check.is_multiple_of(crate::config::REMOVE_CHECKPOINT_EVERY as u64)
+                    && reporter.checkpoint() == crate::Checkpoint::Cancel
+                {
+                    return Err(cancelled(&child));
+                }
+                let md = match fs::symlink_metadata(&child) {
+                    Ok(md) => md,
+                    // A child that vanished between the read and the unlink is
+                    // already deleted, which is the outcome we wanted.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                    Err(e) => return failed("read", &child, e),
+                };
                 let outcome = if md.is_dir() {
                     fs::remove_dir_all(&child)
                 } else {
@@ -549,66 +680,210 @@ fn remove_tree(path: &std::path::Path) -> std::result::Result<(), FileOpError> {
                     // that points outside the tree being deleted.
                     fs::remove_file(&child)
                 };
-                outcome.err().map(|e| FileOpError::new("delete", e))
+                match outcome {
+                    Ok(()) => Ok(1),
+                    Err(e) => Err(Stopped {
+                        path: child,
+                        stop: Stop::Failed(FileOpError::new("delete", e)),
+                    }),
+                }
             })
             .collect()
     });
-    if let Some(failure) = failures.into_iter().next() {
+
+    let mut first_failure = None;
+    for result in outcome {
+        match result {
+            Ok(entries) => reporter.entries(entries),
+            Err(stopped) => {
+                // A cancel outranks a broken sibling: the user asked for the
+                // job to stop, and reporting a permission error instead would
+                // answer a question they did not ask.
+                if matches!(stopped.stop, Stop::Cancelled) {
+                    return Err(stopped);
+                }
+                first_failure.get_or_insert(stopped);
+            }
+        }
+    }
+    if let Some(failure) = first_failure {
         return Err(failure);
     }
 
-    fs::remove_dir(path).map_err(|e| FileOpError::new("delete", e))
+    // Cancelled above, or a genuine failure: either way the directory still
+    // holds what is left, and removing it would either fail or — worse, if the
+    // walk was cancelled rather than broken — destroy the names of files this
+    // operation never got to.
+    fs::remove_dir(path)
+        .map_err(|e| Stop::Failed(FileOpError::new("delete", e)))
+        .map_err(|stop| Stopped {
+            path: path.to_path_buf(),
+            stop,
+        })?;
+    reporter.entries(1);
+    Ok(())
 }
+
+// A subtree removed by `remove_dir_all` counts as one entry, not as the
+// thousands it took with it: re-walking to count would double the work of the
+// most expensive operation in the app. The queue's total is measured by the
+// same walk that fills the tree, so a deep delete under-reports its own
+// denominator — and an entry count that stops climbing is honest about that in
+// a way an inflated number would not be.
 
 /// Copy one file, or reproduce one symlink as a link.
 fn copy_one(
     src: &std::path::Path,
     dst: &std::path::Path,
     is_symlink: bool,
-) -> std::result::Result<(), FileOpError> {
-    if !is_symlink {
-        let metadata = fs::symlink_metadata(src).map_err(|e| FileOpError::new("read", e))?;
-        let mut source = fs::File::open(src).map_err(|e| FileOpError::new("read", e))?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut destination = options
-            .open(dst)
-            .map_err(|e| FileOpError::new("create", e))?;
-        let result = std::io::copy(&mut source, &mut destination)
-            .map_err(|e| FileOpError::new("copy", e))
-            .and_then(|_| {
-                destination
-                    .set_permissions(metadata.permissions())
-                    .map_err(|e| FileOpError::new("preserve metadata", e))
-            });
-        if let Err(error) = result {
-            drop(destination);
-            let _ = fs::remove_file(dst);
-            return Err(error);
-        }
-        return Ok(());
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stopped> {
+    if is_symlink {
+        return copy_symlink(src, dst, reporter);
     }
+    let metadata = match fs::symlink_metadata(src) {
+        Ok(md) => md,
+        Err(e) => return failed("read", src, e),
+    };
+    let mut source = match fs::File::open(src) {
+        Ok(source) => source,
+        Err(e) => return failed("read", src, e),
+    };
+    let mut options = fs::OpenOptions::new();
+    // `create_new`: conflict policy is the caller's decision, and this
+    // signature makes "silently replaced something" impossible to write by
+    // accident.
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        let target = fs::read_link(src).map_err(|e| FileOpError::new("read", e))?;
-        std::os::unix::fs::symlink(&target, dst).map_err(|e| FileOpError::new("create", e))
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
-    #[cfg(windows)]
-    {
-        let _ = dst;
-        Err(FileOpError::new(
-            "copy",
-            std::io::Error::other("copying symlinks is not supported on Windows"),
-        ))
+    let destination = options
+        .open(dst)
+        .map_err(|e| Stop::Failed(FileOpError::new("create", e)))
+        .map_err(|stop| Stopped {
+            path: dst.to_path_buf(),
+            stop,
+        })?;
+
+    let mut destination = destination;
+    let outcome =
+        stream_file(&mut source, &mut destination, &metadata, reporter).map_err(|stop| Stopped {
+            path: src.to_path_buf(),
+            stop,
+        });
+
+    // Closed before the cleanup: Windows will not unlink a file that is still
+    // open, so a cancelled copy on Windows would otherwise leave exactly the
+    // half-written destination this is meant to prevent.
+    drop(destination);
+    if outcome.is_err() {
+        let _ = fs::remove_file(dst);
     }
+    outcome
 }
 
-/// Recursive copy used by paste and cross-volume moves.
+/// Move the bytes, then put the source's own attributes on the copy.
+///
+/// Attributes rather than contents only, because a copy that quietly resets
+/// modification times is a copy nobody can trust afterwards: the two files
+/// disagree about when they were last written, and every tool that rebuilds
+/// from modification order will make the wrong choice. Permissions come from
+/// the source, so a private file does not become world-readable on the way, and
+/// the open mode above starts at `0o600` precisely so there is no window in
+/// which the copy is briefly public.
+fn stream_file(
+    source: &mut fs::File,
+    destination: &mut fs::File,
+    metadata: &fs::Metadata,
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stop> {
+    // `stream_file` reports at `Stop` rather than `Stopped`: its caller has both
+    // paths in hand and attaches one, and threading a path through a function
+    // that only ever fails on the file it was handed would be noise.
+    fn broken(action: &'static str, source: std::io::Error) -> Stop {
+        Stop::Failed(FileOpError::new(action, source))
+    }
+
+    let mut buffer = vec![0u8; crate::config::COPY_CHUNK_BYTES];
+    loop {
+        // Asked before the read, so a cancel never waits on a write that has
+        // already been issued, and never leaves a chunk read but not written.
+        if reporter.checkpoint() == crate::Checkpoint::Cancel {
+            return Err(Stop::Cancelled);
+        }
+        let read = match source.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(source) => return Err(broken("read", source)),
+        };
+        if let Err(source) = destination.write_all(&buffer[..read]) {
+            return Err(broken("copy", source));
+        }
+        reporter.bytes(read as u64);
+    }
+
+    if let Err(source) = destination.set_permissions(metadata.permissions()) {
+        return Err(broken("preserve permissions", source));
+    }
+    // A backend may legitimately have no clock to report, and inventing the
+    // epoch would be worse than saying nothing — so a half that cannot be read
+    // is left unset, which keeps the copy's own time for that half rather than
+    // writing a timestamp that never existed.
+    let mut times = fs::FileTimes::new();
+    if let Ok(accessed) = metadata.accessed() {
+        times = times.set_accessed(accessed);
+    }
+    if let Ok(modified) = metadata.modified() {
+        times = times.set_modified(modified);
+    }
+    destination
+        .set_times(times)
+        .map_err(|source| Stop::Failed(FileOpError::new("preserve timestamp", source)))?;
+    reporter.entries(1);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stopped> {
+    if reporter.checkpoint() == crate::Checkpoint::Cancel {
+        return Err(cancelled(src));
+    }
+    let target = match fs::read_link(src) {
+        Ok(target) => target,
+        Err(e) => return failed("read", src, e),
+    };
+    if let Err(source) = std::os::unix::fs::symlink(&target, dst) {
+        // The link is all-or-nothing, so there is never a partial one to
+        // clean up here.
+        return failed("create", dst, source);
+    }
+    reporter.entries(1);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_symlink(
+    src: &std::path::Path,
+    _dst: &std::path::Path,
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stopped> {
+    if reporter.checkpoint() == crate::Checkpoint::Cancel {
+        return Err(cancelled(src));
+    }
+    failed(
+        "copy",
+        src,
+        std::io::Error::other("copying symlinks is not supported on Windows"),
+    )
+}
+
+/// Recursive copy used by paste, the operations queue and cross-volume moves.
 ///
 /// Symlinks are copied as links, not followed — copying a tree that happens
 /// to contain a link back to `/` must not become a walk of the universe. That
@@ -621,24 +896,58 @@ fn copy_one(
 /// are created as they are yielded — the walk yields a parent before its
 /// children, which is exactly the order `create_dir` needs — and the file
 /// copies, which are the expensive part, then run in parallel.
-fn copy_tree(src: &PathBuf, dst: &PathBuf) -> Result<()> {
-    fn at(path: &std::path::Path, err: FileOpError) -> VfsError {
-        VfsError::from_io(err.action, &VfsPath::local(path), err.source)
-    }
-
-    let md = fs::symlink_metadata(src)
-        .map_err(|source| VfsError::from_io("read", &VfsPath::local(src.as_path()), source))?;
+///
+/// **The destination is removed if this does not finish.** Not just the
+/// half-written file, which [`copy_one`] already handles, but every directory
+/// the walk created: a copy abandoned after 200 MB into a 900 MB tree must not
+/// leave a `Photos/` behind that looks like a complete copy of a folder that
+/// happens to be empty. The removal is only safe because nothing else can own
+/// the destination — `create_dir` and `create_new` both refuse to touch
+/// something that already exists — so `dst` is either wholly ours or was
+/// refused before a byte was written.
+fn copy_tree(
+    src: &Path,
+    dst: &Path,
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stopped> {
+    let md = match fs::symlink_metadata(src) {
+        Ok(md) => md,
+        Err(e) => return failed("read", src, e),
+    };
 
     if md.is_symlink() || !md.is_dir() {
-        return copy_one(src, dst, md.is_symlink()).map_err(|e| at(src, e));
+        return copy_one(src, dst, md.is_symlink(), reporter);
     }
 
+    if reporter.checkpoint() == crate::Checkpoint::Cancel {
+        return Err(cancelled(src));
+    }
     // Refuses to overwrite: conflict policy is the caller's decision, and this
     // signature makes "silently replaced something" impossible to write by
-    // accident.
-    fs::create_dir(dst)
-        .map_err(|source| VfsError::from_io("create", &VfsPath::local(dst.as_path()), source))?;
+    // accident. `create_dir`, not `create_dir_all` — the destination's parent is
+    // the directory the user pointed at, and inventing a path nobody named is
+    // not a decision a copy gets to make.
+    if let Err(source) = fs::create_dir(dst) {
+        return failed("create", dst, source);
+    }
 
+    match fill_tree(src, dst, reporter) {
+        Ok(()) => Ok(()),
+        Err(stopped) => {
+            // `remove_dir_all` on a directory this call created. It cannot
+            // reach anything the user owns, because `create_dir` above would
+            // have failed on a destination that already existed.
+            let _ = fs::remove_dir_all(dst);
+            Err(stopped)
+        }
+    }
+}
+
+fn fill_tree(
+    src: &Path,
+    dst: &Path,
+    reporter: &dyn crate::ProgressReporter,
+) -> std::result::Result<(), Stopped> {
     let mut files = Vec::new();
     for entry in jwalk::WalkDir::new(src)
         .min_depth(1)
@@ -649,9 +958,14 @@ fn copy_tree(src: &PathBuf, dst: &PathBuf) -> Result<()> {
         .follow_links(false)
         .parallelism(crate::pool::parallelism())
     {
-        let entry = entry.map_err(|source| {
-            VfsError::from_io("read", &VfsPath::local(src.as_path()), source.into())
-        })?;
+        let entry = entry
+            .map_err(|source| Stop::Failed(FileOpError::new("read", source.into())))
+            // The walk failed on the directory it could not read, and `src` is
+            // the nearest path still in hand at that point.
+            .map_err(|stop| Stopped {
+                path: src.to_path_buf(),
+                stop,
+            })?;
         let path = entry.path();
         let Ok(relative) = path.strip_prefix(src) else {
             continue;
@@ -662,24 +976,29 @@ fn copy_tree(src: &PathBuf, dst: &PathBuf) -> Result<()> {
         // to descend — `follow_links(false)` already stops the walk, and this
         // keeps it out of the `create_dir` branch.
         if entry.file_type().is_dir() {
-            fs::create_dir(&target).map_err(|source| {
-                VfsError::from_io("create", &VfsPath::local(target.as_path()), source)
-            })?;
+            if let Err(source) = fs::create_dir(&target) {
+                return failed("create", &target, source);
+            }
         } else {
-            files.push((path, target, entry.file_type().is_symlink()));
+            files.push((path.to_path_buf(), target, entry.file_type().is_symlink()));
         }
     }
 
-    let failure = crate::pool::install(move || {
+    let failure: Option<Stopped> = crate::pool::install(move || {
         files
             .into_par_iter()
-            .filter_map(|(from, to, is_symlink)| {
-                copy_one(&from, &to, is_symlink).err().map(|e| (from, e))
+            .find_map_any(|(from, to, is_symlink)| {
+                // Checked here rather than in the loop above: the walk has to
+                // enumerate before it can copy, and a cancel asked for during
+                // the walk is answered before the first byte is written.
+                if reporter.checkpoint() == crate::Checkpoint::Cancel {
+                    return Some(cancelled(&from));
+                }
+                copy_one(&from, &to, is_symlink, reporter).err()
             })
-            .find_any(|_| true)
     });
     match failure {
-        Some((path, err)) => Err(at(&path, err)),
+        Some(stopped) => Err(stopped),
         None => Ok(()),
     }
 }
@@ -1136,6 +1455,8 @@ fn unix_secs_nanos(modified: Option<std::time::SystemTime>) -> (u64, u32) {
 
 #[cfg(test)]
 mod link_target_tests;
+#[cfg(test)]
+mod observed_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

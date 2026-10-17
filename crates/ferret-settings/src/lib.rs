@@ -23,13 +23,14 @@ mod schema;
 pub use errors::{Result, SettingsError, Warning};
 pub use folder_prefs::{FolderPrefs, FolderView};
 pub use schema::{
-    Appearance, Browser, Preview, Settings, Sidebar, SortKey, SortOrder, Terminal, TerminalBackend,
-    ThemeChoice, ViewMode,
+    Appearance, Browser, Operations, Preview, Settings, Sidebar, SortKey, SortOrder, Terminal,
+    TerminalBackend, ThemeChoice, ViewMode,
 };
 
 use config::{
-    APP_DIR, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_PREVIEW_WIDTH, MAX_SIDEBAR_WIDTH,
-    MAX_TERMINAL_HEIGHT, MIN_FONT_SIZE, MIN_PREVIEW_WIDTH, MIN_SIDEBAR_WIDTH, MIN_TERMINAL_HEIGHT,
+    APP_DIR, DEFAULT_OPERATIONS_HEIGHT, FOLDER_PREFS_FILE, MAX_FONT_SIZE, MAX_OPERATIONS_HEIGHT,
+    MAX_PREVIEW_WIDTH, MAX_SIDEBAR_WIDTH, MAX_TERMINAL_HEIGHT, MIN_FONT_SIZE,
+    MIN_OPERATIONS_HEIGHT, MIN_PREVIEW_WIDTH, MIN_SIDEBAR_WIDTH, MIN_TERMINAL_HEIGHT,
     SETTINGS_FILE,
 };
 use serde::de::DeserializeOwned;
@@ -78,6 +79,7 @@ impl Settings {
             sidebar: take_section(&mut root, "sidebar", &mut warnings),
             terminal: take_section(&mut root, "terminal", &mut warnings),
             preview: take_section(&mut root, "preview", &mut warnings),
+            operations: take_section(&mut root, "operations", &mut warnings),
             // Whatever is left is from a version that knows more than this
             // one — or a `window`/`keymap` section from a version that had
             // them declared before D-41 removed them. Either way it is kept
@@ -181,6 +183,26 @@ impl Settings {
                 format!("Using {clamped}."),
             ));
             self.preview.width = clamped;
+        }
+
+        let operations_height = self.operations.height;
+        if !operations_height.is_finite()
+            || !(MIN_OPERATIONS_HEIGHT..=MAX_OPERATIONS_HEIGHT).contains(&operations_height)
+        {
+            let clamped = if operations_height.is_finite() {
+                operations_height.clamp(MIN_OPERATIONS_HEIGHT, MAX_OPERATIONS_HEIGHT)
+            } else {
+                DEFAULT_OPERATIONS_HEIGHT
+            };
+            warnings.push(Warning::new(
+                "operations.height",
+                format!(
+                    "{operations_height} is outside the usable range \
+                     {MIN_OPERATIONS_HEIGHT}\u{2013}{MAX_OPERATIONS_HEIGHT}."
+                ),
+                format!("Using {clamped}."),
+            ));
+            self.operations.height = clamped;
         }
 
         if !self.terminal.line_height.is_finite()
