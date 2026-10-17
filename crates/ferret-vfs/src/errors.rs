@@ -150,6 +150,8 @@ impl VfsError {
         match self {
             VfsError::NotFound { path }
             | VfsError::PermissionDenied { path }
+            | VfsError::SymlinkLoop { path }
+            | VfsError::SymlinkPermissionRequired { path }
             | VfsError::AlreadyExists { path }
             | VfsError::NotADirectory { path }
             | VfsError::CrossVolume { path }
