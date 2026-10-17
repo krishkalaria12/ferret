@@ -53,7 +53,7 @@ pub use path::{MountId, VfsPath, validate_portable_file_name};
 pub use progress::{Checkpoint, Meters, ProgressReporter};
 pub use router::Router;
 pub use vfs::{
-    Capabilities, DirEntryBatch, FileIdentity, ListingDetail, ReadDirStream, RemoveMode, Vfs,
-    content_hash,
+    Capabilities, DirEntryBatch, FileIdentity, ListingDetail, ReadDirStream, RemoveMode,
+    SymlinkKind, Vfs, content_hash,
 };
 pub use watch::{Watch, WatchEvent};

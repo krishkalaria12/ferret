@@ -183,7 +183,7 @@ impl FilePane {
         // short enough to live inline in a `SmolStr` copies rather than
         // allocating, which is most of them.
         let label = gpui::SharedString::new(entry.name());
-        let menu_path = entry.path.clone();
+        let menu_target = (entry.path.clone(), super::symlink_target_kind(entry.kind));
 
         div()
             .id(("tile", ix))
@@ -228,7 +228,7 @@ impl FilePane {
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     // Select under the cursor, then open the target menu.
-                    let path = menu_path.clone();
+                    let path = menu_target.clone();
                     this.folder.update(cx, |f, cx| {
                         f.prepare_context_menu(ix);
                         cx.emit(FolderEvent::SelectionChanged);

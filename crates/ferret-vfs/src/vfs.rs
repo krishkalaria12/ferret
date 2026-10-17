@@ -3,6 +3,7 @@ use crate::{Entry, Metadata, Result, VfsPath};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use std::sync::Arc;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// One payload from a directory listing stream.
@@ -15,6 +16,15 @@ pub type DirEntryBatch = Vec<Entry>;
 /// The asynchronous, cancel-by-drop stream returned from [`Vfs::read_dir`].
 pub type ReadDirStream = BoxStream<'static, Result<DirEntryBatch>>;
 
+/// What a symbolic link should point at, asked for because a platform needs
+/// it: Windows creates a file link and a directory link through different
+/// calls, and Unix does not care.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymlinkKind {
+    File,
+    Directory,
+}
+
 /// What a backend can actually do.
 ///
 /// The UI reads this to disable actions up front instead of letting the user
@@ -22,6 +32,9 @@ pub type ReadDirStream = BoxStream<'static, Result<DirEntryBatch>>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
     pub symlinks: bool,
+    /// Whether [`Vfs::create_symlink`] is wired up, as opposed to symlinks
+    /// only being something the backend can read.
+    pub create_symlinks: bool,
     pub permissions: bool,
     /// `rename` is atomic, so a move cannot leave both or neither.
     pub atomic_rename: bool,
@@ -224,6 +237,29 @@ pub trait Vfs: Send + Sync + 'static {
         let _ = path;
         Err(crate::VfsError::Unsupported {
             capability: "probing entries",
+        })
+    }
+
+    /// The target a symbolic link records, exactly as the link holds it.
+    ///
+    /// Never canonicalised: a row has to show what the link says, which for a
+    /// relative link is not what it resolves to.
+    async fn read_link(&self, path: &VfsPath) -> Result<PathBuf> {
+        let _ = path;
+        Err(crate::VfsError::Unsupported {
+            capability: "reading symbolic links",
+        })
+    }
+
+    /// Creates `link` pointing at `target`, which is stored verbatim.
+    ///
+    /// `kind` is advice for the platforms that need it; a link whose target
+    /// does not exist yet is still created, which is what makes a link to a
+    /// path created later work.
+    async fn create_symlink(&self, link: &VfsPath, target: &str, kind: SymlinkKind) -> Result<()> {
+        let _ = (link, target, kind);
+        Err(crate::VfsError::Unsupported {
+            capability: "creating symbolic links",
         })
     }
 

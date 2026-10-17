@@ -566,16 +566,24 @@ impl TableDelegate for ListDelegate {
                     cell = cell.child(super::git_badge(status, entry.is_dir_like(), &palette));
                 }
 
-                // §9: a broken link names its dead target, because "broken
-                // link" without one is not something a person can act on.
-                if let Some(target) = &entry.link_target {
+                if let Some(target) = entry.link_target_label() {
                     cell = cell.child(
-                        div()
+                        h_flex()
                             .min_w_0()
-                            .truncate()
+                            .gap_1()
                             .text_size(rem_from_ui_px(11.5))
-                            .text_color(theme.warning)
-                            .child(format!("→ {}", target.display())),
+                            .text_color(if broken {
+                                theme.warning
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child("→")
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(gpui::SharedString::new(target)),
+                            ),
                     );
                 }
                 cell.into_any_element()
@@ -636,13 +644,23 @@ impl TableDelegate for ListDelegate {
         cx: &mut gpui::Context<TableState<Self>>,
     ) -> PopupMenu {
         let folder = self.folder.read(cx);
-        if folder.entry_at(row_ix).is_none() {
+        let Some(entry) = folder.entry_at(row_ix).cloned() else {
             return menu;
-        }
+        };
+        let selected = folder.selection_count();
+        let dir = folder.dir.clone();
+        let target_kind = super::symlink_target_kind(entry.kind);
+        let symlinkable = cx
+            .global::<crate::state::FerretState>()
+            .fs
+            .capabilities_for(&dir)
+            .create_symlinks;
         entry_menu_items(
             menu,
-            folder.selection_count(),
-            folder.dir.is_local(),
+            selected,
+            dir.is_local(),
+            symlinkable,
+            Some((entry.path, target_kind)),
             super::menu::send_to_targets(cx),
         )
     }

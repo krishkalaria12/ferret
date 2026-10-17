@@ -205,6 +205,9 @@ impl FileIcons {
 /// and the caller draws the bundled SVG, so a row never waits on the OS.
 pub fn os_icon(entry: &Entry, cx: &gpui::App) -> Option<gpui::ImageSource> {
     let state = cx.global::<crate::state::FerretState>();
+    if entry.kind.is_symlink() {
+        return None;
+    }
     let local = entry.path.as_local()?;
     // From the entry's cached extension, not by re-parsing its path: this
     // runs once per visible row per frame (A-33).
@@ -247,6 +250,9 @@ pub(crate) fn collect_os_icon_requests<'a>(
     let mut wanted = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for entry in entries {
+        if entry.kind.is_symlink() {
+            continue;
+        }
         let Some(local) = entry.path.as_local() else {
             continue;
         };

@@ -24,6 +24,14 @@ pub enum VfsError {
     #[error("Ferret can't read {path} — you don't have permission to open it.")]
     PermissionDenied { path: VfsPath },
 
+    #[error("Ferret can't resolve {path} because its symbolic links form a loop.")]
+    SymlinkLoop { path: VfsPath },
+
+    #[error(
+        "Ferret couldn't create a symbolic link at {path}. On Windows, enable Developer Mode or run Ferret elevated, then try again."
+    )]
+    SymlinkPermissionRequired { path: VfsPath },
+
     #[error("{path} already exists.")]
     AlreadyExists { path: VfsPath },
 
@@ -91,6 +99,12 @@ impl VfsError {
     /// `action` is a verb phrase completing "Couldn't …" — `"read"`,
     /// `"rename"`, `"create"`.
     pub fn from_io(action: &'static str, path: &VfsPath, source: io::Error) -> Self {
+        let message = source.to_string().to_ascii_lowercase();
+        if message.contains("too many levels of symbolic links")
+            || message.contains("filesystem loop")
+        {
+            return VfsError::SymlinkLoop { path: path.clone() };
+        }
         match source.kind() {
             io::ErrorKind::NotFound => VfsError::NotFound { path: path.clone() },
             io::ErrorKind::PermissionDenied => VfsError::PermissionDenied { path: path.clone() },

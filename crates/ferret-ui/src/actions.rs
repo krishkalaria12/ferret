@@ -5,6 +5,7 @@
 //! views handle them. Context names must match the `key_context` strings the
 //! views install.
 
+use ferret_vfs::{SymlinkTarget, VfsPath};
 use gpui::actions;
 
 /// Focus scopes used with `KeyBinding::new`.
@@ -170,4 +171,11 @@ actions!(
 #[action(namespace = ferret, no_json)]
 pub struct SendToConnection {
     pub id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = ferret, no_json)]
+pub struct NewSymlink {
+    pub target: Option<VfsPath>,
+    pub target_kind: Option<SymlinkTarget>,
 }

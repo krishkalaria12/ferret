@@ -39,7 +39,7 @@
 use super::*;
 use crate::browser::{GitHandle, GitSnapshot};
 use crate::icons::FileIcons;
-use ferret_vfs::{EntryKind, Metadata};
+use ferret_vfs::{EntryKind, Metadata, SymlinkTarget};
 use gpui::AppContext as _;
 
 /// Rows on screen at once. Roughly a maximised list view at 30 px rows; the
@@ -102,12 +102,25 @@ fn folder_of(n: usize) -> Folder {
     );
     for i in 0..n {
         let name = format!("file-{i:06}.txt");
-        let entry = Entry::new(VfsPath::local(format!("/x/{name}")), &name, EntryKind::File)
-            .with_metadata(Some(Metadata {
+        let kind = if i % 17 == 0 {
+            EntryKind::Symlink {
+                target_kind: Some(SymlinkTarget::File),
+            }
+        } else {
+            EntryKind::File
+        };
+        let entry = Entry::new(VfsPath::local(format!("/x/{name}")), &name, kind).with_metadata(
+            Some(Metadata {
                 len: i as u64 * 977,
                 modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(i as u64)),
                 ..Default::default()
-            }));
+            }),
+        );
+        let entry = if kind.is_symlink() {
+            entry.with_link_target_text(format!("/x/target-{i:06}.txt"))
+        } else {
+            entry
+        };
         let id = f.insert(entry, Placement::Top);
         f.entries.push(id);
     }
@@ -155,6 +168,9 @@ fn draw_rows(
         sink += folder.expansion_at(row).is_some() as usize;
         sink += icons.asset_path(&entry).len();
         sink += gpui::SharedString::new(entry.name()).len();
+        if let Some(target) = entry.link_target_label() {
+            sink += gpui::SharedString::new(target).len();
+        }
         // The platform icon lookup, which is where A-33 hid. A cache miss
         // returns `None` and the row draws the bundled SVG — but the *key* is
         // built either way, which is the part that was allocating.

@@ -7,7 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use async_trait::async_trait;
 use ferret_vfs::{
     Capabilities, Entry, EntryKind, ListingDetail, Metadata, MountId, ReadDirStream, RemoveMode,
-    SymlinkTarget, Vfs, VfsError, VfsPath,
+    SymlinkKind, SymlinkTarget, Vfs, VfsError, VfsPath,
 };
 use futures::{StreamExt, stream};
 use russh_sftp::client::{RawSftpSession, error::Error as SftpError};
@@ -216,6 +216,7 @@ impl Vfs for SftpVfs {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             symlinks: true,
+            create_symlinks: true,
             permissions: true,
             atomic_rename: self.atomic_rename,
             rename_noreplace: true,
@@ -288,16 +289,31 @@ impl Vfs for SftpVfs {
                                 if name == "." || name == ".." || !valid_name(&name) {
                                     return None;
                                 }
-                                let target = if file.attrs.is_symlink() {
+                                let (target, target_text) = if file.attrs.is_symlink() {
                                     let child = remote_child(&subject, &name);
-                                    raw.stat(child)
-                                        .await
-                                        .ok()
-                                        .and_then(|attrs| target_kind(&attrs.attrs))
+                                    let (resolved, target) =
+                                        tokio::join!(raw.stat(child.clone()), raw.readlink(child));
+                                    (
+                                        resolved.ok().and_then(|attrs| target_kind(&attrs.attrs)),
+                                        target.ok().and_then(|response| {
+                                            response
+                                                .files
+                                                .into_iter()
+                                                .next()
+                                                .map(|file| file.filename)
+                                        }),
+                                    )
                                 } else {
-                                    None
+                                    (None, None)
                                 };
-                                Some(entry_from_attrs(mount, &subject, &name, file.attrs, target))
+                                Some(entry_from_attrs(
+                                    mount,
+                                    &subject,
+                                    &name,
+                                    file.attrs,
+                                    target,
+                                    target_text,
+                                ))
                             }
                         }))
                         .buffered(PIPELINE_DEPTH)
@@ -413,9 +429,12 @@ impl Vfs for SftpVfs {
         } else {
             kind_from_attrs(&link_attrs.attrs)
         };
-        Ok(Entry::new(path.clone(), name, kind)
-            .with_metadata(Some(metadata_from_attrs(name, &link_attrs.attrs)))
-            .with_link_target(link_target.map(|target| Arc::from(PathBuf::from(target)))))
+        let mut entry = Entry::new(path.clone(), name, kind)
+            .with_metadata(Some(metadata_from_attrs(name, &link_attrs.attrs)));
+        if let Some(target) = link_target {
+            entry = entry.with_link_target_text(target);
+        }
+        Ok(entry)
     }
 
     async fn exists(&self, path: &VfsPath) -> bool {
@@ -432,6 +451,51 @@ impl Vfs for SftpVfs {
                 }
                 Err(_) => false,
             })
+    }
+
+    async fn read_link(&self, path: &VfsPath) -> ferret_vfs::Result<PathBuf> {
+        let remote = self.remote_path(path)?;
+        let raw = self.raw.clone();
+        let subject = path.clone();
+        let response = crate::spawn(async move { raw.readlink(remote).await })
+            .await
+            .map_err(|error| error.into_vfs("read symbolic link", &subject))?
+            .map_err(|error| map_error(error, "read symbolic link", &subject))?;
+        let target = response
+            .files
+            .into_iter()
+            .next()
+            .map(|file| file.filename)
+            .ok_or_else(|| invalid_path(&subject, "the server returned no symlink target"))?;
+        Ok(PathBuf::from(target))
+    }
+
+    async fn create_symlink(
+        &self,
+        link: &VfsPath,
+        target: &str,
+        _kind: SymlinkKind,
+    ) -> ferret_vfs::Result<()> {
+        let remote = self.remote_path(link)?;
+        if target.is_empty() || target.as_bytes().contains(&0) {
+            return Err(VfsError::Io {
+                action: "create symbolic link",
+                path: link.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "the symbolic-link target is empty or contains NUL",
+                ),
+            });
+        }
+        self.cache.invalidate(&remote);
+        let raw = self.raw.clone();
+        let subject = link.clone();
+        let target = target.to_owned();
+        crate::spawn(async move { raw.symlink(remote, target).await })
+            .await
+            .map_err(|error| error.into_vfs("create symbolic link", &subject))?
+            .map(drop)
+            .map_err(|error| map_error(error, "create symbolic link", &subject))
     }
 
     async fn canonicalize(&self, path: &VfsPath) -> ferret_vfs::Result<VfsPath> {
@@ -932,6 +996,7 @@ fn entry_from_attrs(
     name: &str,
     attrs: FileAttributes,
     symlink_target: Option<SymlinkTarget>,
+    symlink_text: Option<String>,
 ) -> Entry {
     let path = match parent {
         VfsPath::Remote { path, .. } => VfsPath::remote(mount, join_remote(path, name)),
@@ -944,7 +1009,12 @@ fn entry_from_attrs(
     } else {
         kind_from_attrs(&attrs)
     };
-    Entry::new(path, name, kind).with_metadata(Some(metadata_from_attrs(name, &attrs)))
+    let mut entry =
+        Entry::new(path, name, kind).with_metadata(Some(metadata_from_attrs(name, &attrs)));
+    if let Some(target) = symlink_text {
+        entry = entry.with_link_target_text(target);
+    }
+    entry
 }
 
 fn kind_from_attrs(attrs: &FileAttributes) -> EntryKind {
@@ -962,10 +1032,8 @@ fn kind_from_attrs(attrs: &FileAttributes) -> EntryKind {
 fn target_kind(attrs: &FileAttributes) -> Option<SymlinkTarget> {
     if attrs.is_dir() {
         Some(SymlinkTarget::Dir)
-    } else if attrs.is_regular() {
-        Some(SymlinkTarget::File)
     } else {
-        None
+        Some(SymlinkTarget::File)
     }
 }
 

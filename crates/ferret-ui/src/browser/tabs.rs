@@ -77,6 +77,10 @@ impl Browser {
                 PaneEvent::EnterDirectory(path) => this.navigate(path.clone(), window, cx),
                 PaneEvent::OpenFile(path) => this.open_with_default(path.clone(), window, cx),
                 PaneEvent::BatchRename(paths) => this.open_batch_rename(paths.clone(), window, cx),
+                PaneEvent::CreateSymlink {
+                    target,
+                    target_kind,
+                } => this.open_symlink_dialog(target.clone(), *target_kind, window, cx),
                 PaneEvent::DropPaths {
                     sources,
                     dest,

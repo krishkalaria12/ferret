@@ -19,7 +19,7 @@
 use crate::watch::Watch;
 use crate::{
     Capabilities, Entry, FileIdentity, ListingDetail, LocalFs, Metadata, MountId, ReadDirStream,
-    RemoveMode, Result, Vfs, VfsError, VfsPath,
+    RemoveMode, Result, SymlinkKind, Vfs, VfsError, VfsPath,
 };
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -121,6 +121,7 @@ impl Router {
 /// that cannot reach a server.
 const UNMOUNTED_CAPABILITIES: Capabilities = Capabilities {
     symlinks: false,
+    create_symlinks: false,
     permissions: false,
     atomic_rename: false,
     rename_noreplace: false,
@@ -212,6 +213,20 @@ impl Vfs for Router {
         match path {
             VfsPath::Local(_) => self.local.probe(path).await,
             VfsPath::Remote { .. } => self.remote(path)?.probe(path).await,
+        }
+    }
+
+    async fn read_link(&self, path: &VfsPath) -> Result<std::path::PathBuf> {
+        match path {
+            VfsPath::Local(_) => self.local.read_link(path).await,
+            VfsPath::Remote { .. } => self.remote(path)?.read_link(path).await,
+        }
+    }
+
+    async fn create_symlink(&self, link: &VfsPath, target: &str, kind: SymlinkKind) -> Result<()> {
+        match link {
+            VfsPath::Local(_) => self.local.create_symlink(link, target, kind).await,
+            VfsPath::Remote { .. } => self.remote(link)?.create_symlink(link, target, kind).await,
         }
     }
 
@@ -342,6 +357,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             Capabilities {
                 symlinks: true,
+                create_symlinks: false,
                 permissions: true,
                 atomic_rename: false,
                 rename_noreplace: true,

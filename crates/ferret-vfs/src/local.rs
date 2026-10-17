@@ -1,7 +1,8 @@
 use crate::config::{FIRST_LISTING_BATCH, LISTING_BATCH_SIZE, LISTING_BUFFER};
 use crate::{
     Capabilities, DirEntryBatch, Entry, EntryKind, FileIdentity, ListingDetail, Metadata,
-    ReadDirStream, RemoveMode, Result, SymlinkTarget, Vfs, VfsError, VfsPath, content_hash,
+    ReadDirStream, RemoveMode, Result, SymlinkKind, SymlinkTarget, Vfs, VfsError, VfsPath,
+    content_hash,
 };
 use async_trait::async_trait;
 use futures::stream::StreamExt;
@@ -40,6 +41,7 @@ impl Vfs for LocalFs {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             symlinks: true,
+            create_symlinks: true,
             permissions: true,
             atomic_rename: true,
             rename_noreplace: cfg!(any(target_os = "macos", windows)),
@@ -193,15 +195,67 @@ impl Vfs for LocalFs {
             };
 
             let link_target = kind
-                .is_broken_symlink()
+                .is_symlink()
                 .then(|| fs::read_link(&local).ok())
                 .flatten()
-                .map(std::sync::Arc::from);
+                .map(|target| Arc::from(target.to_string_lossy().into_owned()));
 
             let name = local.file_name().unwrap_or_default().to_string_lossy();
             Ok(Entry::new(owned.clone(), name, kind)
                 .with_metadata(Some(to_metadata(&md, &owned)))
                 .with_link_target(link_target))
+        })
+        .await
+    }
+
+    async fn read_link(&self, path: &VfsPath) -> Result<PathBuf> {
+        let local = Self::require_local(path)?;
+        let owned = path.clone();
+        smol::unblock(move || {
+            fs::read_link(&local)
+                .map_err(|source| VfsError::from_io("read symbolic link", &owned, source))
+        })
+        .await
+    }
+
+    async fn create_symlink(&self, link: &VfsPath, target: &str, kind: SymlinkKind) -> Result<()> {
+        let local = Self::require_local(link)?;
+        if target.is_empty() || target.as_bytes().contains(&0) {
+            return Err(VfsError::Io {
+                action: "create symbolic link",
+                path: link.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "the symbolic-link target is empty or contains NUL",
+                ),
+            });
+        }
+        let owned = link.clone();
+        let target = target.to_owned();
+        smol::unblock(move || {
+            let target = PathBuf::from(target);
+            #[cfg(unix)]
+            {
+                let _ = kind;
+                std::os::unix::fs::symlink(&target, &local)
+                    .map_err(|source| symlink_error(&owned, source))
+            }
+            #[cfg(windows)]
+            {
+                match kind {
+                    SymlinkKind::File => std::os::windows::fs::symlink_file(&target, &local)
+                        .map_err(|source| symlink_error(&owned, source)),
+                    SymlinkKind::Directory => std::os::windows::fs::symlink_dir(&target, &local)
+                        .map_err(|source| symlink_error(&owned, source)),
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = (target, kind);
+                Err(VfsError::Unsupported {
+                    capability: "creating symbolic links",
+                })
+            }
         })
         .await
     }
@@ -370,6 +424,14 @@ impl Vfs for LocalFs {
     }
 }
 
+fn symlink_error(path: &VfsPath, source: std::io::Error) -> VfsError {
+    #[cfg(windows)]
+    if source.kind() == std::io::ErrorKind::PermissionDenied {
+        return VfsError::SymlinkPermissionRequired { path: path.clone() };
+    }
+    VfsError::from_io("create symbolic link", path, source)
+}
+
 /// Turn one batch of directory entries into rows, resolving every syscall
 /// they need in parallel (D-33).
 ///
@@ -438,13 +500,11 @@ fn convert(entry: fs::DirEntry, detail: ListingDetail) -> Entry {
         .then(|| entry.metadata().ok().map(|md| to_metadata(&md, &path)))
         .flatten();
 
-    // One `readlink`, and only for links that resolve to nothing — the row
-    // has to name what it is pointing at.
     let link_target = kind
-        .is_broken_symlink()
+        .is_symlink()
         .then(|| fs::read_link(local).ok())
         .flatten()
-        .map(std::sync::Arc::from);
+        .map(|target| Arc::from(target.to_string_lossy().into_owned()));
 
     Entry::new(path.clone(), name, kind)
         .with_metadata(metadata)

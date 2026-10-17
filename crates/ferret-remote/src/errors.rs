@@ -144,6 +144,14 @@ impl RemoteError {
     pub fn into_vfs(self, action: &'static str, path: &VfsPath) -> VfsError {
         use std::io;
 
+        if let RemoteError::Server { message, .. } = &self {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("too many levels of symbolic links")
+                || lower.contains("filesystem loop")
+            {
+                return VfsError::SymlinkLoop { path: path.clone() };
+            }
+        }
         let kind = match &self {
             RemoteError::Server { message, .. } => classify(message),
             // The one variant with an exact counterpart: the file pane draws
@@ -206,6 +214,16 @@ mod tests {
             matches!(vfs, VfsError::PermissionDenied { .. }),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_server_symlink_loop_is_named_as_one() {
+        let err = RemoteError::Server {
+            path: "/srv/x".into(),
+            message: "Too many levels of symbolic links".into(),
+        }
+        .into_vfs("read", &VfsPath::remote(ferret_vfs::MountId(1), "/srv/x"));
+        assert!(matches!(err, VfsError::SymlinkLoop { .. }), "{err:?}");
     }
 
     #[test]

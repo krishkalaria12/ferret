@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 #[cfg(unix)]
-fn only_broken_links_carry_their_target() {
+fn every_link_carries_its_raw_target() {
     let root = std::env::temp_dir().join(format!(
         "ferret-vfs-links-{}-{:?}",
         std::process::id(),
@@ -36,14 +36,18 @@ fn only_broken_links_carry_their_target() {
     let dead = by_name("dead");
     assert!(dead.kind.is_broken_symlink());
     assert_eq!(
-        dead.link_target.as_deref(),
+        dead.link_target_path(),
         Some(std::path::Path::new("/nowhere/at/all"))
     );
 
     let works = by_name("works");
     assert!(!works.kind.is_broken_symlink());
-    assert_eq!(works.link_target, None);
-    assert_eq!(by_name("real.txt").link_target, None);
+    assert_eq!(
+        works.link_target_path(),
+        Some(std::path::Path::new("real.txt"))
+    );
+    assert_eq!(works.link_target_label(), Some("real.txt"));
+    assert!(by_name("real.txt").link_target.is_none());
 
     fs::remove_dir_all(&root).ok();
 }

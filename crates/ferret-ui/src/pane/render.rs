@@ -125,6 +125,12 @@ impl Render for FilePane {
             .on_action(cx.listener(|this, _: &actions::CancelEdit, _, cx| {
                 this.cancel_rename(cx);
             }))
+            .on_action(cx.listener(|_, action: &actions::NewSymlink, _, cx| {
+                cx.emit(PaneEvent::CreateSymlink {
+                    target: action.target.clone(),
+                    target_kind: action.target_kind,
+                });
+            }))
             .on_action(cx.listener(|this, _: &actions::SelectAll, _, cx| {
                 this.folder.update(cx, |f, cx| {
                     f.select_all();
